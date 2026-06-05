@@ -43,9 +43,10 @@ def test_connection_fixture_targets_env(db):
 
     expected_dsn = os.environ.get("EXASOL_DSN", "")
     assert expected_dsn, "EXASOL_DSN must be set for this test"
-    # pyexasol stores the dsn on the connection object.
-    assert db.dsn == expected_dsn, (
-        f"Connection DSN {db.dsn!r} does not match EXASOL_DSN {expected_dsn!r}"
+    # pyexasol keeps the original connect kwargs in the public `options` dict.
+    actual_dsn = db.options.get("dsn")
+    assert actual_dsn == expected_dsn, (
+        f"Connection DSN {actual_dsn!r} does not match EXASOL_DSN {expected_dsn!r}"
     )
 
 

@@ -50,9 +50,7 @@ def test_admin_tables_created(installed):
 @pytest.mark.integration
 def test_settings_seeded_single_row(installed):
     """PREPROC.SETTINGS must contain exactly one row with the expected defaults."""
-    rows = installed.execute(
-        "SELECT mode, self_disable_allowed FROM PREPROC.SETTINGS"
-    ).fetchall()
+    rows = installed.execute("SELECT mode, self_disable_allowed FROM PREPROC.SETTINGS").fetchall()
     assert len(rows) == 1, f"Expected exactly 1 row in PREPROC.SETTINGS, got {len(rows)}"
     mode, self_disable_allowed = rows[0]
     assert mode == "convenience"
@@ -72,9 +70,12 @@ def test_my_pipeline_view_created(installed):
 @pytest.mark.integration
 def test_public_schema_grants(installed):
     """EXECUTE and SELECT on schema PREPROC_RT must be granted to PUBLIC."""
+    # Schema-level grants list the schema itself as the object:
+    # OBJECT_SCHEMA is NULL, OBJECT_NAME is the schema, OBJECT_TYPE = 'SCHEMA'.
     rows = installed.execute(
         "SELECT PRIVILEGE FROM EXA_DBA_OBJ_PRIVS "
-        "WHERE OBJECT_SCHEMA = 'PREPROC_RT' "
+        "WHERE OBJECT_NAME = 'PREPROC_RT' "
+        "AND OBJECT_TYPE = 'SCHEMA' "
         "AND GRANTEE = 'PUBLIC' "
         "AND PRIVILEGE IN ('EXECUTE', 'SELECT') "
         "ORDER BY PRIVILEGE"
@@ -94,23 +95,21 @@ def test_my_pipeline_filters_current_user(installed):
     """
     sentinel_user = "NO_SUCH_USER_XYZ"
     try:
+        # pyexasol uses named {placeholders} with a dict, not ? positional params.
         installed.execute(
             "INSERT INTO PREPROC.RESOLUTION "
             "(user_name, client_pattern, phase, script_name, function_name) "
-            "VALUES (?, NULL, 'PRE', 'DUMMY_SCRIPT', 'dummy_fn')",
-            (sentinel_user,),
+            "VALUES ({u}, NULL, 'PRE', 'DUMMY_SCRIPT', 'dummy_fn')",
+            {"u": sentinel_user},
         )
         rows = installed.execute(
-            "SELECT script_name FROM PREPROC_RT.MY_PIPELINE "
-            "WHERE script_name = 'DUMMY_SCRIPT'"
+            "SELECT script_name FROM PREPROC_RT.MY_PIPELINE WHERE script_name = 'DUMMY_SCRIPT'"
         ).fetchall()
-        assert rows == [], (
-            f"MY_PIPELINE exposed rows for '{sentinel_user}' to the current user"
-        )
+        assert rows == [], f"MY_PIPELINE exposed rows for '{sentinel_user}' to the current user"
     finally:
         installed.execute(
-            "DELETE FROM PREPROC.RESOLUTION WHERE user_name = ?",
-            (sentinel_user,),
+            "DELETE FROM PREPROC.RESOLUTION WHERE user_name = {u}",
+            {"u": sentinel_user},
         )
 
 

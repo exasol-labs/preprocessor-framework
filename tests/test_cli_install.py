@@ -55,10 +55,11 @@ def test_install_clean_database(installed):
     ).fetchone()
     assert row is not None, "PREPROC_RT.MY_PIPELINE view not found"
 
-    # Grant (50_grants.sql) — SELECT on PREPROC_RT granted to PUBLIC
+    # Grant (50_grants.sql) — SELECT on PREPROC_RT granted to PUBLIC.
+    # Schema-level grants: OBJECT_SCHEMA is NULL, the schema is the OBJECT_NAME.
     row = installed.execute(
         "SELECT PRIVILEGE FROM EXA_DBA_OBJ_PRIVS "
-        "WHERE OBJECT_SCHEMA = 'PREPROC_RT' "
+        "WHERE OBJECT_NAME = 'PREPROC_RT' AND OBJECT_TYPE = 'SCHEMA' "
         "AND GRANTEE = 'PUBLIC' AND PRIVILEGE = 'SELECT'"
     ).fetchone()
     assert row is not None, "SELECT on PREPROC_RT not granted to PUBLIC"
@@ -80,8 +81,7 @@ def test_install_prints_not_activates(installed):
     """
     # Capture the current system preprocessor value.
     before_row = installed.execute(
-        "SELECT SYSTEM_VALUE FROM EXA_PARAMETERS "
-        "WHERE PARAMETER_NAME = 'SQL_PREPROCESSOR_SCRIPT'"
+        "SELECT SYSTEM_VALUE FROM EXA_PARAMETERS WHERE PARAMETER_NAME = 'SQL_PREPROCESSOR_SCRIPT'"
     ).fetchone()
     before_value = before_row[0] if before_row else None
 
@@ -96,8 +96,7 @@ def test_install_prints_not_activates(installed):
 
     # System setting must be unchanged.
     after_row = installed.execute(
-        "SELECT SYSTEM_VALUE FROM EXA_PARAMETERS "
-        "WHERE PARAMETER_NAME = 'SQL_PREPROCESSOR_SCRIPT'"
+        "SELECT SYSTEM_VALUE FROM EXA_PARAMETERS WHERE PARAMETER_NAME = 'SQL_PREPROCESSOR_SCRIPT'"
     ).fetchone()
     after_value = after_row[0] if after_row else None
     assert before_value == after_value, (
@@ -169,6 +168,6 @@ def test_unreachable_instance_errors():
         f"stdout: {result.stdout}\nstderr: {result.stderr}"
     )
     combined = result.stdout + result.stderr
-    assert any(
-        kw in combined.lower() for kw in ("connection", "connect", "error")
-    ), f"Expected connection error mention in output:\n{combined}"
+    assert any(kw in combined.lower() for kw in ("connection", "connect", "error")), (
+        f"Expected connection error mention in output:\n{combined}"
+    )

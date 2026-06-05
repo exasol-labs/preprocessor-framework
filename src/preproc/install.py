@@ -45,71 +45,62 @@ _TOLERATE_MARKER = "--@tolerate-exists"
 _ALREADY_EXISTS_MSG = "already exists"
 
 
-def _strip_line_comments(sql: str) -> str:
-    """Remove -- line comments while preserving newlines for line-count stability."""
-    return re.sub(r"--[^\n]*", "", sql)
-
-
 def _split_statements(sql_text: str) -> list[tuple[bool, str]]:
     """Split a SQL file into (tolerate_exists, statement) pairs.
 
-    The tolerate flag is True when the --@tolerate-exists marker appears on
-    the last non-empty line before the statement's opening token.
+    Line-based: ``--`` comments are stripped BEFORE semicolon splitting, so
+    comments may freely contain semicolons. The DDL contract still forbids
+    semicolons and ``--`` sequences inside string literals (none of the
+    install files need them).
 
-    Strategy:
-      1. Walk the raw lines to track the --@tolerate-exists marker.
-      2. Split on semicolons (safe per DDL contract: no semicolons inside
-         literals, comments, or Lua bodies in these files).
-      3. Associate each resulting statement with the flag active at the time
-         the first non-whitespace token of that statement appeared.
+    The tolerate flag is True when the ``--@tolerate-exists`` marker line
+    appears before the statement's first content line.
     """
     results: list[tuple[bool, str]] = []
-    lines = sql_text.splitlines(keepends=True)
+    pending_tolerate = False  # marker seen, waiting for its statement
+    buf: list[str] = []  # content lines of the statement in progress
+    flag = False  # tolerate flag of the statement in progress
 
-    # Build a per-character flag array: is char i tolerate-flagged?
-    # We walk lines; when a --@tolerate-exists line is seen, the next
-    # non-empty non-comment content line's statement gets the flag.
-    pending_tolerate = False
-    char_tolerate: list[bool] = []
-    for line in lines:
-        stripped = line.strip()
-        if stripped == _TOLERATE_MARKER:
+    def _flush() -> None:
+        nonlocal buf
+        stmt = "\n".join(buf).strip()
+        buf = []
+        if stmt:
+            results.append((flag, stmt))
+
+    for line in sql_text.splitlines():
+        if line.strip() == _TOLERATE_MARKER:
             pending_tolerate = True
-            char_tolerate.extend([False] * len(line))
             continue
-        if stripped and not stripped.startswith("--"):
-            # This line has real SQL content; assign the pending flag.
-            char_tolerate.extend([pending_tolerate] * len(line))
+        code = re.sub(r"--.*", "", line).rstrip()
+        if not code.strip():
+            continue
+        if not buf:
+            # First content line of a new statement claims the pending marker.
+            flag = pending_tolerate
             pending_tolerate = False
-        else:
-            char_tolerate.extend([False] * len(line))
-
-    full_text = "".join(lines)
-    # Split on semicolons; include position tracking.
-    parts = full_text.split(";")
-    pos = 0
-    for part in parts:
-        part_len = len(part)
-        # Determine tolerate flag: use the flag of the first non-whitespace char.
-        flag = False
-        for i, ch in enumerate(part):
-            if not ch.isspace():
-                abs_idx = pos + i
-                if abs_idx < len(char_tolerate):
-                    flag = char_tolerate[abs_idx]
-                break
-        content = re.sub(r"--[^\n]*", "", part).strip()
-        if content:
-            results.append((flag, part.strip()))
-        pos += part_len + 1  # +1 for the semicolon itself
+        # A line may close one statement and open the next (rare but legal).
+        while ";" in code:
+            head, code = code.split(";", 1)
+            buf.append(head)
+            _flush()
+            flag = False  # a same-line follow-up statement has no marker
+        if code.strip():
+            buf.append(code)
+    _flush()  # trailing statement without a terminating semicolon
 
     return results
 
 
 def _is_already_exists_error(exc: Exception) -> bool:
-    """Return True if exc represents an Exasol 'object already exists' error."""
+    """Return True if exc represents an Exasol 'object already exists' error.
+
+    Exasol phrases this differently per object type:
+    - tables/schemas/scripts: "... already exists"
+    - roles/users (CREATE ROLE): "... conflicts with another user or role name"
+    """
     msg = str(exc).lower()
-    return _ALREADY_EXISTS_MSG in msg
+    return _ALREADY_EXISTS_MSG in msg or "conflicts with another user or role" in msg
 
 
 def _execute_statement(connection: Any, statement: str, tolerate: bool, verbose: bool) -> None:
