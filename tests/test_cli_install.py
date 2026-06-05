@@ -178,3 +178,91 @@ def test_unreachable_instance_errors():
     assert any(kw in combined.lower() for kw in ("connection", "connect", "error")), (
         f"Expected connection error mention in output:\n{combined}"
     )
+
+
+@pytest.mark.integration
+def test_install_deploys_demo_modules_and_udf(installed):
+    """Install deploys the three demo objects into PREPROC_RT.
+
+    The demo TRANSLATE/REWRITE modules and the companion transpile UDF are part
+    of the install deltas; all three must land in the runtime schema.
+    """
+    expected = ("DEMO_TRANSLATE_V1", "DEMO_AUDIT_V1", "DEMO_SQLGLOT_TRANSPILE_V1")
+    for script_name in expected:
+        row = installed.execute(
+            "SELECT SCRIPT_NAME FROM EXA_ALL_SCRIPTS "
+            "WHERE SCRIPT_SCHEMA = 'PREPROC_RT' AND SCRIPT_NAME = {n}",
+            {"n": script_name},
+        ).fetchone()
+        assert row is not None, f"PREPROC_RT.{script_name} not deployed by install"
+
+
+@pytest.mark.integration
+def test_demo_modules_and_udf_public_executable(installed):
+    """The schema-level EXECUTE grant to PUBLIC covers the new demo objects.
+
+    The demo modules and UDF rely on the existing schema-level grant rather than
+    per-object grants, so EXECUTE ON SCHEMA PREPROC_RT TO PUBLIC must be present.
+    """
+    row = installed.execute(
+        "SELECT PRIVILEGE FROM EXA_DBA_OBJ_PRIVS "
+        "WHERE OBJECT_NAME = 'PREPROC_RT' AND OBJECT_TYPE = 'SCHEMA' "
+        "AND GRANTEE = 'PUBLIC' AND PRIVILEGE = 'EXECUTE'"
+    ).fetchone()
+    assert row is not None, "EXECUTE on PREPROC_RT not granted to PUBLIC"
+
+
+@pytest.mark.integration
+def test_install_deploys_control_layer(installed):
+    """After install, all control scripts must exist in EXA_ALL_SCRIPTS.
+
+    Verifies that _deploy_admin_scripts deployed the full set of PREPROC admin
+    scripts and that _deploy_master deployed CONTROL_SUGAR_V1 into PREPROC_RT.
+    """
+    preproc_scripts = (
+        "REFRESH_CORE",
+        "RULE_ADD",
+        "RULE_DROP",
+        "RULE_ENABLE",
+        "RULE_DISABLE",
+        "RULE_LIST",
+        "SET_MODE",
+        "SET_SELF_DISABLE",
+    )
+    for script_name in preproc_scripts:
+        row = installed.execute(
+            "SELECT SCRIPT_NAME FROM EXA_ALL_SCRIPTS "
+            "WHERE SCRIPT_SCHEMA = 'PREPROC' AND SCRIPT_NAME = {n}",
+            {"n": script_name},
+        ).fetchone()
+        assert row is not None, f"PREPROC.{script_name} not deployed by install"
+
+    row = installed.execute(
+        "SELECT SCRIPT_NAME FROM EXA_ALL_SCRIPTS "
+        "WHERE SCRIPT_SCHEMA = 'PREPROC_RT' AND SCRIPT_NAME = 'CONTROL_SUGAR_V1'"
+    ).fetchone()
+    assert row is not None, "PREPROC_RT.CONTROL_SUGAR_V1 not deployed by install"
+
+
+@pytest.mark.integration
+def test_install_seeds_sugar_rule(installed):
+    """After install, PREPROC.CONFIG must contain the CONTROL_SUGAR_V1 bootstrap rule.
+
+    Verifies that 70_control_sugar_seed.sql seeded an enabled EXPAND rule for
+    the PREPROC_ADMIN role pointing at PREPROC_RT.CONTROL_SUGAR_V1 with
+    function_name 'expand'.
+    """
+    row = installed.execute(
+        "SELECT rule_id, scope_type, scope_value, phase, function_name, enabled "
+        "FROM PREPROC.CONFIG "
+        "WHERE script_name = 'PREPROC_RT.CONTROL_SUGAR_V1'"
+    ).fetchone()
+    assert row is not None, "No CONFIG rule for PREPROC_RT.CONTROL_SUGAR_V1 found after install"
+    _rule_id, scope_type, scope_value, phase, function_name, enabled = row
+    assert scope_type == "ROLE", f"Expected scope_type='ROLE', got {scope_type!r}"
+    assert scope_value == "PREPROC_ADMIN", (
+        f"Expected scope_value='PREPROC_ADMIN', got {scope_value!r}"
+    )
+    assert phase == "EXPAND", f"Expected phase='EXPAND', got {phase!r}"
+    assert function_name == "expand", f"Expected function_name='expand', got {function_name!r}"
+    assert enabled is True, f"Expected enabled=TRUE, got {enabled!r}"

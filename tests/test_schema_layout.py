@@ -128,3 +128,85 @@ def test_layout_idempotent(installed):
     run_install(installed)
     rows = installed.execute("SELECT COUNT(*) FROM PREPROC.SETTINGS").fetchval()
     assert rows == 1, f"Expected 1 row in PREPROC.SETTINGS after re-install, got {rows}"
+
+
+@pytest.mark.integration
+def test_admin_tables_have_ordinal_and_fingerprint(installed):
+    """PREPROC.RESOLUTION must have ORDINAL; PREPROC.SETTINGS must have STATE_FINGERPRINT.
+
+    Checks EXA_ALL_COLUMNS which stores names in UPPERCASE.
+    """
+    rows = installed.execute(
+        "SELECT COLUMN_NAME FROM EXA_ALL_COLUMNS "
+        "WHERE COLUMN_SCHEMA = 'PREPROC' AND COLUMN_TABLE = 'RESOLUTION' "
+        "AND COLUMN_NAME = 'ORDINAL'"
+    ).fetchall()
+    assert len(rows) == 1, "ordinal column not found in PREPROC.RESOLUTION"
+
+    rows = installed.execute(
+        "SELECT COLUMN_NAME FROM EXA_ALL_COLUMNS "
+        "WHERE COLUMN_SCHEMA = 'PREPROC' AND COLUMN_TABLE = 'SETTINGS' "
+        "AND COLUMN_NAME = 'STATE_FINGERPRINT'"
+    ).fetchall()
+    assert len(rows) == 1, "state_fingerprint column not found in PREPROC.SETTINGS"
+
+
+@pytest.mark.integration
+def test_my_pipeline_orders_phase_ordinal(installed):
+    """MY_PIPELINE must expose CLIENT_PATTERN and ORDINAL columns.
+
+    Checks EXA_ALL_COLUMNS for the PREPROC_RT.MY_PIPELINE view. Column names
+    are stored in UPPERCASE by Exasol.
+    """
+    rows = installed.execute(
+        "SELECT COLUMN_NAME FROM EXA_ALL_COLUMNS "
+        "WHERE COLUMN_SCHEMA = 'PREPROC_RT' AND COLUMN_TABLE = 'MY_PIPELINE' "
+        "ORDER BY COLUMN_ORDINAL_POSITION"
+    ).fetchall()
+    col_names = [r[0] for r in rows]
+    assert "CLIENT_PATTERN" in col_names, (
+        f"CLIENT_PATTERN not found in MY_PIPELINE columns: {col_names}"
+    )
+    assert "ORDINAL" in col_names, f"ORDINAL not found in MY_PIPELINE columns: {col_names}"
+
+
+@pytest.mark.integration
+def test_refresh_status_scripts_created_not_public(installed):
+    """PREPROC.REFRESH and PREPROC.STATUS must exist and must not be PUBLIC-executable.
+
+    Verifies the scripts appear in EXA_ALL_SCRIPTS, then checks EXA_DBA_OBJ_PRIVS
+    to confirm no EXECUTE grant to PUBLIC exists on either script.
+    """
+    rows = installed.execute(
+        "SELECT SCRIPT_NAME FROM EXA_ALL_SCRIPTS "
+        "WHERE SCRIPT_SCHEMA = 'PREPROC' "
+        "AND SCRIPT_NAME IN ('REFRESH', 'STATUS') "
+        "ORDER BY SCRIPT_NAME"
+    ).fetchall()
+    found = {r[0] for r in rows}
+    assert "REFRESH" in found, "PREPROC.REFRESH script not found in EXA_ALL_SCRIPTS"
+    assert "STATUS" in found, "PREPROC.STATUS script not found in EXA_ALL_SCRIPTS"
+
+    rows = installed.execute(
+        "SELECT OBJECT_NAME FROM EXA_DBA_OBJ_PRIVS "
+        "WHERE OBJECT_SCHEMA = 'PREPROC' "
+        "AND OBJECT_NAME IN ('REFRESH', 'STATUS') "
+        "AND GRANTEE = 'PUBLIC' "
+        "AND PRIVILEGE = 'EXECUTE'"
+    ).fetchall()
+    assert rows == [], f"REFRESH/STATUS are PUBLIC-executable: {rows}"
+
+
+@pytest.mark.integration
+def test_preproc_admin_dictionary_grant(installed):
+    """SELECT ANY DICTIONARY must be granted to PREPROC_ADMIN.
+
+    This system privilege allows the invoker-rights REFRESH and STATUS scripts
+    to read EXA_DBA_ROLE_PRIVS and EXA_DBA_USERS when called by a PREPROC_ADMIN holder.
+    """
+    rows = installed.execute(
+        "SELECT PRIVILEGE FROM EXA_DBA_SYS_PRIVS "
+        "WHERE GRANTEE = 'PREPROC_ADMIN' "
+        "AND PRIVILEGE = 'SELECT ANY DICTIONARY'"
+    ).fetchall()
+    assert len(rows) == 1, "SELECT ANY DICTIONARY not granted to PREPROC_ADMIN"

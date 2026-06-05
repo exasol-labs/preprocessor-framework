@@ -15,6 +15,13 @@ read_globals = {
     "pquery",        -- function(sql, ...) → {status, rows, ...}
     "query",         -- alias for pquery in some Exasol contexts
 
+    -- Cross-script module loading
+    "import",        -- function(name, alias); binds the module table as global <alias>
+
+    -- Result emission in DB-side Lua scripts
+    "output",        -- function(...); emits a WITH-OUTPUT log line
+    "exit",          -- function(table, colspec); terminates and returns the result set
+
     -- Exasol script context object
     "exa",           -- table; fields: meta, session_params, etc.
 
@@ -22,8 +29,10 @@ read_globals = {
     "null",
 }
 
--- sqlparsing sub-fields (prevents "accessing undefined field" warnings)
-globals = {}
+-- Globals created at runtime by import(name, alias) bindings
+globals = {
+    "preproc_module",   -- master.lua's per-rule module alias
+}
 
 -- Suppress warnings that are noise for Exasol Lua patterns
 ignore = {

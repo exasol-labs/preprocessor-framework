@@ -20,13 +20,15 @@ CREATE TABLE IF NOT EXISTS PREPROC.RESOLUTION (
     client_pattern   VARCHAR(256),
     phase            VARCHAR(32)     NOT NULL,
     script_name      VARCHAR(128)    NOT NULL,
-    function_name    VARCHAR(128)    NOT NULL
+    function_name    VARCHAR(128)    NOT NULL,
+    ordinal          DECIMAL(9, 0)
 );
 
 CREATE TABLE IF NOT EXISTS PREPROC.SETTINGS (
     mode                 VARCHAR(32)  NOT NULL,
     self_disable_allowed BOOLEAN      NOT NULL,
-    last_refresh         TIMESTAMP
+    last_refresh         TIMESTAMP,
+    state_fingerprint    VARCHAR(64)
 );
 
 CREATE TABLE IF NOT EXISTS PREPROC.PROFILES (

@@ -1,0 +1,381 @@
+# Operations
+
+[← README](../README.md) | [How it works →](how-it-works.md)
+
+## Installing
+
+### Prerequisites
+
+- Exasol 2025.x instance (DBA-level credentials required)
+- uv installed locally
+- Repository checked out
+
+### Environment variables
+
+| Variable | Required | Description |
+|---|---|---|
+| `EXASOL_DSN` | Yes | `host:port` of the Exasol cluster |
+| `EXASOL_USER` | Yes | Database user (must have DBA or schema-creation privileges) |
+| `EXASOL_PASSWORD` | Yes | Database password |
+| `EXASOL_TLS_VERIFY` | No | Set to `0` or `false` to disable TLS certificate verification |
+
+```bash
+export EXASOL_DSN=myhost:8563
+export EXASOL_USER=sys
+export EXASOL_PASSWORD=exasol
+```
+
+### Running the installer
+
+```bash
+uv sync
+uv run preproc install
+```
+
+Optional `--verbose` flag prints each SQL statement before execution:
+
+```bash
+uv run preproc install --verbose
+```
+
+**What the installer creates:**
+
+| Object | Type |
+|---|---|
+| `PREPROC_ADMIN` | Role |
+| `PREPROC` | Schema (owned by `PREPROC_ADMIN`) |
+| `PREPROC.CONFIG` | Table |
+| `PREPROC.RESOLUTION` | Table |
+| `PREPROC.SETTINGS` | Table (seeded with one default row) |
+| `PREPROC.PROFILES` | Table |
+| `PREPROC.REFRESH_CORE` | Lua script (importable refresh module; no RETURNS TABLE) |
+| `PREPROC.REFRESH` | Lua script (owned by `PREPROC_ADMIN`) |
+| `PREPROC.STATUS` | Lua script (owned by `PREPROC_ADMIN`) |
+| `PREPROC.RULE_ADD` | Lua script (add a CONFIG rule) |
+| `PREPROC.RULE_DROP` | Lua script (delete a CONFIG rule) |
+| `PREPROC.RULE_ENABLE` | Lua script (enable a CONFIG rule) |
+| `PREPROC.RULE_DISABLE` | Lua script (disable a CONFIG rule) |
+| `PREPROC.RULE_LIST` | Lua script (list all CONFIG rules) |
+| `PREPROC.SET_MODE` | Lua script (set framework mode) |
+| `PREPROC.SET_SELF_DISABLE` | Lua script (set self-disable policy) |
+| `PREPROC_RT` | Schema (PUBLIC-accessible) |
+| `PREPROC_RT.MY_PIPELINE` | View (definer-rights; scoped to `CURRENT_USER`) |
+| `PREPROC_RT.MASTER` | Lua script (dispatcher) |
+| `PREPROC_RT.DEMO_PING_V1` | Lua script (demo EXPAND module) |
+| `PREPROC_RT.DEMO_TRANSLATE_V1` | Lua script (demo TRANSLATE module) |
+| `PREPROC_RT.DEMO_AUDIT_V1` | Lua script (demo REWRITE module) |
+| `PREPROC_RT.DEMO_SQLGLOT_TRANSPILE_V1` | Python3 UDF (sqlglot dialect transpiler) |
+| `PREPROC_RT.CONTROL_SUGAR_V1` | Lua script (EXPAND module for PREPROC sugar syntax) |
+
+Install is idempotent: running it again against an already-installed database
+completes with exit code 0 and changes nothing.
+
+**Exit codes:**
+
+| Code | Meaning |
+|---|---|
+| 0 | Success |
+| 1 | Connection or SQL error |
+| 2 | Missing environment variable (no connection attempted) |
+
+## Single-file deploy (bundle)
+
+An offline alternative to `preproc install` for operators who want a single
+auditable SQL file:
+
+```bash
+uv run preproc bundle
+```
+
+Generates `deploy_all.sql` in the working directory. Run it in EXAplus or
+DbVisualiser against a clean Exasol instance to deploy the full schema layout
+plus all scripts. Use `--output` to specify a different path.
+
+The bundle excludes the activation `ALTER SYSTEM` statement (a DBA action that
+remains separate) and demo seed data. It is reproducible: identical sources
+always produce the same file.
+
+**TRANSLATE module cost note**: the `DEMO_TRANSLATE_V1` module calls a Python3
+UDF per translated statement. In practice this costs ~133–151 ms per statement
+(UDF VM startup, no reuse across statements). This is acceptable for a demo and
+for narrowly scoped production rules, but should not be applied to all
+statements. Scope TRANSLATE rules narrowly using `client_pattern` for
+production use.
+
+## Demo seed and teardown
+
+`sql/demo/seed.sql` stands up a self-documenting demo configuration: two demo
+roles (`DEMO_ANALYST`, `DEMO_ETL`), two demo users with different role sets,
+and CONFIG rules spanning all three phases. After seeding, the two demo users
+resolve to visibly different pipelines. Run as admin (PREPROC_ADMIN or DBA):
+
+```sql
+-- Run sql/demo/seed.sql in your SQL client
+```
+
+`sql/demo/teardown.sql` removes exactly what the seed created and re-runs
+`PREPROC.REFRESH`. It is idempotent — safe to re-run after a partial seed.
+
+Neither script activates the preprocessor.
+
+## Activating the preprocessor
+
+The installer prints but does not execute the activation statement. A DBA must
+run it manually:
+
+```sql
+ALTER SYSTEM SET sql_preprocessor_script = PREPROC_RT.MASTER;
+```
+
+This is a system-wide change. Every statement on the instance will pass through
+MASTER from this point on. If you want to limit activation to a single session
+for testing:
+
+```sql
+ALTER SESSION SET sql_preprocessor_script = PREPROC_RT.MASTER;
+```
+
+To deactivate system-wide:
+
+```sql
+ALTER SYSTEM SET sql_preprocessor_script = NULL;
+```
+
+To deactivate for a session:
+
+```sql
+ALTER SESSION SET sql_preprocessor_script = NULL;
+```
+
+Note: in convenience mode (the default), users can override the preprocessor
+for their own session with `ALTER SESSION`. In enforced mode
+(`-alterSystemProhibitsAlterSessionForPreprocessing=1`), session overrides are
+blocked and every statement pays the MASTER lookup cost (~7.3 ms/stmt).
+
+## Control surface
+
+`PREPROC_ADMIN` role holders interact with the framework through a set of
+admin scripts deployed in the `PREPROC` schema. These are the sanctioned
+management surface. **Direct DML on `PREPROC.CONFIG` or `PREPROC.RESOLUTION`
+is unsupported** — use the scripts below. The installer seeds one bootstrap
+rule (the `PREPROC_RT.CONTROL_SUGAR_V1` EXPAND rule for `PREPROC_ADMIN`) via
+`sql/install/70_control_sugar_seed.sql`; that insert is the only authorised
+direct-DML bootstrap boundary.
+
+### Admin scripts (PREPROC schema)
+
+| Script | Parameters | Description |
+|---|---|---|
+| `PREPROC.RULE_ADD` | `scope_type, scope_value, phase, script_name, function_name, norefresh` | Insert a new rule; auto-refresh unless `norefresh` is set |
+| `PREPROC.RULE_DROP` | `rule_id, norefresh` | Delete a rule by ID; auto-refresh unless `norefresh` |
+| `PREPROC.RULE_ENABLE` | `rule_id, norefresh` | Enable a disabled rule; auto-refresh unless `norefresh` |
+| `PREPROC.RULE_DISABLE` | `rule_id, norefresh` | Disable a rule without deleting it; auto-refresh unless `norefresh` |
+| `PREPROC.RULE_LIST` | — | Return all rules from CONFIG ordered by rule_id |
+| `PREPROC.SET_MODE` | `mode, norefresh` | Set the framework mode (`'convenience'` or `'enforced'`); auto-refresh unless `norefresh` |
+| `PREPROC.SET_SELF_DISABLE` | `value` | Allow or disallow user self-disable (`TRUE` / `FALSE`) |
+| `PREPROC.REFRESH` | — | Rebuild RESOLUTION from CONFIG and current role grants |
+| `PREPROC.STATUS` | — | Report whether RESOLUTION is current or stale |
+
+All mutating scripts return a result table confirming the change. All require
+`PREPROC_ADMIN` (or `EXECUTE ANY SCRIPT`, or DBA).
+
+The `norefresh` parameter accepts any non-NULL truthy value to suppress the
+automatic `PREPROC.REFRESH` call. When omitted or NULL, refresh runs
+automatically after the mutation. This is the `NOREFRESH` suffix of the sugar
+commands.
+
+### PREPROC sugar syntax (convenience mode)
+
+When the preprocessor is active and the session user holds `PREPROC_ADMIN`,
+the `PREPROC_RT.CONTROL_SUGAR_V1` EXPAND module intercepts statements that
+begin with the keyword `PREPROC` and rewrites them as `EXECUTE SCRIPT` calls.
+This gives an interactive shorthand without leaving SQL:
+
+| Sugar statement | Equivalent script call |
+|---|---|
+| `PREPROC ADD RULE scope_type scope_value phase script_name function_name` | `EXECUTE SCRIPT PREPROC.RULE_ADD(...)` |
+| `PREPROC DROP RULE rule_id` | `EXECUTE SCRIPT PREPROC.RULE_DROP(rule_id, NULL)` |
+| `PREPROC ENABLE RULE rule_id` | `EXECUTE SCRIPT PREPROC.RULE_ENABLE(rule_id, NULL)` |
+| `PREPROC DISABLE RULE rule_id` | `EXECUTE SCRIPT PREPROC.RULE_DISABLE(rule_id, NULL)` |
+| `PREPROC LIST RULES` | `EXECUTE SCRIPT PREPROC.RULE_LIST()` |
+| `PREPROC REFRESH` | `EXECUTE SCRIPT PREPROC.REFRESH()` |
+| `PREPROC STATUS` | `EXECUTE SCRIPT PREPROC.STATUS()` |
+| `PREPROC SET MODE mode` | `EXECUTE SCRIPT PREPROC.SET_MODE(mode, NULL)` |
+| `PREPROC SET SELF_DISABLE value` | `EXECUTE SCRIPT PREPROC.SET_SELF_DISABLE(value)` |
+
+Append `NOREFRESH` to any mutating command to skip the automatic refresh:
+
+```sql
+PREPROC ADD RULE ROLE ANALYSTS EXPAND PREPROC_RT.MY_MODULE_V1 expand NOREFRESH
+PREPROC REFRESH
+```
+
+The sugar module is a plain EXPAND-phase module. It is only active when the
+preprocessor is running and a `PREPROC_ADMIN`-scoped EXPAND rule points to
+`PREPROC_RT.CONTROL_SUGAR_V1`. The installer seeds exactly this rule. Statements
+that do not start with `PREPROC` are passed through unchanged.
+
+### Adding a rule
+
+Use the sugar or call the script directly:
+
+```sql
+-- Sugar (convenience mode, preprocessor active):
+PREPROC ADD RULE ROLE ANALYSTS EXPAND PREPROC_RT.MY_MODULE_V1 expand
+
+-- Direct script call:
+EXECUTE SCRIPT PREPROC.RULE_ADD('ROLE', 'ANALYSTS', 'EXPAND', 'PREPROC_RT.MY_MODULE_V1', 'expand', NULL);
+```
+
+Rules take effect after the next `PREPROC.REFRESH` run (automatic unless
+`NOREFRESH` is used).
+
+Column reference for `PREPROC.CONFIG`:
+
+| Column | Value notes |
+|---|---|
+| `rule_id` | Unique integer; lower values run first within a phase |
+| `scope_type` | `'ROLE'` to apply to all holders of a role (transitive); `'USER'` to apply to one user |
+| `scope_value` | Role name or user name |
+| `client_pattern` | Literal substring matched against client application name. NULL = always apply |
+| `phase` | `'TRANSLATE'`, `'EXPAND'`, or `'REWRITE'` |
+| `script_name` | Fully qualified script, e.g. `'PREPROC_RT.MY_MODULE_V1'` |
+| `function_name` | Exported function name, e.g. `'expand'` |
+| `enabled` | `TRUE` to include; `FALSE` to exclude from next refresh |
+| `version` | Informational integer; no dispatch semantics |
+
+## Refresh
+
+Refresh rebuilds `PREPROC.RESOLUTION` from `PREPROC.CONFIG` and the current
+database role/user grants. This is required whenever:
+
+- A new rule is added, changed, or disabled in `PREPROC.CONFIG`
+- A user is granted or revoked a role that has associated rules
+- A new database user is created who should inherit role-based rules
+
+Requires `PREPROC_ADMIN` (or `EXECUTE ANY SCRIPT`, or DBA). Run from any SQL
+client:
+
+```sql
+EXECUTE SCRIPT PREPROC.REFRESH;
+```
+
+The script returns the number of resolution rows produced and the new
+`last_refresh` timestamp.
+
+Refresh is a full rebuild: it deletes all existing RESOLUTION rows and
+reinserts the resolved set atomically. No partial state is visible during the
+rebuild.
+
+## Status
+
+Check whether RESOLUTION is current with respect to the current database
+user/role state:
+
+```sql
+EXECUTE SCRIPT PREPROC.STATUS;
+```
+
+Returns a current/stale verdict and the `last_refresh` time. Reports
+`never-refreshed` if no refresh has been run since install.
+
+Status is read-only. It never modifies RESOLUTION or SETTINGS.
+
+Requires `PREPROC_ADMIN` (or `EXECUTE ANY SCRIPT`, or DBA).
+
+## Periodic refresh
+
+The framework ships the refresh entry point only. Schedule it via an external
+cron job, CI pipeline, or any SQL-capable scheduler:
+
+```bash
+# Example: run refresh using exaplus
+exaplus -c myhost:8563 -u admin -p secret \
+    -sql "EXECUTE SCRIPT PREPROC.REFRESH"
+```
+
+If refresh is not run after role changes, users whose role memberships changed
+will run a stale pipeline until the next refresh.
+
+## Deploying a module
+
+1. Write the Lua module following the authoring contract in
+   [how-it-works.md](how-it-works.md#module-authoring-contract).
+2. Deploy it as a versioned script under a new name:
+
+```sql
+OPEN SCHEMA PREPROC_RT;
+CREATE LUA SCRIPT PREPROC_RT.MY_COMMAND_V1() AS
+<lua body here>
+/
+```
+
+3. Insert a rule in `PREPROC.CONFIG` pointing to the new script and function.
+4. Run `EXECUTE SCRIPT PREPROC.REFRESH`.
+5. Test with a session-level activation before enabling system-wide.
+
+To update an existing module, deploy as `MY_COMMAND_V2`, repoint the rule to
+the new version, refresh, then retire `MY_COMMAND_V1` once no rule references
+it. Never use `CREATE OR REPLACE` on a live module.
+
+## Troubleshooting
+
+**User cannot run any statement after activation**
+
+The most likely cause is that the user lacks EXECUTE or SELECT on `PREPROC_RT`.
+Schema-level grants should have been applied by the installer:
+
+```sql
+GRANT EXECUTE ON SCHEMA PREPROC_RT TO PUBLIC;
+GRANT SELECT ON SCHEMA PREPROC_RT TO PUBLIC;
+```
+
+Verify with:
+
+```sql
+SELECT * FROM EXA_ALL_SCHEMA_PRIVILEGES WHERE SCHEMA_NAME = 'PREPROC_RT';
+```
+
+**A custom command produces a syntax error**
+
+The EXPAND phase is fail-open. If no module claims the statement, the original
+text is passed to the engine unchanged. A syntax error from the engine means
+either:
+
+- The module is not deployed under the script name in the rule.
+- The `function_name` in the rule does not match an exported global function in
+  the module.
+- No rule for the current user matches this statement (check RESOLUTION).
+- The `client_pattern` on the rule does not match the connecting client.
+
+Check which rules apply to the current user:
+
+```sql
+SELECT * FROM PREPROC_RT.MY_PIPELINE;
+```
+
+Check whether RESOLUTION is populated for the user:
+
+```sql
+-- As a PREPROC_ADMIN user:
+SELECT * FROM PREPROC.RESOLUTION WHERE user_name = 'ALICE';
+```
+
+**A module throws but the statement still executes**
+
+This is expected fail-open behaviour. MASTER catches the error via `pcall`,
+skips the rule, and continues. Investigate the module logic directly — deploy a
+test version that surfaces the error explicitly, or check the `PREPROC.CONFIG`
+entry to confirm the script and function names are correct.
+
+**RESOLUTION looks stale after a role change**
+
+Run `EXECUTE SCRIPT PREPROC.STATUS` to confirm staleness. Then run
+`EXECUTE SCRIPT PREPROC.REFRESH` to rebuild. Consider adding a scheduled job
+so refresh runs automatically after role-grant operations.
+
+**Checking which module will handle a statement (before activation)**
+
+Write a unit test against the module's Lua function directly using pyexasol,
+or test in a session with `ALTER SESSION SET sql_preprocessor_script = PREPROC_RT.MASTER`
+before enabling system-wide.

@@ -1,0 +1,338 @@
+"""Tests for the CONTROL_SUGAR_V1 convenience EXPAND module.
+
+What this module does
+---------------------
+``PREPROC_RT.CONTROL_SUGAR_V1.expand(sqltext)`` parses the SQL-like ``PREPROC …``
+keyword grammar and rewrites each recognised command into exactly one
+``EXECUTE SCRIPT PREPROC.<SCRIPT>(...)`` call. It returns ``nil`` for any
+statement that is not a recognised ``PREPROC`` command (both non-PREPROC SQL and
+unrecognised subcommands — fail-open).
+
+Why the behavioural tests are integration tests
+------------------------------------------------
+Exasol's embedded Lua is the only interpreter that runs this code, and there is
+no standalone Lua available to the suite. To exercise ``expand`` we deploy it
+into PREPROC_RT and call it through the real preprocessor pipeline — but we do
+NOT depend on the Group B admin scripts (RULE_ADD, …) existing yet, nor on the
+Group D install seed. Instead a tiny PROBE module wraps ``expand`` and folds its
+return value into an observable ``SELECT`` literal:
+
+    probe_expand(sqltext):
+        result = sugar_mod.expand(<the real PREPROC command>)
+        return "SELECT '<result>' AS PROBE"   -- or SELECT NULL when nil
+
+The connection then fetches the expansion STRING itself as a scalar, so the
+assertions compare against the exact EXECUTE SCRIPT text the module emits —
+independent of whether the target admin scripts are deployed. The PROBE module
+is the EXPAND rule actually seeded for CURRENT_USER; the ``PREPROC`` command it
+parses is passed as the submitted statement.
+
+Shared-state discipline
+------------------------
+RESOLUTION rows for CURRENT_USER and the deployed PROBE/sugar scripts are global
+state; both are torn down unconditionally in the fixture, and the session
+preprocessor is always deactivated, mirroring test_master_dispatch.py.
+"""
+
+import subprocess
+from pathlib import Path
+
+import pytest
+
+_ACTIVATE = "ALTER SESSION SET sql_preprocessor_script = PREPROC_RT.MASTER"
+_DEACTIVATE = "ALTER SESSION SET sql_preprocessor_script = ''"
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_SUGAR_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "control_sugar_v1.lua"
+
+_SUGAR_SCRIPT = "PREPROC_RT.CONTROL_SUGAR_V1"
+_PROBE_SCRIPT = "PREPROC_RT.TEST_SUGAR_PROBE"
+
+
+def _deploy_sugar(connection):
+    """Deploy CONTROL_SUGAR_V1 from its source file under its real script name."""
+    body = _SUGAR_LUA_PATH.read_text()
+    connection.execute(f"CREATE OR REPLACE LUA SCRIPT {_SUGAR_SCRIPT}() AS\n{body}")
+
+
+def _deploy_probe(connection):
+    """Deploy a PROBE EXPAND module that surfaces sugar's return value as a literal.
+
+    ``probe_expand`` imports CONTROL_SUGAR_V1, calls its ``expand`` on the
+    submitted text, and rewrites the statement to a SELECT whose scalar IS the
+    expansion string (or NULL when ``expand`` declined). This lets the connection
+    read back the exact EXECUTE SCRIPT text without the target admin scripts
+    needing to exist.
+    """
+    connection.execute(
+        f"""CREATE OR REPLACE LUA SCRIPT {_PROBE_SCRIPT}() AS
+            import("{_SUGAR_SCRIPT}", "sugar_mod")
+            function probe_expand(sqltext)
+                local result = sugar_mod.expand(sqltext)
+                if result == nil then
+                    return "SELECT CAST(NULL AS VARCHAR(2000)) AS PROBE"
+                end
+                local escaped = result:gsub("'", "''")
+                return "SELECT '" .. escaped .. "' AS PROBE"
+            end
+        """
+    )
+
+
+def _seed_probe_rule(connection):
+    """Seed a USER-scoped EXPAND rule for CURRENT_USER pointing at the PROBE module."""
+    connection.execute(
+        "INSERT INTO PREPROC.RESOLUTION "
+        "(user_name, client_pattern, phase, script_name, function_name, ordinal) "
+        "VALUES (CURRENT_USER, NULL, 'EXPAND', {sn}, 'probe_expand', 1)",
+        {"sn": _PROBE_SCRIPT},
+    )
+
+
+def _delete_rules(connection):
+    connection.execute("DELETE FROM PREPROC.RESOLUTION WHERE user_name = CURRENT_USER")
+
+
+@pytest.fixture
+def sugar_env(installed):
+    """Deploy sugar + probe, seed the probe EXPAND rule, guarantee teardown.
+
+    Asserts the no-rules precondition (a leftover rule would shadow the probe),
+    deploys both scripts, seeds the probe rule, and on teardown unconditionally
+    deactivates the preprocessor, deletes seeded rules, and drops both scripts.
+    """
+    rule_count = installed.execute(
+        "SELECT COUNT(*) FROM PREPROC.RESOLUTION WHERE user_name = CURRENT_USER"
+    ).fetchval()
+    assert rule_count == 0, (
+        f"Expected 0 rules for CURRENT_USER before a sugar test, got {rule_count}"
+    )
+
+    _deploy_sugar(installed)
+    _deploy_probe(installed)
+    _seed_probe_rule(installed)
+    try:
+        yield installed
+    finally:
+        try:
+            installed.execute(_DEACTIVATE)
+        finally:
+            try:
+                _delete_rules(installed)
+            finally:
+                try:
+                    installed.execute(f"DROP SCRIPT {_PROBE_SCRIPT}")
+                finally:
+                    installed.execute(f"DROP SCRIPT {_SUGAR_SCRIPT}")
+
+
+def _expand(connection, command):
+    """Activate MASTER, submit ``command``, return the expansion string (or None).
+
+    The PROBE rule rewrites ``command`` to a SELECT whose scalar is exactly what
+    ``CONTROL_SUGAR_V1.expand`` returned, so the fetched value IS the expansion.
+    A NULL scalar means ``expand`` declined (returned nil).
+    """
+    connection.execute(_ACTIVATE)
+    try:
+        return connection.execute(command).fetchval()
+    finally:
+        connection.execute(_DEACTIVATE)
+
+
+@pytest.mark.integration
+def test_add_rule_expands_to_rule_add(sugar_env):
+    """ADD RULE FOR ROLE … expands to a single EXECUTE SCRIPT PREPROC.RULE_ADD call.
+
+    Every captured value (scope value, phase, script, function) must be threaded
+    as a single-quoted string argument in source order, and the scope_type literal
+    must be the keyword the command used. The exact string proves both the
+    argument order and the quoting contract.
+    """
+    result = _expand(
+        sugar_env,
+        "PREPROC ADD RULE FOR ROLE ANALYSTS PHASE EXPAND "
+        "SCRIPT PREPROC_RT.DEMO_PING_V1 FUNCTION ping",
+    )
+    assert result == (
+        "EXECUTE SCRIPT PREPROC.RULE_ADD("
+        "'ROLE', 'ANALYSTS', 'EXPAND', 'PREPROC_RT.DEMO_PING_V1', 'ping')"
+    )
+
+
+@pytest.mark.integration
+def test_add_rule_for_user_expands(sugar_env):
+    """ADD RULE FOR USER … threads the USER scope_type literal, not ROLE."""
+    result = _expand(
+        sugar_env,
+        "PREPROC ADD RULE FOR USER BOB PHASE REWRITE SCRIPT PREPROC_RT.DEMO_AUDIT_V1 FUNCTION tag",
+    )
+    assert result == (
+        "EXECUTE SCRIPT PREPROC.RULE_ADD("
+        "'USER', 'BOB', 'REWRITE', 'PREPROC_RT.DEMO_AUDIT_V1', 'tag')"
+    )
+
+
+@pytest.mark.integration
+def test_drop_rule_expands_to_rule_drop(sugar_env):
+    """DROP RULE 42 expands to RULE_DROP(42) with the rule_id UNQUOTED (numeric)."""
+    result = _expand(sugar_env, "PREPROC DROP RULE 42")
+    assert result == "EXECUTE SCRIPT PREPROC.RULE_DROP(42)"
+
+
+@pytest.mark.integration
+def test_disable_enable_expand(sugar_env):
+    """DISABLE/ENABLE RULE <id> expand to their respective control scripts.
+
+    Both carry the rule_id unquoted; the verb selects RULE_DISABLE vs RULE_ENABLE.
+    """
+    assert (
+        _expand(sugar_env, "PREPROC DISABLE RULE 42") == "EXECUTE SCRIPT PREPROC.RULE_DISABLE(42)"
+    )
+    assert _expand(sugar_env, "PREPROC ENABLE RULE 42") == "EXECUTE SCRIPT PREPROC.RULE_ENABLE(42)"
+
+
+@pytest.mark.integration
+def test_list_rules_expands(sugar_env):
+    """LIST RULES expands to the parameterless EXECUTE SCRIPT PREPROC.RULE_LIST.
+
+    A parameterless admin script must emit NO trailing parentheses — RULE_LIST is
+    invoked as a bare EXECUTE SCRIPT.
+    """
+    assert _expand(sugar_env, "PREPROC LIST RULES") == "EXECUTE SCRIPT PREPROC.RULE_LIST"
+
+
+@pytest.mark.integration
+def test_refresh_status_expand(sugar_env):
+    """REFRESH and STATUS expand to their parameterless admin scripts."""
+    assert _expand(sugar_env, "PREPROC REFRESH") == "EXECUTE SCRIPT PREPROC.REFRESH"
+    assert _expand(sugar_env, "PREPROC STATUS") == "EXECUTE SCRIPT PREPROC.STATUS"
+
+
+@pytest.mark.integration
+def test_set_commands_expand(sugar_env):
+    """SET MODE and SET SELF_DISABLE expand to the settings scripts.
+
+    SET MODE single-quotes its mode value; SET SELF_DISABLE passes its boolean
+    literal unquoted (true/false is a boolean argument, not a string).
+    """
+    assert (
+        _expand(sugar_env, "PREPROC SET MODE enforce")
+        == "EXECUTE SCRIPT PREPROC.SET_MODE('enforce')"
+    )
+    assert (
+        _expand(sugar_env, "PREPROC SET SELF_DISABLE true")
+        == "EXECUTE SCRIPT PREPROC.SET_SELF_DISABLE(true)"
+    )
+
+
+@pytest.mark.integration
+def test_norefresh_suffix_threaded(sugar_env):
+    """A trailing NOREFRESH appends a ``, true`` final argument to mutating commands.
+
+    The suffix is stripped before subcommand parsing and reappears only as the
+    extra boolean argument, so the rest of the call is byte-identical to the
+    refresh form. Covered for both an arg-bearing command (DROP) and the full
+    ADD RULE arity to prove the threading is positional and order-stable.
+    """
+    assert (
+        _expand(sugar_env, "PREPROC DROP RULE 42 NOREFRESH")
+        == "EXECUTE SCRIPT PREPROC.RULE_DROP(42, true)"
+    )
+    assert (
+        _expand(
+            sugar_env,
+            "PREPROC ADD RULE FOR ROLE X PHASE Y SCRIPT Z FUNCTION W NOREFRESH",
+        )
+        == "EXECUTE SCRIPT PREPROC.RULE_ADD('ROLE', 'X', 'Y', 'Z', 'W', true)"
+    )
+
+
+@pytest.mark.integration
+def test_norefresh_is_case_insensitive_and_keyword_case_preserved(sugar_env):
+    """Keywords match case-insensitively while captured values keep their case.
+
+    Lower-cased keywords (``preproc``, ``drop``, ``norefresh``) still dispatch,
+    and a mixed-case captured value in SET MODE is emitted verbatim — proving the
+    module upper-cases only the tokens it dispatches on.
+    """
+    assert (
+        _expand(sugar_env, "preproc drop rule 7 norefresh")
+        == "EXECUTE SCRIPT PREPROC.RULE_DROP(7, true)"
+    )
+    assert (
+        _expand(sugar_env, "PREPROC SET MODE MixedCase")
+        == "EXECUTE SCRIPT PREPROC.SET_MODE('MixedCase')"
+    )
+
+
+@pytest.mark.integration
+def test_trailing_semicolon_and_whitespace_tolerated(sugar_env):
+    """A trailing semicolon and surrounding whitespace are stripped before parsing."""
+    assert _expand(sugar_env, "   PREPROC LIST RULES ;  ") == "EXECUTE SCRIPT PREPROC.RULE_LIST"
+
+
+@pytest.mark.integration
+def test_non_preproc_declined(sugar_env):
+    """A non-PREPROC statement is declined (expand returns nil → NULL scalar).
+
+    The probe rewrites a nil return to ``SELECT NULL``, so a NULL fetch is the
+    observable signal that the module correctly stayed out of ordinary SQL.
+    """
+    assert _expand(sugar_env, "SELECT 1") is None
+
+
+@pytest.mark.integration
+def test_unrecognised_subcommand_declined(sugar_env):
+    """An unrecognised PREPROC subcommand is declined (nil), failing open.
+
+    Returning nil lets the original ``PREPROC UNKNOWN COMMAND`` text reach the
+    engine and raise a loud syntax error rather than being silently swallowed.
+    """
+    assert _expand(sugar_env, "PREPROC UNKNOWN COMMAND") is None
+
+
+@pytest.mark.integration
+def test_malformed_add_rule_declined(sugar_env):
+    """A structurally invalid ADD RULE (wrong arity) is declined rather than mis-expanded.
+
+    Dropping the FUNCTION clause leaves the command short of the fixed arity, so
+    the module must return nil instead of emitting a truncated RULE_ADD call.
+    """
+    assert _expand(sugar_env, "PREPROC ADD RULE FOR ROLE X PHASE Y SCRIPT Z") is None
+
+
+def test_sugar_passes_luacheck():
+    """The convenience module passes luacheck with zero warnings and zero errors."""
+    completed = subprocess.run(
+        ["luacheck", "sql/lua/control_sugar_v1.lua"],
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, (
+        f"luacheck failed (exit {completed.returncode}):\n{completed.stdout}\n{completed.stderr}"
+    )
+
+
+@pytest.mark.integration
+def test_sugar_bootstrap_rule_seeded(installed):
+    """After install, PREPROC.CONFIG holds an enabled EXPAND rule for the sugar module.
+
+    The install-time bootstrap (Group D) seeds a PREPROC_ADMIN-scoped EXPAND rule
+    pointing at PREPROC_RT.CONTROL_SUGAR_V1 / ``expand`` so the sugar can register
+    further rules — the chicken-and-egg resolution. This asserts that seed exists,
+    is enabled, and is in the EXPAND phase.
+    """
+    row = installed.execute(
+        "SELECT scope_type, scope_value, phase, function_name, enabled "
+        "FROM PREPROC.CONFIG "
+        "WHERE script_name = 'PREPROC_RT.CONTROL_SUGAR_V1'"
+    ).fetchall()
+    assert len(row) == 1, f"expected exactly one CONFIG rule for the sugar module, got {len(row)}"
+    scope_type, scope_value, phase, function_name, enabled = row[0]
+    assert scope_type == "ROLE"
+    assert scope_value == "PREPROC_ADMIN"
+    assert phase == "EXPAND"
+    assert function_name == "expand"
+    assert enabled is True

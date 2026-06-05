@@ -1,0 +1,5 @@
+--@tolerate-exists
+ALTER TABLE PREPROC.RESOLUTION ADD COLUMN ordinal DECIMAL(9, 0);
+
+--@tolerate-exists
+ALTER TABLE PREPROC.SETTINGS ADD COLUMN state_fingerprint VARCHAR(64);

@@ -2,16 +2,19 @@
 
 Usage:
     preproc install [--verbose]
+    preproc bundle [--output PATH]
 
 Exit codes:
     0  — success
-    1  — connection or SQL failure
+    1  — connection or SQL failure, or bundle generation failure
     2  — missing environment variables (no connection attempted)
 """
 
 import argparse
 import sys
+from pathlib import Path
 
+from preproc.bundle import run_bundle
 from preproc.connection import MissingEnvError, connect_from_env
 from preproc.install import run_install
 
@@ -41,6 +44,23 @@ def _cmd_install(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_bundle(args: argparse.Namespace) -> int:
+    """Handle the 'bundle' subcommand.
+
+    Generates the single-file deploy bundle offline (no database connection).
+    Returns the process exit code.
+    """
+    output_path = Path(args.output)
+    try:
+        count = run_bundle(output_path)
+    except Exception as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"Wrote {count} statements to {output_path}")
+    return 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="preproc",
@@ -64,6 +84,22 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Print each SQL statement before executing it.",
     )
 
+    bundle_parser = subparsers.add_parser(
+        "bundle",
+        help="Generate a single-file deploy_all.sql bundle (offline).",
+        description=(
+            "Assemble the install DDL and CREATE OR REPLACE wrappers for every "
+            "Lua script and the demo UDF into one slash-delimited SQL file. "
+            "Offline: no database connection is made. Excludes the activation "
+            "ALTER SYSTEM statement and demo seed data."
+        ),
+    )
+    bundle_parser.add_argument(
+        "--output",
+        default="deploy_all.sql",
+        help="Path to write the bundle (default: deploy_all.sql in the current directory).",
+    )
+
     return parser
 
 
@@ -78,5 +114,7 @@ def main() -> None:
 
     if args.command == "install":
         sys.exit(_cmd_install(args))
+    elif args.command == "bundle":
+        sys.exit(_cmd_bundle(args))
     else:
         parser.error(f"unknown command: {args.command}")

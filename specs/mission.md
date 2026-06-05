@@ -26,11 +26,11 @@ Who experiences it: Exasol customers running mixed workloads — BI users connec
 
 ## Core Capabilities
 
-1. **Modular dispatch** — a MASTER preprocessor resolves which transformation functions apply to the current user/client via one catalog lookup and runs only those, in a fixed phase order (TRANSLATE → REWRITE → SUGAR).
+1. **Modular dispatch** — a MASTER preprocessor resolves which transformation functions apply to the current user/client via one catalog lookup and runs only those, in a fixed phase order (TRANSLATE → EXPAND → REWRITE).
 2. **Scoped configuration** — rules defined per role, user, or connecting client; role→user expansion (incl. nested roles) is flattened offline into a resolution table; users see only their own pipeline through a CURRENT_USER-filtered view.
 3. **Session-level zero-overhead paths** — in convenience mode, no-rule sessions self-disable and rule-bearing sessions swap to generated, hash-named profile scripts with their function set baked in (+0.5 ms/stmt instead of +7.3 ms).
 4. **Dialect translation** — statements from foreign-dialect clients (e.g. Databricks SQL) are transpiled to Exasol SQL via a sqlglot Python UDF, AST-based, fail-closed.
-5. **Custom command rewriting** — non-standard administrative syntax (e.g. a backup-start command; exact syntax to be specified by the product owner) rewritten to `EXECUTE SCRIPT` helpers, with capability gated by ordinary grants on the helper.
+5. **Language extension (EXPAND)** — non-standard syntax that is *not* valid Exasol SQL — whole-statement custom commands (e.g. a backup-start command or an `LS` command; exact syntax to be specified by the product owner) expanded to `EXECUTE SCRIPT` helpers (first match terminal), and token-level conveniences (commutative, stackable) — is transformed into runnable Exasol SQL. Capability for command expansion is gated by ordinary grants on the helper.
 6. **Self-administration** — install, refresh, status, and explain operations available as CLI verbs and as framework-intercepted SQL commands (`EXPLAIN PREPROCESSOR …`, `SHOW PREPROCESSOR PIPELINE`).
 
 ## Out of Scope
@@ -49,7 +49,7 @@ Who experiences it: Exasol customers running mixed workloads — BI users connec
 | Preprocessor | Exasol's compile-time Lua hook (`sql_preprocessor_script`) that rewrites statement text before compilation |
 | MASTER | The dispatcher preprocessor script; resolves and runs the user's pipeline |
 | Module | A Lua script exporting transformation function(s); the unit of authoring, versioning, and registration |
-| Phase | Fixed pipeline stage: TRANSLATE (dialect, max 1/user, fail-closed) → REWRITE (custom commands) → SUGAR (token conveniences, must be commutative) |
+| Phase | Fixed pipeline stage, cut along "was the input already valid Exasol SQL?": TRANSLATE (foreign-dialect statements transpiled to Exasol SQL; max 1/user; fail-closed) → EXPAND (input is NOT valid Exasol SQL — language extensions that make new syntax runnable: whole-statement custom commands, first-match-terminal, plus commutative token conveniences; fail-open is inherently safe — an un-expanded statement dies in the engine with a loud syntax error) → REWRITE (input IS valid Exasol SQL — transforms that modify its behaviour: policy/filter injection, table redirection, guardrails; currently a defined-but-empty slot; fail-open-SENSITIVE because an un-applied REWRITE silently runs the original = policy bypass, so its contract must be designed fail-closed-capable from day one) |
 | Resolution table | Flattened runtime config: (user, client_pattern, phase, script, function); rebuilt by refresh, never edited directly |
 | Profile script | Generated preprocessor `P_<hash>` with a rule-set baked in; hash is a verifiable manifest over the ordered `module@version.function` list |
 | Convenience mode | Default deployment: session-level preprocessor changes allowed → self-disable and profile swapping work; users can opt out |
@@ -110,7 +110,7 @@ Two-schema, config-driven dispatch (full design rationale and measurements: `Pro
 
 - **Runtime schema `PREPROC_RT`** (PUBLIC): MASTER dispatcher, module scripts, generated profile scripts, CURRENT_USER-filtered views. Views are the privilege bridge — they read admin tables with owner rights (scripts cannot; invoker-rights verified).
 - **Admin schema `PREPROC`** (locked): config, resolution, settings, profiles tables; refresh + generator scripts.
-- **Data flow**: statement → MASTER → one pquery on the filtered view → phase pipeline (TRANSLATE fail-closed → REWRITE → SUGAR, skip-on-failure) → `setsqltext`. Convenience mode short-circuits: first statement swaps the session to a profile script or disables outright.
+- **Data flow**: statement → MASTER → one pquery on the filtered view → phase pipeline (TRANSLATE fail-closed → EXPAND fail-open-safe → REWRITE fail-open-sensitive, skip-on-failure subject to per-phase/per-rule contract) → `setsqltext`. EXPAND must precede REWRITE so behaviour-modifying rules always operate on valid, fully-expanded SQL. Convenience mode short-circuits: first statement swaps the session to a profile script or disables outright.
 - **Refresh flow**: CLI or intercepted command → role flattening (nested roles) → resolution rebuild → profile codegen (hash-manifest naming, orphan drop) → settings sync — all transactional, so rollout/rollback is a config flip.
 - **Deployment discipline**: modules are versioned objects (`NAME_V2` alongside `NAME_V1`); never `CREATE OR REPLACE` a live module; canary via scoping rules.
 
