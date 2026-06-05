@@ -78,3 +78,5 @@ def main() -> None:
 
     if args.command == "install":
         sys.exit(_cmd_install(args))
+    else:
+        parser.error(f"unknown command: {args.command}")

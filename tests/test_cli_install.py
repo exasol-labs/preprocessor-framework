@@ -83,7 +83,10 @@ def test_install_prints_not_activates(installed):
     before_row = installed.execute(
         "SELECT SYSTEM_VALUE FROM EXA_PARAMETERS WHERE PARAMETER_NAME = 'SQL_PREPROCESSOR_SCRIPT'"
     ).fetchone()
-    before_value = before_row[0] if before_row else None
+    assert before_row is not None, (
+        "SQL_PREPROCESSOR_SCRIPT not found in EXA_PARAMETERS — parameter name assumption broken"
+    )
+    before_value = before_row[0]
 
     result = _run_cli(env=os.environ.copy())
 
@@ -98,7 +101,11 @@ def test_install_prints_not_activates(installed):
     after_row = installed.execute(
         "SELECT SYSTEM_VALUE FROM EXA_PARAMETERS WHERE PARAMETER_NAME = 'SQL_PREPROCESSOR_SCRIPT'"
     ).fetchone()
-    after_value = after_row[0] if after_row else None
+    assert after_row is not None, (
+        "SQL_PREPROCESSOR_SCRIPT not found in EXA_PARAMETERS after install — "
+        "parameter name assumption broken"
+    )
+    after_value = after_row[0]
     assert before_value == after_value, (
         f"System preprocessor changed: was {before_value!r}, now {after_value!r}"
     )

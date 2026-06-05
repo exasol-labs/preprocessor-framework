@@ -1,4 +1,3 @@
--- 40_views.sql
 -- Purpose: Create the privilege-bridge view MY_PIPELINE in the runtime schema.
 -- PREPROC_RT.MY_PIPELINE runs with definer (owner) rights, so it can read PREPROC.*
 -- tables that invoker-rights Lua scripts cannot access directly.

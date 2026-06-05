@@ -1,4 +1,3 @@
--- 20_tables.sql
 -- Purpose: Create the four admin configuration tables inside the PREPROC schema.
 -- All statements use CREATE TABLE IF NOT EXISTS so re-application is a no-op.
 -- PREPROC_ADMIN becomes the implicit owner because the schema is owned by that role

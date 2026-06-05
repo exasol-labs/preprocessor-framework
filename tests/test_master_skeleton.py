@@ -45,7 +45,26 @@ def test_master_script_installed(installed):
 
 @pytest.mark.integration
 def test_normal_statement_passthrough(installed):
-    """An ordinary SELECT executes unchanged while MASTER is active."""
+    """An ordinary SELECT executes unchanged while MASTER is active.
+
+    This test also covers the no-rules row shape: MY_PIPELINE returns an
+    all-NULL phase/script/function row (the LEFT JOIN sentinel) when the
+    current user has no entries in PREPROC.RESOLUTION. MASTER must treat that
+    row as the no-rules case and pass the statement through unchanged.
+
+    Precondition: the current user has zero rules in PREPROC.RESOLUTION. If
+    this assertion fails, a leftover test rule is polluting the table and the
+    no-rules coverage claim is false.
+    """
+    # Verify the no-rules precondition explicitly so the coverage claim holds.
+    rule_count = installed.execute(
+        "SELECT COUNT(*) FROM PREPROC.RESOLUTION WHERE user_name = CURRENT_USER"
+    ).fetchval()
+    assert rule_count == 0, (
+        f"Expected 0 rules for CURRENT_USER in PREPROC.RESOLUTION, "
+        f"got {rule_count} — leftover rule invalidates the no-rules coverage claim"
+    )
+
     _activate(installed)
     try:
         value = installed.execute("SELECT 987654321 AS PROBE").fetchval()

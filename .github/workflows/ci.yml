@@ -56,7 +56,7 @@ jobs:
 
       # Lua linting — command must match plan.md Verification checklist
       - name: luacheck
-        run: luacheck sql/lua/
+        run: luacheck sql/lua/ --config .luacheckrc
 
   # ---------------------------------------------------------------------------
   # unit: pytest without integration marker (no database needed, always green)

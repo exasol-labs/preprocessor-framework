@@ -36,15 +36,24 @@ def test_admin_role_owns_schema(installed):
 
 @pytest.mark.integration
 def test_admin_tables_created(installed):
-    """CONFIG, RESOLUTION, SETTINGS, and PROFILES must exist in the PREPROC schema."""
+    """CONFIG, RESOLUTION, SETTINGS, and PROFILES must exist in the PREPROC schema.
+
+    Also asserts TABLE_OWNER = 'PREPROC_ADMIN' for all four tables. Exasol
+    assigns contained objects to the schema owner, so this catches regressions
+    where schema ownership drifts.
+    """
     rows = installed.execute(
-        "SELECT TABLE_NAME FROM EXA_ALL_TABLES "
+        "SELECT TABLE_NAME, TABLE_OWNER FROM EXA_ALL_TABLES "
         "WHERE TABLE_SCHEMA = 'PREPROC' "
         "AND TABLE_NAME IN ('CONFIG', 'RESOLUTION', 'SETTINGS', 'PROFILES') "
         "ORDER BY TABLE_NAME"
     ).fetchall()
     found = {r[0] for r in rows}
     assert found == {"CONFIG", "RESOLUTION", "SETTINGS", "PROFILES"}
+    wrong_owner = [(name, owner) for name, owner in rows if owner != "PREPROC_ADMIN"]
+    assert wrong_owner == [], (
+        f"Tables owned by unexpected owner (expected PREPROC_ADMIN): {wrong_owner}"
+    )
 
 
 @pytest.mark.integration

@@ -26,8 +26,10 @@ add an explicit connection.commit() call at the end of run_install().
 Tolerate-exists contract
 ------------------------
 A SQL statement whose preceding uncommented line is ``--@tolerate-exists`` is
-allowed to fail with an Exasol "already exists" error (error code 42505 or the
-message substring "already exists").  All other errors propagate immediately.
+allowed to fail when the error message contains "already exists" or "conflicts
+with another user or role".  Detection is by message substring only — Exasol
+phrases duplicate-object errors differently per object type, so no single error
+code covers all cases.  All other errors propagate immediately.
 """
 
 from __future__ import annotations
@@ -95,9 +97,13 @@ def _split_statements(sql_text: str) -> list[tuple[bool, str]]:
 def _is_already_exists_error(exc: Exception) -> bool:
     """Return True if exc represents an Exasol 'object already exists' error.
 
-    Exasol phrases this differently per object type:
-    - tables/schemas/scripts: "... already exists"
-    - roles/users (CREATE ROLE): "... conflicts with another user or role name"
+    Detection is by message-substring matching only — not by error code.
+    Exasol phrases duplicate-object errors differently per object type
+    (e.g. "already exists" for tables/schemas/scripts, "conflicts with another
+    user or role" for roles/users), so a single code cannot cover all cases.
+    Substring matching is intentionally narrow: it applies only to statements
+    explicitly marked --@tolerate-exists, which bounds the risk of accidentally
+    swallowing unrelated errors.
     """
     msg = str(exc).lower()
     return _ALREADY_EXISTS_MSG in msg or "conflicts with another user or role" in msg
@@ -142,7 +148,7 @@ def _deploy_master(connection: Any, verbose: bool) -> None:
     if not _MASTER_LUA_PATH.exists():
         raise FileNotFoundError(
             f"master.lua not found at {_MASTER_LUA_PATH}. "
-            "Ensure the sql/lua/master.lua file has been created (task 3.1)."
+            "Ensure the sql/lua/master.lua file exists in the repository."
         )
 
     lua_body = _MASTER_LUA_PATH.read_text(encoding="utf-8")
@@ -182,8 +188,10 @@ def run_install(connection: Any, verbose: bool = False) -> None:
 
     Steps:
       1. Apply all .sql files under sql/install/ in sorted filename order.
-         Each file is split into statements on ';'.  Statements preceded by
-         --@tolerate-exists tolerate "already exists" errors.
+         Each file is split using a comment-aware line-based splitter: ``--``
+         comments are stripped before semicolon splitting, so comments may
+         freely contain semicolons.  Statements preceded by --@tolerate-exists
+         tolerate "already exists" (and equivalent) errors.
       2. Deploy MASTER: open PREPROC_RT schema, execute CREATE OR REPLACE LUA
          SCRIPT PREPROC_RT.MASTER with the body from sql/lua/master.lua.
       3. Print (do NOT execute) the activation ALTER SYSTEM statement.

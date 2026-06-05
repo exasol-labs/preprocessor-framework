@@ -46,10 +46,13 @@ Installs the MASTER preprocessor Lua script into `PREPROC_RT` as a safe pass-thr
 ### Scenario: Lookup failure fails open
 
 * *GIVEN* MASTER is active as the system preprocessor
-* *AND* the pipeline view query raises an error or returns no row
+* *AND* the pipeline view query raises an error (thrown or pquery not-ok)
 * *WHEN* the user submits an ordinary SQL statement
 * *THEN* MASTER MUST return the original statement text unchanged (fail open)
 * *AND* MASTER MUST NOT raise an error that blocks the statement
+* *NOTE* an empty or all-NULL pipeline row is the normal no-rules case (MY_PIPELINE
+  always returns at least one row via its LEFT JOIN); that row passes through
+  and is not treated as a lookup failure
 <!-- /DELTA:NEW -->
 
 <!-- DELTA:NEW -->
