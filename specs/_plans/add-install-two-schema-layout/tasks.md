@@ -28,13 +28,13 @@
 - [x] 5.5 luacheck wired into lint step / test
 
 ## Group E: CI (last)
-- [ ] 1.5 CI workflow skeleton: uv sync, ruff, luacheck, pytest against exasol/docker-db
+- [x] 1.5 CI workflow skeleton: uv sync, ruff, luacheck, pytest against exasol/docker-db
 
 ## Verification
-- [ ] V.1 `uv sync` exit 0
-- [ ] V.2 `uv run pytest` 0 failures
-- [ ] V.3 `uv run ruff check .` + `ruff format --check .` clean
-- [ ] V.4 `luacheck sql/lua/` 0 warnings
-- [ ] V.5 Scenario coverage audit vs plan
-- [ ] V.6 Manual verification steps
-- [ ] V.7 Verification report
+- [x] V.1 `uv sync` exit 0
+- [x] V.2 `uv run pytest` 0 failures
+- [x] V.3 `uv run ruff check .` + `ruff format --check .` clean
+- [x] V.4 `luacheck sql/lua/` 0 warnings
+- [x] V.5 Scenario coverage audit vs plan
+- [x] V.6 Manual verification steps
+- [x] V.7 Verification report
