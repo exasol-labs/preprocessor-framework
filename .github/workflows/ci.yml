@@ -1,0 +1,159 @@
+# CI workflow skeleton for preprocessor-framework
+#
+# Three jobs:
+#   lint   — Python ruff + Lua luacheck (always runs, no database required)
+#   unit   — pytest -m "not integration" (always green; no database)
+#   test   — full pytest against exasol/docker-db (continue-on-error: true)
+#
+# The docker-db image (exasol/docker-db:latest-8) can take 5-10 min to start,
+# so the integration job is marked continue-on-error to avoid blocking PRs while
+# the database bootstraps.  The unit job is the mandatory gate; the integration
+# job is informational until the image is warmed in the environment.
+
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+
+  # ---------------------------------------------------------------------------
+  # lint: Python (ruff) + Lua (luacheck)
+  # ---------------------------------------------------------------------------
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install Python dependencies
+        run: uv sync
+
+      # Python linting — commands must match plan.md Verification checklist
+      - name: ruff check
+        run: uv run ruff check .
+
+      - name: ruff format check
+        run: uv run ruff format --check .
+
+      # Lua toolchain — standard leafo pattern
+      - name: Set up Lua 5.1
+        uses: leafo/gh-actions-lua@v10
+        with:
+          luaVersion: "5.1"
+
+      - name: Set up LuaRocks
+        uses: leafo/gh-actions-luarocks@v4
+
+      - name: Install luacheck
+        run: luarocks install luacheck
+
+      # Lua linting — command must match plan.md Verification checklist
+      - name: luacheck
+        run: luacheck sql/lua/
+
+  # ---------------------------------------------------------------------------
+  # unit: pytest without integration marker (no database needed, always green)
+  # ---------------------------------------------------------------------------
+  unit:
+    name: Unit tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install Python dependencies
+        run: uv sync
+
+      - name: Run unit tests
+        run: uv run pytest -m "not integration" -v
+
+  # ---------------------------------------------------------------------------
+  # test: full integration suite against exasol/docker-db
+  #
+  # continue-on-error: true — docker-db is slow to start and may flake in CI.
+  # This job is informational; the lint + unit jobs are the mandatory gates.
+  # ---------------------------------------------------------------------------
+  test:
+    name: Integration tests (docker-db)
+    runs-on: ubuntu-latest
+    # Mark continue-on-error so a slow/flaky boot does not block PRs.
+    continue-on-error: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install Python dependencies
+        run: uv sync
+
+      # Start the Exasol database container.
+      # --privileged is required by docker-db (uses cgroups internally).
+      # Port 8563 is the default Exasol client port.
+      - name: Start Exasol docker-db
+        run: |
+          docker run -d \
+            --name exasol \
+            --privileged \
+            -p 8563:8563 \
+            exasol/docker-db:latest-8
+
+      # Poll until the database is ready to accept connections.
+      # docker-db can take 5-10 minutes on a cold runner; use a generous timeout.
+      - name: Wait for Exasol to be ready
+        env:
+          EXASOL_DSN: "localhost:8563"
+          EXASOL_USER: sys
+          EXASOL_PASSWORD: exasol
+        run: |
+          uv run python - <<'EOF'
+          import time, sys
+          import pyexasol
+
+          dsn      = "localhost:8563"
+          user     = "sys"
+          password = "exasol"
+          timeout  = 600   # seconds — docker-db is slow on a cold runner
+          interval = 10    # seconds between polls
+          deadline = time.time() + timeout
+
+          print("Waiting for Exasol to accept connections …", flush=True)
+          while time.time() < deadline:
+              try:
+                  conn = pyexasol.connect(
+                      dsn=dsn, user=user, password=password,
+                      websocket_sslopt={"cert_reqs": 0},
+                  )
+                  conn.close()
+                  print("Exasol is ready.", flush=True)
+                  sys.exit(0)
+              except Exception as exc:
+                  print(f"  not ready yet ({exc}); retrying in {interval}s …", flush=True)
+                  time.sleep(interval)
+
+          print("ERROR: Exasol did not become ready within the timeout.", file=sys.stderr)
+          sys.exit(1)
+          EOF
+
+      # Run the full pytest suite (integration + unit).
+      - name: Run pytest
+        env:
+          EXASOL_DSN: "localhost:8563"
+          EXASOL_USER: sys
+          EXASOL_PASSWORD: exasol
+          # Disable TLS verification — docker-db uses a self-signed certificate.
+          EXASOL_TLS_VERIFY: "0"
+        run: uv run pytest -v
