@@ -32,3 +32,4 @@ select = ["E", "F", "I", "UP"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["integration: requires a live Exasol instance"]
