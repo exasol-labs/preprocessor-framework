@@ -250,3 +250,58 @@ def test_cli_bundle_help():
     )
     assert result.returncode == 0, result.stderr
     assert "--output" in result.stdout
+
+
+def test_release_bundle_is_framework_only(tmp_path):
+    """run_release_bundle emits the framework + control surface, no demos/UDF.
+
+    Exercised against the real repository sources (the release artifact CI ships):
+    it must contain the dispatcher, the command sugar, and the admin control
+    surface; must NOT contain any demo module or the demo UDF; must omit the
+    upgrade-only column ALTERs; and must end with a REFRESH so the seeded
+    control-sugar rule resolves on a clean install.
+    """
+    out = tmp_path / "release.sql"
+    count = bundle.run_release_bundle(out)
+    text = out.read_text()
+
+    assert count > 0
+    for present in (
+        "CREATE OR REPLACE LUA SCRIPT PREPROC_RT.MASTER()",
+        "CREATE OR REPLACE LUA SCRIPT PREPROC_RT.CONTROL_SUGAR_V1()",
+        "CREATE OR REPLACE LUA SCRIPT PREPROC.REFRESH_CORE()",
+        "CREATE OR REPLACE LUA SCRIPT PREPROC.RULE_ADD(",
+        "CREATE OR REPLACE LUA SCRIPT PREPROC.SET_MODE(",
+    ):
+        assert present in text, f"release bundle missing {present!r}"
+
+    # No demo module is *deployed* (framework comments may mention demo names —
+    # e.g. master.lua's safety contract — so match on the CREATE wrapper, not the
+    # bare substring).
+    assert "CREATE OR REPLACE LUA SCRIPT PREPROC_RT.DEMO_" not in text, (
+        "release bundle must not deploy any demo module"
+    )
+    assert "PYTHON3 SCALAR SCRIPT" not in text, "release bundle must not include the demo UDF"
+    assert "ADD COLUMN" not in text, "release bundle must omit upgrade-only column ALTERs"
+
+    # The final statement is the REFRESH that resolves the seeded sugar rule.
+    last_statement = [s for s in text.split("\n/\n") if s.strip()][-1]
+    assert "EXECUTE SCRIPT PREPROC.REFRESH" in last_statement
+    assert "\n/\n" in text, "release bundle must use slash delimiters"
+
+
+def test_cli_bundle_release_flag(tmp_path):
+    """``preproc bundle --release`` writes a framework-only file via the CLI."""
+    out = tmp_path / "release.sql"
+    result = subprocess.run(
+        ["uv", "run", "preproc", "bundle", "--release", "--output", str(out)],
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    text = out.read_text()
+    assert "PREPROC_RT.CONTROL_SUGAR_V1()" in text
+    assert "CREATE OR REPLACE LUA SCRIPT PREPROC_RT.DEMO_" not in text

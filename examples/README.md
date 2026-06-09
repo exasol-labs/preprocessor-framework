@@ -8,8 +8,9 @@ command-sugar form shown in a trailing comment).
 
 ## Prerequisites
 
-1. The framework is installed — run [`../release.sql`](../release.sql) (or
-   `uv run preproc install`) first.
+1. The framework is installed — `uv run preproc install`, or deploy the
+   generated `release.sql` (`uv run preproc bundle --release`, or the
+   `release-sql` CI artifact) — first.
 2. To see a module act on your statements, activate the preprocessor for your
    session: `ALTER SESSION SET sql_preprocessor_script = PREPROC_RT.MASTER;`
 

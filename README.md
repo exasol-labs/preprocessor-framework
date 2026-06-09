@@ -59,17 +59,29 @@ A DBA must run that statement manually to activate the preprocessor system-wide.
 
 ### 2a. Single-file deploy (alternative to CLI install)
 
-If you prefer a single SQL file over the CLI, run [`release.sql`](release.sql)
-in EXAplus or DbVisualiser against a **clean** database. It deploys the complete
-framework — the `PREPROC_ADMIN` role, both schemas, all tables, the
-`MY_PIPELINE` view, grants, the `MASTER` dispatcher, the `REFRESH`/`STATUS`
-engine, the full rule/mode admin control surface, and the `PREPROC ...` command
-sugar — and runs a final `REFRESH`. It deploys **no** demo preprocessors and
-does not activate the preprocessor (the `ALTER SYSTEM` step below still applies).
+If you prefer a single SQL file over the CLI, use `release.sql` — one file that
+deploys the complete framework: the `PREPROC_ADMIN` role, both schemas, all
+tables, the `MY_PIPELINE` view, grants, the `MASTER` dispatcher, the
+`REFRESH`/`STATUS` engine, the full rule/mode admin control surface, and the
+`PREPROC ...` command sugar, followed by a final `REFRESH`. It deploys **no**
+demo preprocessors and does not activate the preprocessor (the `ALTER SYSTEM`
+step below still applies).
 
-`release.sql` targets a clean database (its `CREATE ROLE`/`CREATE SCHEMA` are not
-guarded). For idempotent re-runs and column upgrades on an existing install, use
-`uv run preproc install` instead.
+`release.sql` is **generated from the `sql/` sources**, not committed to the
+repo, so it can never drift from the framework code. Get it either way:
+
+```bash
+# Generate locally:
+uv run preproc bundle --release          # writes ./release.sql
+```
+
+Or download the **`release-sql`** artifact built by CI on every push (Actions →
+a workflow run → Artifacts). Then run it in EXAplus or DbVisualiser against a
+**clean** database (the `/` on its own line is the statement delimiter).
+
+`release.sql` is clean-install only (its `CREATE ROLE`/`CREATE SCHEMA` are not
+guarded, and it omits the upgrade-only column ALTERs). For idempotent re-runs
+and column upgrades on an existing install, use `uv run preproc install`.
 
 ### 2b. Optional add-ons: examples/
 

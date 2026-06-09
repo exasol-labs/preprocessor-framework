@@ -1,9 +1,10 @@
 # CI workflow skeleton for preprocessor-framework
 #
-# Three jobs:
-#   lint   — Python ruff + Lua luacheck (always runs, no database required)
-#   unit   — pytest -m "not integration" (always green; no database)
-#   test   — full pytest against exasol/docker-db (continue-on-error: true)
+# Four jobs:
+#   lint    — Python ruff + Lua luacheck (always runs, no database required)
+#   unit    — pytest -m "not integration" (always green; no database)
+#   test    — full pytest against exasol/docker-db (continue-on-error: true)
+#   release — build release.sql and upload it as a downloadable artifact
 #
 # The docker-db image (exasol/docker-db:latest-8) can take 5-10 min to start,
 # so the integration job is marked continue-on-error to avoid blocking PRs while
@@ -157,3 +158,29 @@ jobs:
           # Disable TLS verification — docker-db uses a self-signed certificate.
           EXASOL_TLS_VERIFY: "0"
         run: uv run pytest -v
+
+  # release: build the single-file framework deploy and publish it as an
+  # artifact. release.sql is NOT committed to the repo — it is generated from the
+  # sql/ sources on every push so it can never drift from the framework code.
+  release:
+    name: Build release.sql
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install Python dependencies
+        run: uv sync
+
+      - name: Generate release.sql
+        run: uv run preproc bundle --release --output release.sql
+
+      - name: Upload release.sql artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-sql
+          path: release.sql
+          if-no-files-found: error

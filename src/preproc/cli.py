@@ -14,7 +14,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from preproc.bundle import run_bundle
+from preproc.bundle import run_bundle, run_release_bundle
 from preproc.connection import MissingEnvError, connect_from_env
 from preproc.install import run_install
 
@@ -48,11 +48,14 @@ def _cmd_bundle(args: argparse.Namespace) -> int:
     """Handle the 'bundle' subcommand.
 
     Generates the single-file deploy bundle offline (no database connection).
-    Returns the process exit code.
+    With --release, generates the framework-only release.sql (no demo modules);
+    otherwise the full deploy_all.sql (framework + demos + UDF). Returns the
+    process exit code.
     """
-    output_path = Path(args.output)
+    default_output = "release.sql" if args.release else "deploy_all.sql"
+    output_path = Path(args.output if args.output is not None else default_output)
     try:
-        count = run_bundle(output_path)
+        count = run_release_bundle(output_path) if args.release else run_bundle(output_path)
     except Exception as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
@@ -86,18 +89,31 @@ def _build_parser() -> argparse.ArgumentParser:
 
     bundle_parser = subparsers.add_parser(
         "bundle",
-        help="Generate a single-file deploy_all.sql bundle (offline).",
+        help="Generate a single-file deploy bundle (offline).",
         description=(
-            "Assemble the install DDL and CREATE OR REPLACE wrappers for every "
-            "Lua script and the demo UDF into one slash-delimited SQL file. "
-            "Offline: no database connection is made. Excludes the activation "
-            "ALTER SYSTEM statement and demo seed data."
+            "Assemble the install DDL and CREATE OR REPLACE wrappers into one "
+            "slash-delimited SQL file. Offline: no database connection is made. "
+            "Excludes the activation ALTER SYSTEM statement and demo seed data. "
+            "Default output is the full deploy_all.sql (framework + demo modules "
+            "+ UDF); pass --release for the framework-only release.sql."
+        ),
+    )
+    bundle_parser.add_argument(
+        "--release",
+        action="store_true",
+        default=False,
+        help=(
+            "Generate the framework-only release.sql (clean-install deploy: no "
+            "demo modules, omits upgrade-only column ALTERs, ends with REFRESH)."
         ),
     )
     bundle_parser.add_argument(
         "--output",
-        default="deploy_all.sql",
-        help="Path to write the bundle (default: deploy_all.sql in the current directory).",
+        default=None,
+        help=(
+            "Path to write the bundle (default: release.sql with --release, "
+            "otherwise deploy_all.sql, in the current directory)."
+        ),
     )
 
     return parser

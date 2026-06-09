@@ -86,8 +86,17 @@ directly. See [Session self-optimization](#session-self-optimization).
 
 ## Single-file deploy (release.sql)
 
-`release.sql` (repository root) is the offline alternative to `preproc install`:
-one auditable SQL file that deploys the complete framework. Run it in EXAplus or
+`release.sql` is the offline alternative to `preproc install`: one auditable SQL
+file that deploys the complete framework. It is **generated from the `sql/`
+sources**, never committed to the repository, so it can never drift from the
+framework code. Obtain it either way:
+
+```bash
+uv run preproc bundle --release          # writes ./release.sql
+```
+
+or download the **`release-sql`** artifact that CI builds on every push (the
+`release` job; Actions → workflow run → Artifacts). Run the file in EXAplus or
 DbVisualiser against a **clean** Exasol instance (the `/` on its own line is the
 statement delimiter — required because Lua bodies contain semicolons).
 
@@ -100,6 +109,10 @@ activate the preprocessor (the `ALTER SYSTEM` step remains a separate DBA action
 `release.sql` is clean-install only: its `CREATE ROLE` / `CREATE SCHEMA` are not
 guarded, and it omits the additive column upgrades. For an idempotent re-run, or
 to upgrade an existing install's columns, use `uv run preproc install`.
+
+The full `preproc bundle` (no `--release`) instead writes `deploy_all.sql`,
+which also bundles the demo modules and the demo UDF — handy for a one-shot demo
+environment, but not the lean framework release.
 
 ### Example preprocessors (examples/)
 

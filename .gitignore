@@ -24,3 +24,7 @@ htmlcov/
 
 # Serena MCP local project state (tooling, not a project artifact)
 .serena/
+
+# Generated deploy bundles (built by CI via `preproc bundle [--release]`)
+release.sql
+deploy_all.sql
