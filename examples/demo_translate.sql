@@ -16,8 +16,8 @@
 --   ALTER SESSION SET sql_preprocessor_script = PREPROC_RT.MASTER;
 -- =============================================================================
 
-OPEN SCHEMA PREPROC_RT
-/
+OPEN SCHEMA PREPROC_RT;
+
 
 -- =============================================================================
 -- DEMO_SQLGLOT_TRANSPILE_V1  (PREPROC_RT.DEMO_SQLGLOT_TRANSPILE_V1)
@@ -47,6 +47,8 @@ OPEN SCHEMA PREPROC_RT
 --   binds it; author a _V2 to change behaviour. DEMO_ prefix: a demonstration
 --   object, safe to leave deployed, never mistaken for a product command.
 -- =============================================================================
+
+--/
 CREATE OR REPLACE PYTHON3 SCALAR SCRIPT PREPROC_RT.DEMO_SQLGLOT_TRANSPILE_V1(dialect VARCHAR(64), txt VARCHAR(2000)) RETURNS VARCHAR(2000) AS
 import sqlglot
 def run(ctx):
@@ -57,6 +59,7 @@ def run(ctx):
         return 'ERR:' + str(e)
 /
 
+--/
 CREATE OR REPLACE LUA SCRIPT PREPROC_RT.DEMO_TRANSLATE_V1() AS
 -- =============================================================================
 -- DEMO_TRANSLATE_V1 preprocessor module  (PREPROC_RT.DEMO_TRANSLATE_V1)
@@ -128,6 +131,7 @@ end
 /
 
 
+
 -- -----------------------------------------------------------------------------
 -- Register this module with the framework
 -- -----------------------------------------------------------------------------
@@ -141,7 +145,6 @@ end
 -- usable in convenience mode once the preprocessor is active and you hold
 -- PREPROC_ADMIN.
 
-EXECUTE SCRIPT PREPROC.RULE_ADD('ROLE', 'PREPROC_ADMIN', 'TRANSLATE', 'PREPROC_RT.DEMO_TRANSLATE_V1', 'translate', NULL)
-/
+EXECUTE SCRIPT PREPROC.RULE_ADD('ROLE', 'PREPROC_ADMIN', 'TRANSLATE', 'PREPROC_RT.DEMO_TRANSLATE_V1', 'translate', NULL);
 
 --   PREPROC ADD RULE ROLE PREPROC_ADMIN TRANSLATE PREPROC_RT.DEMO_TRANSLATE_V1 translate
