@@ -12,27 +12,25 @@
 -- one per file, each self-registering — add only the ones you want.
 --
 -- HOW TO RUN
---   Run the whole file in EXAplus or DbVisualiser against a CLEAN database. The
---   `/` on its own line is the statement delimiter (required because Lua bodies
---   contain semicolons). Re-running on an already-installed database will error
---   on CREATE ROLE / CREATE SCHEMA (Exasol has no IF NOT EXISTS for the role);
---   use `preproc install` for idempotent (re-runnable) installs.
+--   Run the whole file in EXAplus or DbVisualiser against a CLEAN database.
+--   Plain SQL statements are terminated by `;`. Each Lua script is wrapped in an
+--   EXAplus block delimiter: a `--/` on its own line opens the block and a `/` on
+--   its own line closes it (required because the Lua bodies contain semicolons).
+--   Re-running on an already-installed database will error on CREATE ROLE /
+--   CREATE SCHEMA (Exasol has no IF NOT EXISTS for the role); use
+--   `preproc install` for idempotent (re-runnable) installs.
 --
 -- ACTIVATION (deliberately NOT done here — a DBA decision)
 --   ALTER SYSTEM SET sql_preprocessor_script = PREPROC_RT.MASTER;
 -- =============================================================================
 
-CREATE ROLE PREPROC_ADMIN
-/
+CREATE ROLE PREPROC_ADMIN;
 
-CREATE SCHEMA IF NOT EXISTS PREPROC
-/
+CREATE SCHEMA IF NOT EXISTS PREPROC;
 
-CREATE SCHEMA IF NOT EXISTS PREPROC_RT
-/
+CREATE SCHEMA IF NOT EXISTS PREPROC_RT;
 
-ALTER SCHEMA PREPROC CHANGE OWNER PREPROC_ADMIN
-/
+ALTER SCHEMA PREPROC CHANGE OWNER PREPROC_ADMIN;
 
 CREATE TABLE IF NOT EXISTS PREPROC.CONFIG (
     rule_id          DECIMAL(18, 0)  NOT NULL,
@@ -44,8 +42,7 @@ CREATE TABLE IF NOT EXISTS PREPROC.CONFIG (
     function_name    VARCHAR(128)    NOT NULL,
     enabled          BOOLEAN         NOT NULL,
     version          DECIMAL(9, 0)   NOT NULL
-)
-/
+);
 
 CREATE TABLE IF NOT EXISTS PREPROC.RESOLUTION (
     user_name        VARCHAR(128)    NOT NULL,
@@ -55,29 +52,25 @@ CREATE TABLE IF NOT EXISTS PREPROC.RESOLUTION (
     function_name    VARCHAR(128)    NOT NULL,
     ordinal          DECIMAL(9, 0),
     profile_hash     VARCHAR(64)
-)
-/
+);
 
 CREATE TABLE IF NOT EXISTS PREPROC.SETTINGS (
     mode                 VARCHAR(32)  NOT NULL,
     self_disable_allowed BOOLEAN      NOT NULL,
     last_refresh         TIMESTAMP,
     state_fingerprint    VARCHAR(64)
-)
-/
+);
 
 CREATE TABLE IF NOT EXISTS PREPROC.PROFILES (
     profile_hash  VARCHAR(64)   NOT NULL,
     manifest      VARCHAR(4000) NOT NULL,
     created_at    TIMESTAMP     NOT NULL,
     orphaned_at   TIMESTAMP
-)
-/
+);
 
 INSERT INTO PREPROC.SETTINGS (mode, self_disable_allowed, last_refresh)
 SELECT 'convenience', FALSE, NULL
-WHERE NOT EXISTS (SELECT 1 FROM PREPROC.SETTINGS)
-/
+WHERE NOT EXISTS (SELECT 1 FROM PREPROC.SETTINGS);
 
 CREATE OR REPLACE VIEW PREPROC_RT.MY_PIPELINE AS
 SELECT
@@ -92,17 +85,13 @@ SELECT
 FROM PREPROC.SETTINGS s
 LEFT JOIN PREPROC.RESOLUTION r
     ON r.user_name = CURRENT_USER
-ORDER BY r.phase, r.ordinal
-/
+ORDER BY r.phase, r.ordinal;
 
-GRANT EXECUTE ON SCHEMA PREPROC_RT TO PUBLIC
-/
+GRANT EXECUTE ON SCHEMA PREPROC_RT TO PUBLIC;
 
-GRANT SELECT ON SCHEMA PREPROC_RT TO PUBLIC
-/
+GRANT SELECT ON SCHEMA PREPROC_RT TO PUBLIC;
 
-GRANT SELECT ANY DICTIONARY TO PREPROC_ADMIN
-/
+GRANT SELECT ANY DICTIONARY TO PREPROC_ADMIN;
 
 INSERT INTO PREPROC.CONFIG
     (rule_id, scope_type, scope_value, client_pattern, phase, script_name, function_name, enabled, version)
@@ -118,12 +107,11 @@ SELECT
     1
 WHERE NOT EXISTS (
     SELECT 1 FROM PREPROC.CONFIG WHERE script_name = 'PREPROC_RT.CONTROL_SUGAR_V1'
-)
-/
+);
 
-OPEN SCHEMA PREPROC_RT
-/
+OPEN SCHEMA PREPROC_RT;
 
+--/
 CREATE OR REPLACE LUA SCRIPT PREPROC_RT.MASTER() AS
 -- =============================================================================
 -- MASTER preprocessor dispatcher  (PREPROC_RT.MASTER)
@@ -381,6 +369,7 @@ if sqltext ~= sqlparsing.getsqltext() then
 end
 /
 
+--/
 CREATE OR REPLACE LUA SCRIPT PREPROC_RT.CONTROL_SUGAR_V1() AS
 -- =============================================================================
 -- CONTROL_SUGAR_V1 preprocessor module  (PREPROC_RT.CONTROL_SUGAR_V1)
@@ -703,9 +692,9 @@ function expand(sqltext)
 end
 /
 
-OPEN SCHEMA PREPROC
-/
+OPEN SCHEMA PREPROC;
 
+--/
 CREATE OR REPLACE LUA SCRIPT PREPROC.REFRESH_CORE() AS
 -- =============================================================================
 -- REFRESH_CORE shared resolution rebuild  (PREPROC.REFRESH_CORE)
@@ -1424,6 +1413,7 @@ function rebuild()
 end
 /
 
+--/
 CREATE OR REPLACE LUA SCRIPT PREPROC.REFRESH() RETURNS TABLE AS
 -- =============================================================================
 -- REFRESH preprocessor resolver  (PREPROC.REFRESH)
@@ -1495,6 +1485,7 @@ exit(
 )
 /
 
+--/
 CREATE OR REPLACE LUA SCRIPT PREPROC.STATUS() RETURNS TABLE AS
 -- =============================================================================
 -- STATUS preprocessor staleness probe  (PREPROC.STATUS)
@@ -1597,6 +1588,7 @@ exit(
 )
 /
 
+--/
 CREATE OR REPLACE LUA SCRIPT PREPROC.RULE_ADD(scope_type, scope_value, phase, script_name, function_name, norefresh) RETURNS TABLE AS
 -- =============================================================================
 -- RULE_ADD preprocessor rule installer  (PREPROC.RULE_ADD)
@@ -1756,6 +1748,7 @@ end
 exit({{rule_id}}, "rule_id DECIMAL(18,0)")
 /
 
+--/
 CREATE OR REPLACE LUA SCRIPT PREPROC.RULE_DROP(rule_id, norefresh) RETURNS TABLE AS
 -- =============================================================================
 -- RULE_DROP preprocessor rule remover  (PREPROC.RULE_DROP)
@@ -1814,6 +1807,7 @@ end
 exit({{rows_removed}}, "rows_removed DECIMAL(9,0)")
 /
 
+--/
 CREATE OR REPLACE LUA SCRIPT PREPROC.RULE_ENABLE(rule_id, norefresh) RETURNS TABLE AS
 -- =============================================================================
 -- RULE_ENABLE preprocessor rule activator  (PREPROC.RULE_ENABLE)
@@ -1870,6 +1864,7 @@ end
 exit({{rows_updated}}, "rows_updated DECIMAL(9,0)")
 /
 
+--/
 CREATE OR REPLACE LUA SCRIPT PREPROC.RULE_DISABLE(rule_id, norefresh) RETURNS TABLE AS
 -- =============================================================================
 -- RULE_DISABLE preprocessor rule deactivator  (PREPROC.RULE_DISABLE)
@@ -1926,6 +1921,7 @@ end
 exit({{rows_updated}}, "rows_updated DECIMAL(9,0)")
 /
 
+--/
 CREATE OR REPLACE LUA SCRIPT PREPROC.RULE_LIST() RETURNS TABLE AS
 -- =============================================================================
 -- RULE_LIST preprocessor rule inventory  (PREPROC.RULE_LIST)
@@ -1976,6 +1972,7 @@ exit(
 )
 /
 
+--/
 CREATE OR REPLACE LUA SCRIPT PREPROC.SET_MODE(mode, norefresh) RETURNS TABLE AS
 -- =============================================================================
 -- SET_MODE preprocessor mode setter  (PREPROC.SET_MODE)
@@ -2042,6 +2039,7 @@ end
 exit({{mode}}, "mode VARCHAR(32)")
 /
 
+--/
 CREATE OR REPLACE LUA SCRIPT PREPROC.SET_SELF_DISABLE(value) RETURNS TABLE AS
 -- =============================================================================
 -- SET_SELF_DISABLE preprocessor self-disable toggle  (PREPROC.SET_SELF_DISABLE)
@@ -2086,6 +2084,5 @@ end
 exit({{value}}, "self_disable_allowed BOOLEAN")
 /
 
-EXECUTE SCRIPT PREPROC.REFRESH
-/
+EXECUTE SCRIPT PREPROC.REFRESH;
 
