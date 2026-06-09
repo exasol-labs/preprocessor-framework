@@ -21,9 +21,10 @@ Owned by the `PREPROC_ADMIN` role. Not accessible to PUBLIC. Holds:
 | Object | Purpose |
 |---|---|
 | `PREPROC.CONFIG` | Rule definitions — the operator-editable source of truth |
-| `PREPROC.RESOLUTION` | Flattened per-user rules — rebuilt by `REFRESH`, never edited directly |
+| `PREPROC.RESOLUTION` | Flattened per-user rules (incl. each chain's `profile_hash`) — rebuilt by `REFRESH`, never edited directly |
 | `PREPROC.SETTINGS` | Mode, self-disable flag, last refresh time, state fingerprint |
-| `PREPROC.PROFILES` | Generated profile scripts (hash → manifest) |
+| `PREPROC.PROFILES` | Profile manifest registry (`profile_hash` → `manifest`, `created_at`, `orphaned_at`) driving the retire-then-reclaim lifecycle |
+| `PREPROC.REFRESH_CORE` | Importable Lua module: the atomic rebuild + profile codegen + cleanup |
 | `PREPROC.REFRESH` | DB-side Lua script that rebuilds RESOLUTION |
 | `PREPROC.STATUS` | DB-side Lua script that reports staleness |
 
@@ -33,8 +34,9 @@ EXECUTE and SELECT on this schema are granted to PUBLIC. Holds:
 
 | Object | Purpose |
 |---|---|
-| `PREPROC_RT.MASTER` | The dispatcher preprocessor script |
-| `PREPROC_RT.MY_PIPELINE` | Definer-rights view: current user's resolved pipeline |
+| `PREPROC_RT.MASTER` | The dispatcher preprocessor script — also the single source for every retirement stub (see [session self-optimization](#session-self-optimization-zero-overhead-paths)) |
+| `PREPROC_RT.MY_PIPELINE` | Definer-rights view: current user's resolved pipeline, plus `mode` and `profile_hash` |
+| `PREPROC_RT.P_<hash>` | Generated per-chain profile scripts (one per distinct resolved rule chain); the swap target for convenience-mode sessions |
 | `PREPROC_RT.DEMO_PING_V1` | Demo command module (EXPAND phase) |
 | `PREPROC_RT.DEMO_TRANSLATE_V1` | Demo TRANSLATE module |
 | `PREPROC_RT.DEMO_AUDIT_V1` | Demo REWRITE module |
@@ -130,6 +132,7 @@ atomically by `PREPROC.REFRESH`. Columns:
 | `script_name` | VARCHAR(128) | Fully qualified module script |
 | `function_name` | VARCHAR(128) | Function to call |
 | `ordinal` | DECIMAL(9,0) | Within-phase dispatch order (derived from `rule_id`) |
+| `profile_hash` | VARCHAR(64) | Content hash of the user's full ordered chain; names the generated `PREPROC_RT.P_<hash>` profile script. NULL for users with no rules. |
 
 ROLE-scoped rules expand transitively through nested role grants (Exasol
 `CONNECT BY` over `EXA_DBA_ROLE_PRIVS`). A user's resolved pipeline is the
@@ -159,6 +162,83 @@ MASTER enforces three layers of fail-open behaviour:
    erroring module skips that rule and continues; it never blocks the statement.
 
 `setsqltext` is called only when dispatch actually changed the statement text.
+
+## Session self-optimization (zero-overhead paths)
+
+The MASTER lookup costs ~7.3 ms per statement. In **convenience** mode the
+framework pays that cost only on a session's **first** statement, then
+self-optimizes for the rest of the session. In **strict** mode no optimization
+happens and every statement pays the full lookup (the deliberate trade-off for a
+posture that never lets a session repoint itself).
+
+After dispatching statement 1, MASTER (still in convenience mode) does one of:
+
+| Session | Action after statement 1 | Subsequent per-statement cost |
+|---|---|---|
+| No resolved rules, `self_disable_allowed = TRUE` | `ALTER SESSION SET sql_preprocessor_script = ''` — clears the preprocessor | ~0 ms (no preprocessor) |
+| No resolved rules, `self_disable_allowed = FALSE` | nothing — stays on MASTER | ~7.3 ms |
+| Has resolved rules | `ALTER SESSION SET sql_preprocessor_script = PREPROC_RT.P_<hash>` — repoints to the baked profile | ~0.5 ms (no MY_PIPELINE lookup) |
+
+The swap is issued via `pquery` *after* dispatch and *before* `setsqltext`, and
+is wrapped in `pcall`: a failed swap (e.g. the profile script is unexpectedly
+missing) leaves the session on MASTER — fail-open, never blocking the statement.
+The `ALTER SESSION` it issues is itself caught by MASTER's control-statement
+guard, so there is no recursion.
+
+### Profile scripts (`PREPROC_RT.P_<hash>`)
+
+Profiles are **generated eagerly during `REFRESH`**, under the admin caller's
+rights — MASTER (invoker rights) cannot create scripts, so it never generates
+them on demand. For each distinct resolved chain, `REFRESH_CORE` computes a
+content hash over the ordered `(phase, ordinal, script_name, function_name,
+client_pattern)` manifest and `CREATE OR REPLACE`s `PREPROC_RT.P_<hash>` with the
+chain's rules **baked into a static Lua table**. A profile reproduces MASTER's
+dispatch semantics exactly (guard, client matching, phase order, per-rule
+fail-open, EXPAND first-match-terminal) but issues **no `MY_PIPELINE` lookup** —
+that absent per-statement query is the entire speedup. Two chains that differ in
+rules, order, or `client_pattern` hash differently and get distinct profiles;
+identical chains share one. Codegen happens inside the same atomic rebuild as the
+RESOLUTION write, so a committed `profile_hash` never names a script that does
+not yet exist.
+
+### Profile cleanup: retire then reclaim
+
+When a chain disappears (rules removed/changed), its `P_<hash>` may still be the
+active preprocessor of a live session, so it is **never dropped on the refresh
+that orphans it**. Instead `REFRESH_CORE` runs a generational lifecycle inside
+the atomic rebuild, in fixed order:
+
+1. **Generate** — `CREATE OR REPLACE` the real baked body for every current
+   chain; clear `orphaned_at` for any re-adopted hash.
+2. **Retire** — for each hash no longer referenced and not already retired,
+   replace its body with the **retirement stub** and stamp `orphaned_at =
+   CURRENT_TIMESTAMP`.
+3. **Reclaim** — for each hash retired on a *prior* refresh that is provably
+   unpinned, `DROP SCRIPT` it and delete its `PREPROC.PROFILES` row.
+
+The **retirement stub is byte-for-byte `PREPROC_RT.MASTER`'s own body**, read
+back from the catalog (`EXA_ALL_SCRIPTS`) at refresh time. A session still pinned
+to a retired profile therefore behaves exactly like MASTER on its next statement:
+it re-runs the full resolve → dispatch → swap for that statement (transforming it
+under the *now-current* pipeline — no untransformed gap) and repoints itself to
+the correct current target. Because the stub is sourced from MASTER, there is one
+source of truth for the dispatch contract; a change to `master.lua` propagates to
+every stub created or refreshed afterward.
+
+The reclaim criterion is **login-time based**: a retired hash is dropped only
+when no active session has `LOGIN_TIME < orphaned_at` (any session that could
+still be pinned must have logged in before the orphaning). A `reclaim_cutoff`
+captured at the start of each rebuild excludes hashes retired by the *current*
+refresh, making never-same-refresh-drop true by construction. Zero qualifying
+sessions ⇒ all retired profiles are reclaimable.
+
+> **Design note.** An earlier design factored the dispatch logic into an
+> importable `PREPROC_RT.MASTER_CORE` module that both MASTER and the stub would
+> `import`. This proved infeasible: in the Exasol preprocessor context, dynamic
+> `import()` of a rule module works only at top-level script scope, never from
+> inside a function of an imported module — so the wrapper silently fail-opened
+> every dispatch. MASTER is therefore the single canonical **inline** dispatcher,
+> and the stub is sourced from MASTER's catalog body.
 
 ## Module authoring contract
 

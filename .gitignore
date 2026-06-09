@@ -21,3 +21,6 @@ htmlcov/
 .idea/
 .vscode/
 *.swp
+
+# Serena MCP local project state (tooling, not a project artifact)
+.serena/

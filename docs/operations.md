@@ -59,8 +59,8 @@ uv run preproc install --verbose
 | `PREPROC.SET_MODE` | Lua script (set framework mode) |
 | `PREPROC.SET_SELF_DISABLE` | Lua script (set self-disable policy) |
 | `PREPROC_RT` | Schema (PUBLIC-accessible) |
-| `PREPROC_RT.MY_PIPELINE` | View (definer-rights; scoped to `CURRENT_USER`) |
-| `PREPROC_RT.MASTER` | Lua script (dispatcher) |
+| `PREPROC_RT.MY_PIPELINE` | View (definer-rights; scoped to `CURRENT_USER`; exposes `mode` + `profile_hash`) |
+| `PREPROC_RT.MASTER` | Lua script (dispatcher; also the source body for retirement stubs) |
 | `PREPROC_RT.DEMO_PING_V1` | Lua script (demo EXPAND module) |
 | `PREPROC_RT.DEMO_TRANSLATE_V1` | Lua script (demo TRANSLATE module) |
 | `PREPROC_RT.DEMO_AUDIT_V1` | Lua script (demo REWRITE module) |
@@ -70,6 +70,12 @@ uv run preproc install --verbose
 Install is idempotent: running it again against an already-installed database
 completes with exit code 0 and changes nothing.
 
+In addition to these fixed objects, `PREPROC.REFRESH` generates one
+`PREPROC_RT.P_<hash>` **profile script** per distinct resolved rule chain (the
+swap targets for convenience-mode sessions). These are created, retired, and
+reclaimed automatically by the refresh path — operators do not manage them
+directly. See [Session self-optimization](#session-self-optimization).
+
 **Exit codes:**
 
 | Code | Meaning |
@@ -78,22 +84,39 @@ completes with exit code 0 and changes nothing.
 | 1 | Connection or SQL error |
 | 2 | Missing environment variable (no connection attempted) |
 
-## Single-file deploy (bundle)
+## Single-file deploy (release.sql)
 
-An offline alternative to `preproc install` for operators who want a single
-auditable SQL file:
+`release.sql` (repository root) is the offline alternative to `preproc install`:
+one auditable SQL file that deploys the complete framework. Run it in EXAplus or
+DbVisualiser against a **clean** Exasol instance (the `/` on its own line is the
+statement delimiter — required because Lua bodies contain semicolons).
 
-```bash
-uv run preproc bundle
-```
+It deploys the `PREPROC_ADMIN` role, both schemas, all tables, the `MY_PIPELINE`
+view, schema grants, the `MASTER` dispatcher, the `REFRESH`/`STATUS` engine, the
+full rule/mode admin control surface, and the `PREPROC ...` command sugar, then
+runs a final `REFRESH`. It deploys **no** demo preprocessors and does **not**
+activate the preprocessor (the `ALTER SYSTEM` step remains a separate DBA action).
 
-Generates `deploy_all.sql` in the working directory. Run it in EXAplus or
-DbVisualiser against a clean Exasol instance to deploy the full schema layout
-plus all scripts. Use `--output` to specify a different path.
+`release.sql` is clean-install only: its `CREATE ROLE` / `CREATE SCHEMA` are not
+guarded, and it omits the additive column upgrades. For an idempotent re-run, or
+to upgrade an existing install's columns, use `uv run preproc install`.
 
-The bundle excludes the activation `ALTER SYSTEM` statement (a DBA action that
-remains separate) and demo seed data. It is reproducible: identical sources
-always produce the same file.
+### Example preprocessors (examples/)
+
+The `examples/` folder holds opt-in preprocessor modules, one per file, each
+ending with the `RULE_ADD` command that registers it. Deploy the ones you want
+after `release.sql`:
+
+| File | Phase | Adds |
+|------|-------|------|
+| `examples/demo_ping.sql` | EXPAND | `PING` → `SELECT 'PONG'` |
+| `examples/demo_translate.sql` | TRANSLATE | dialect transpilation (`sqlglot` UDF + module) |
+| `examples/demo_audit.sql` | REWRITE | inert `/* PREPROC_AUDIT user=… */` annotation |
+| `examples/confd_admin.sql` | EXPAND | `CONTROL DATABASE …` / `CONTROL BUCKETFS …` via the Exasol ConfD gateway (needs a `CONFD_CONNECTION`; see the file header) |
+
+Each example's registration rule is scoped to `ROLE PREPROC_ADMIN` (the confd
+example to `ROLE DBA`); edit the scope in the file's trailing `RULE_ADD` to suit,
+and note a user must HOLD that role for the rule to resolve to them.
 
 **TRANSLATE module cost note**: the `DEMO_TRANSLATE_V1` module calls a Python3
 UDF per translated statement. In practice this costs ~133–151 ms per statement
@@ -147,10 +170,21 @@ To deactivate for a session:
 ALTER SESSION SET sql_preprocessor_script = NULL;
 ```
 
-Note: in convenience mode (the default), users can override the preprocessor
-for their own session with `ALTER SESSION`. In enforced mode
-(`-alterSystemProhibitsAlterSessionForPreprocessing=1`), session overrides are
-blocked and every statement pays the MASTER lookup cost (~7.3 ms/stmt).
+Note: the framework's own posture is set by `PREPROC.SET_MODE` and stored in
+`PREPROC.SETTINGS.mode` — `'convenience'` (the default) or `'strict'`:
+
+- **convenience** — sessions self-optimize after the first statement (no-rule
+  sessions self-disable when `self_disable_allowed = TRUE`; rule-bearing sessions
+  repoint to their baked `PREPROC_RT.P_<hash>` profile). See
+  [Session self-optimization](#session-self-optimization).
+- **strict** — no swap or self-disable; every statement pays the full MASTER
+  lookup (~7.3 ms/stmt). Choose this when sessions must never repoint themselves.
+
+This is independent of Exasol's engine-level
+`-alterSystemProhibitsAlterSessionForPreprocessing=1` flag, which separately
+blocks *users* from overriding the system preprocessor via `ALTER SESSION`. (The
+framework's own convenience-mode swap is issued from inside the preprocessor and
+is unaffected by that flag.)
 
 ## Control surface
 
@@ -171,7 +205,7 @@ direct-DML bootstrap boundary.
 | `PREPROC.RULE_ENABLE` | `rule_id, norefresh` | Enable a disabled rule; auto-refresh unless `norefresh` |
 | `PREPROC.RULE_DISABLE` | `rule_id, norefresh` | Disable a rule without deleting it; auto-refresh unless `norefresh` |
 | `PREPROC.RULE_LIST` | — | Return all rules from CONFIG ordered by rule_id |
-| `PREPROC.SET_MODE` | `mode, norefresh` | Set the framework mode (`'convenience'` or `'enforced'`); auto-refresh unless `norefresh` |
+| `PREPROC.SET_MODE` | `mode, norefresh` | Set the framework mode (`'convenience'` or `'strict'`); auto-refresh unless `norefresh` |
 | `PREPROC.SET_SELF_DISABLE` | `value` | Allow or disallow user self-disable (`TRUE` / `FALSE`) |
 | `PREPROC.REFRESH` | — | Rebuild RESOLUTION from CONFIG and current role grants |
 | `PREPROC.STATUS` | — | Report whether RESOLUTION is current or stale |
@@ -282,6 +316,49 @@ Returns a current/stale verdict and the `last_refresh` time. Reports
 Status is read-only. It never modifies RESOLUTION or SETTINGS.
 
 Requires `PREPROC_ADMIN` (or `EXECUTE ANY SCRIPT`, or DBA).
+
+## Session self-optimization
+
+In `convenience` mode the framework removes the per-statement MASTER lookup after
+a session's first statement. Two policies and one automatic lifecycle are
+relevant to operators.
+
+**Mode** — `PREPROC.SET_MODE('convenience', NULL)` enables self-optimization;
+`PREPROC.SET_MODE('strict', NULL)` disables it (every statement pays the full
+lookup, no session ever repoints itself).
+
+**Self-disable policy** — controls only the *no-rule* path. With
+`PREPROC.SET_SELF_DISABLE(TRUE)`, a convenience-mode session whose user has no
+rules clears its preprocessor after statement 1 (subsequent statements bypass the
+framework entirely). With `FALSE` (the install default) such sessions stay on
+MASTER. Rule-bearing sessions repoint to their profile regardless of this flag.
+
+```sql
+PREPROC SET MODE convenience
+PREPROC SET SELF_DISABLE TRUE
+```
+
+**Profile scripts and their cleanup are automatic.** Every `PREPROC.REFRESH`
+generates a `PREPROC_RT.P_<hash>` profile per distinct resolved chain, retires
+profiles whose chains have disappeared (replacing the body with a stub that
+behaves exactly like MASTER), and reclaims (drops) previously-retired profiles
+once no session could still be pinned to them. A profile is **never dropped on
+the refresh that orphans it**, so a long-lived pinned session is never stranded.
+Operators do not create, edit, or drop these scripts.
+
+Observe the current profiles and their lifecycle state:
+
+```sql
+-- As PREPROC_ADMIN: generated profiles and whether each is live or retired
+SELECT profile_hash, created_at, orphaned_at FROM PREPROC.PROFILES;
+
+-- The P_<hash> scripts currently deployed
+SELECT SCRIPT_NAME FROM EXA_ALL_SCRIPTS
+WHERE SCRIPT_SCHEMA = 'PREPROC_RT' AND SCRIPT_NAME LIKE 'P\_%' ESCAPE '\';
+```
+
+A non-NULL `orphaned_at` marks a retired profile awaiting reclaim; it is dropped
+on a later refresh once no active session logged in before that timestamp.
 
 ## Periodic refresh
 
