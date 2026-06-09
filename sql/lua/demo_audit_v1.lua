@@ -19,14 +19,11 @@
 --   an audit-logging feature: it writes nothing to any table (per-statement
 --   audit writes are out of scope -- transaction-conflict hazard).
 --
--- User identity derived inside the module
---   The user identity is the CURRENT_USER the framework runs under, obtained via
---   pquery here -- never parsed from the submitted statement text.
---
--- No defensive pcall
---   MASTER wraps this call in pcall (fail-open at the rule level). Reading
---   pquery's ok flag is ordinary control flow; a genuine throw is left to
---   propagate so MASTER's pcall can skip the rule visibly.
+-- User identity from engine metadata (no query)
+--   The user is exa.meta.current_user -- the executing user the engine already
+--   exposes to every script -- never parsed from the submitted statement text and
+--   never fetched with a per-statement SELECT CURRENT_USER. Reading metadata is a
+--   field access, not a database round-trip.
 -- =============================================================================
 
 -- luacheck: globals tag
@@ -34,10 +31,5 @@
 -- tag(sqltext) -> the statement with an appended
 -- /* PREPROC_AUDIT user=<CURRENT_USER> */ comment. Always returns a string.
 function tag(sqltext)
-    local user = "UNKNOWN"
-    local ok, result = pquery("SELECT CURRENT_USER")
-    if ok and result ~= nil and result[1] ~= nil and result[1][1] ~= null then
-        user = tostring(result[1][1])
-    end
-    return sqltext .. " /* PREPROC_AUDIT user=" .. user .. " */"
+    return sqltext .. " /* PREPROC_AUDIT user=" .. tostring(exa.meta.current_user) .. " */"
 end

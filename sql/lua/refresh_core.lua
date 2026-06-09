@@ -280,17 +280,27 @@ local PROFILE_RULES_SQL = [[
     ORDER BY phase, ordinal
 ]]
 
--- Profile script body, in two halves bracketing the baked rule table. The body
--- is a STATIC mirror of the MASTER dispatcher (guard, EXA_ALL_SESSIONS client
--- lookup, client_matches, TRANSLATE->EXPAND->REWRITE loop with per-rule pcall
--- fail-open and EXPAND first-match-terminal) but reads its rules from the baked
--- `rules` literal instead of querying PREPROC_RT.MY_PIPELINE -- that absent
--- pquery per statement is the whole point of the zero-overhead session path.
+-- Profile script body, assembled from PROFILE_BODY_PREFIX, a CLIENT section, and
+-- PROFILE_BODY_DISPATCH bracketing the baked rule table. The body is a STATIC
+-- mirror of the MASTER dispatcher (guard, optional client lookup, the
+-- TRANSLATE->EXPAND->REWRITE loop with per-rule pcall fail-open and EXPAND
+-- first-match-terminal) but reads its rules from the baked `rules` literal
+-- instead of querying PREPROC_RT.MY_PIPELINE -- that absent pquery per statement
+-- is the whole point of the zero-overhead session path.
+--
+-- The client section is chosen per chain. PROFILE_BODY_CLIENT (which queries
+-- EXA_ALL_SESSIONS for the connecting client) is emitted ONLY when at least one
+-- baked rule carries a client_pattern; otherwise PROFILE_BODY_NOCLIENT is used,
+-- making client_matches unconditionally true and issuing NO per-statement client
+-- query. The common case -- no client_pattern rules -- therefore costs no client
+-- lookup at all. The connecting client cannot change within a session and Exasol
+-- exposes it only via EXA_ALL_SESSIONS (exa.meta carries no client field) and a
+-- preprocessor script keeps no cross-statement state, so when a client_pattern
+-- IS present the query is unavoidable per statement.
 --
 -- Stored as level-1 long strings (`[=[ ... ]=]`) so the embedded level-0
--- (`[[ ... ]]`) SQL literal needs no escaping. The first line is the luacheck
--- globals declaration so the generated body validates standalone; the baked
--- rule table is spliced between the two halves.
+-- (`[[ ... ]]`) SQL literal needs no escaping. PROFILE_BODY_PREFIX's first line is
+-- the luacheck globals declaration so the generated body validates standalone.
 --
 -- client_matches here compares against Lua `nil` (the baked table stores nil for
 -- a NULL pattern), NOT the Exasol `null` sentinel MASTER tests, because the rule
@@ -305,8 +315,9 @@ if string.find(upper, "^%s*ALTER%s+SESSION")
 end
 local rules = {]=]
 
-local PROFILE_BODY_SUFFIX = [=[}
-local current_client = ""
+-- CLIENT section, with the EXA_ALL_SESSIONS lookup. Used only for chains that
+-- have at least one client_pattern rule.
+local PROFILE_BODY_CLIENT = [=[local current_client = ""
 local cc_pcall_ok, cc_ok, cc_res = pcall(pquery, [[
     SELECT CLIENT FROM EXA_ALL_SESSIONS WHERE SESSION_ID = CURRENT_SESSION
 ]])
@@ -318,7 +329,20 @@ local function client_matches(cp)
     if cp == nil then return true end
     return string.find(current_client, cp, 1, true) ~= nil
 end
-local function dispatch_rule(sn, fn, text)
+]=]
+
+-- CLIENT section, no lookup. Used when no baked rule has a client_pattern, so the
+-- connecting client is never needed and no per-statement query is issued.
+-- client_matches takes no parameter (the dispatch loop still calls it with one,
+-- which Lua ignores) so the standalone body lints clean with no unused argument.
+local PROFILE_BODY_NOCLIENT = [=[local function client_matches()
+    return true
+end
+]=]
+
+-- DISPATCH section: the per-rule import/pcall helpers and the fixed-order phase
+-- loop, shared by both client variants.
+local PROFILE_BODY_DISPATCH = [=[local function dispatch_rule(sn, fn, text)
     local ok, t = pcall(function()
         import(sn, "preproc_module")
         return preproc_module[fn](text)
@@ -424,24 +448,35 @@ end
 --   string.format("%q") double-quotes and escapes every string field, so an odd
 --   script/function name (operator-supplied) cannot break out of the literal; a
 --   NULL client_pattern (Exasol `null`) is emitted as the Lua keyword nil so the
---   generated client_matches treats it as apply-always.
+--   generated client_matches treats it as apply-always. The CLIENT section is
+--   included only when at least one rule carries a client_pattern, so a chain
+--   with no client patterns generates a profile that issues no per-statement
+--   EXA_ALL_SESSIONS client query.
 local function build_profile_body(rule_rows)
     local rule_parts = {}
+    local has_client_pattern = false
     for _, r in ipairs(rule_rows) do
         local cp
         if r[5] == null then
             cp = "nil"
         else
             cp = string.format("%q", tostring(r[5]))
+            has_client_pattern = true
         end
         table.insert(rule_parts, string.format(
             "{phase=%q,ordinal=%d,script_name=%q,function_name=%q,client_pattern=%s}",
             tostring(r[1]), tonumber(r[2]), tostring(r[3]), tostring(r[4]), cp
         ))
     end
+    local client_section = PROFILE_BODY_NOCLIENT
+    if has_client_pattern then
+        client_section = PROFILE_BODY_CLIENT
+    end
     return PROFILE_BODY_PREFIX
         .. table.concat(rule_parts, ",\n")
-        .. PROFILE_BODY_SUFFIX
+        .. "}\n"
+        .. client_section
+        .. PROFILE_BODY_DISPATCH
 end
 
 -- rebuild() -> rows_inserted

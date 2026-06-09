@@ -128,18 +128,29 @@ if result[1][3] == null then
 end
 
 -- --- Connecting client (for client_pattern matching) ------------------------
--- Resolve the client application identifier once via EXA_ALL_SESSIONS (there
--- is no CURRENT_CLIENT function). A non-null CLIENT_PATTERN on a rule is
--- matched against this. The lookup is best-effort: on any failure we fall back
--- to an empty string, which still lets null-pattern (apply-always) rules run
--- while non-null patterns simply will not match.
+-- The client application identifier is needed ONLY to match a non-null
+-- CLIENT_PATTERN. Exasol exposes it via EXA_ALL_SESSIONS (there is no
+-- CURRENT_CLIENT function and exa.meta carries no client field), so resolving it
+-- costs a query. Skip that query entirely when no resolved rule carries a
+-- client_pattern -- null-pattern rules apply unconditionally and never read the
+-- client. When it is needed, the lookup is best-effort: any failure falls back
+-- to an empty string, so a non-null pattern simply will not match.
 local current_client = ""
-local cc_pcall_ok, cc_ok, cc_res = pcall(pquery, [[
-    SELECT CLIENT FROM EXA_ALL_SESSIONS WHERE SESSION_ID = CURRENT_SESSION
-]])
-if cc_pcall_ok and cc_ok and cc_res ~= nil
-    and cc_res[1] ~= nil and cc_res[1][1] ~= null then
-    current_client = tostring(cc_res[1][1])
+local needs_client = false
+for _, row in ipairs(result) do
+    if row[4] ~= null then
+        needs_client = true
+        break
+    end
+end
+if needs_client then
+    local cc_pcall_ok, cc_ok, cc_res = pcall(pquery, [[
+        SELECT CLIENT FROM EXA_ALL_SESSIONS WHERE SESSION_ID = CURRENT_SESSION
+    ]])
+    if cc_pcall_ok and cc_ok and cc_res ~= nil
+        and cc_res[1] ~= nil and cc_res[1][1] ~= null then
+        current_client = tostring(cc_res[1][1])
+    end
 end
 
 -- --- Dispatch ---------------------------------------------------------------

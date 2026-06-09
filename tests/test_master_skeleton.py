@@ -177,24 +177,31 @@ def _extract_long_string(source, name):
     return match.group(1)
 
 
-def _generate_sample_profile_body():
+def _generate_sample_profile_body(client_pattern=None):
     """Build a P_<hash> body from the REAL codegen template with one baked rule.
 
-    Mirrors ``build_profile_body`` in refresh_core.lua: the two template halves
-    (``PROFILE_BODY_PREFIX`` / ``PROFILE_BODY_SUFFIX``) are extracted verbatim
-    from the source so this test validates the SAME template the live codegen
-    emits, not a hand-copied approximation. A single REWRITE rule with a NULL
-    client_pattern is spliced between them.
+    Mirrors ``build_profile_body`` in refresh_core.lua: the template sections
+    (``PROFILE_BODY_PREFIX``, the chosen CLIENT section, ``PROFILE_BODY_DISPATCH``)
+    are extracted verbatim from the source so this validates the SAME template the
+    live codegen emits, not a hand-copied approximation. A single REWRITE rule is
+    spliced in; when ``client_pattern`` is None the rule carries a NULL pattern and
+    the no-lookup client section is used (matching codegen's per-chain choice).
     """
     source = _REFRESH_CORE.read_text()
     prefix = _extract_long_string(source, "PROFILE_BODY_PREFIX")
-    suffix = _extract_long_string(source, "PROFILE_BODY_SUFFIX")
+    dispatch = _extract_long_string(source, "PROFILE_BODY_DISPATCH")
+    if client_pattern is None:
+        client = _extract_long_string(source, "PROFILE_BODY_NOCLIENT")
+        cp_literal = "nil"
+    else:
+        client = _extract_long_string(source, "PROFILE_BODY_CLIENT")
+        cp_literal = f'"{client_pattern}"'
     rule = (
         '{phase="REWRITE",ordinal=1,'
         'script_name="PREPROC_RT.DEMO_AUDIT_V1",'
-        'function_name="tag",client_pattern=nil}'
+        f'function_name="tag",client_pattern={cp_literal}}}'
     )
-    return prefix + rule + suffix
+    return prefix + rule + "}\n" + client + dispatch
 
 
 def test_retirement_stub_is_master_body():
@@ -235,30 +242,37 @@ def test_generated_profile_passes_luacheck():
     if shutil.which("luacheck") is None:
         pytest.skip("luacheck binary is not installed")
 
-    body = _generate_sample_profile_body()
-    with tempfile.NamedTemporaryFile("w", suffix=".lua", delete=False, encoding="utf-8") as handle:
-        handle.write(body)
-        path = handle.name
-    try:
-        result = subprocess.run(
-            [
-                "luacheck",
-                path,
-                "--std",
-                "lua51",
-                "--globals",
-                "sqlparsing",
-                "pquery",
-                "null",
-                "import",
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    except OSError as exc:
-        pytest.skip(f"luacheck is present on PATH but not executable: {exc}")
-    finally:
-        Path(path).unlink()
+    # Validate BOTH client variants: the no-lookup body (no client_pattern rules)
+    # and the with-lookup body (a client_pattern present).
+    for client_pattern in (None, "EXAplus"):
+        body = _generate_sample_profile_body(client_pattern=client_pattern)
+        with tempfile.NamedTemporaryFile(
+            "w", suffix=".lua", delete=False, encoding="utf-8"
+        ) as handle:
+            handle.write(body)
+            path = handle.name
+        try:
+            result = subprocess.run(
+                [
+                    "luacheck",
+                    path,
+                    "--std",
+                    "lua51",
+                    "--globals",
+                    "sqlparsing",
+                    "pquery",
+                    "null",
+                    "import",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except OSError as exc:
+            pytest.skip(f"luacheck is present on PATH but not executable: {exc}")
+        finally:
+            Path(path).unlink()
 
-    assert result.returncode == 0, result.stdout + result.stderr
+        assert result.returncode == 0, (
+            f"client_pattern={client_pattern!r}:\n{result.stdout}{result.stderr}"
+        )
