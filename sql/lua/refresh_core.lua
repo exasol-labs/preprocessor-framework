@@ -157,6 +157,14 @@ local FINGERPRINT_SQL = [[
 -- EXA_DBA_USERS on USER_NAME = GRANTEE keeps only the users at the leaves
 -- (other roles in the chain are intermediate, not output). CONNECT BY NOCYCLE
 -- is defensive: a role-grant cycle would otherwise abort the whole refresh.
+--
+-- PUBLIC handling: every user implicitly holds the built-in PUBLIC role, but
+-- that membership is automatic and never materialises as a row in
+-- EXA_DBA_ROLE_PRIVS. The closure source therefore UNIONs in a synthetic
+-- 'PUBLIC' -> user edge for every user in EXA_DBA_USERS, so the same closure
+-- resolves a rule scoped to PUBLIC (origin_role = 'PUBLIC') to ALL users, and
+-- also resolves any real role granted TO PUBLIC to all users transitively (its
+-- chain reaches the synthetic PUBLIC node and fans out to every user).
 local RESOLUTION_SQL = [[
     WITH scoped_rules AS (
         SELECT
@@ -169,7 +177,12 @@ local RESOLUTION_SQL = [[
         FROM (
             SELECT CONNECT_BY_ROOT GRANTED_ROLE AS origin_role,
                    GRANTEE                      AS grantee
-            FROM EXA_DBA_ROLE_PRIVS
+            FROM (
+                SELECT GRANTED_ROLE, GRANTEE FROM EXA_DBA_ROLE_PRIVS
+                UNION ALL
+                SELECT 'PUBLIC' AS GRANTED_ROLE, USER_NAME AS GRANTEE
+                FROM EXA_DBA_USERS
+            )
             CONNECT BY NOCYCLE PRIOR GRANTEE = GRANTED_ROLE
         ) closure
         JOIN PREPROC.CONFIG cfg

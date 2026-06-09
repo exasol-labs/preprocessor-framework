@@ -846,3 +846,29 @@ The retirement stub is functionally identical to MASTER. The refresh path source
 ### Consequences
 
 Every retirement stub is byte-for-byte MASTER's body. A change to the dispatch+swap contract in `master.lua` automatically takes effect for all stubs created or refreshed afterward — no separate stub-codegen change needed. MASTER's inline design is a documented constraint, not an implementation detail.
+
+## ADR-031: A rule scoped to the PUBLIC role resolves to every user via a synthetic closure edge
+
+**Date:** 2026-06-09
+**Plan:** `(direct bug fix — PUBLIC role resolution)`
+**Status:** Accepted
+
+### Context
+
+A `ROLE`-scoped CONFIG rule whose `scope_value` is `PUBLIC` resolved to nobody. The resolution closure in `PREPROC.REFRESH_CORE` walks `EXA_DBA_ROLE_PRIVS`, but every user's membership in the built-in `PUBLIC` role is implicit and automatic — it is never materialised as a row in `EXA_DBA_ROLE_PRIVS` (verified live: zero rows mention `PUBLIC`, though `PUBLIC` is a real role in `EXA_ALL_ROLES`). So the `CONNECT BY` closure never reached any user from a `PUBLIC`-scoped rule, and the rule silently applied to no one — contrary to the meaning of PUBLIC (applies to all users, unconditionally).
+
+### Decision
+
+The closure source UNIONs in a synthetic `'PUBLIC' -> user` edge for every user in `EXA_DBA_USERS` before the `CONNECT BY`. PUBLIC then behaves exactly like a role every user holds: a rule scoped to `PUBLIC` (origin_role = `'PUBLIC'`) resolves to all users, and any real role granted *to* `PUBLIC` fans out to all users transitively because its chain reaches the synthetic PUBLIC node.
+
+### Options Considered
+
+| Option | Verdict |
+|--------|---------|
+| Synthetic `PUBLIC -> user` edges UNIONed into the closure source | Chosen — one mechanism handles both direct PUBLIC-scoped rules and roles-granted-to-PUBLIC; no special-casing in the JOIN or in MASTER |
+| Special-case `cfg.scope_value = 'PUBLIC'` with a separate cross-join to all users | Rejected — a second resolution path to maintain; misses roles transitively granted to PUBLIC |
+| Expand PUBLIC in Lua / the MASTER dispatcher | Rejected — resolution is a refresh-time, SQL-side concern; MASTER must stay a thin reader of the materialised RESOLUTION |
+
+### Consequences
+
+`PUBLIC` is now a supported, documented scope that applies a rule to all users unconditionally. The fingerprint inputs are unchanged, so STATUS staleness detection is unaffected. The synthetic edges add one row per user to the closure input — negligible at any realistic user count.

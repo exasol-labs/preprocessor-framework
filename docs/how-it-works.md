@@ -140,6 +140,12 @@ union of all role-derived and user-scoped rules that apply to them. Duplicates
 are collapsed: if the same `(phase, script, function)` reaches a user through
 multiple paths it appears exactly once (lowest `rule_id` wins the ordinal).
 
+A rule scoped to `ROLE` `PUBLIC` applies to **every** user, unconditionally.
+PUBLIC membership is implicit and never appears in `EXA_DBA_ROLE_PRIVS`, so the
+refresh closure injects a synthetic `PUBLIC → user` edge for every user in
+`EXA_DBA_USERS`; PUBLIC then resolves like a role held by all users (and any
+real role granted *to* PUBLIC fans out to all users the same way).
+
 ## client_pattern matching
 
 `client_pattern` is compared against the connecting client's application

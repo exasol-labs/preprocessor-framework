@@ -40,6 +40,15 @@ Expands the scoped rules in `PREPROC.CONFIG` (`ROLE`- and `USER`-scoped) into th
 * *WHEN* the refresh script runs
 * *THEN* `PREPROC.RESOLUTION` MUST contain no row for `CAROL` derived from that rule
 
+### Scenario: A rule scoped to the PUBLIC role resolves to every user
+
+* *GIVEN* an enabled rule scoped to `ROLE` `PUBLIC`
+* *AND* every database user implicitly holds `PUBLIC`, a membership that is automatic and never recorded as a row in `EXA_DBA_ROLE_PRIVS`
+* *WHEN* the refresh script runs
+* *THEN* `PREPROC.RESOLUTION` MUST contain a row carrying that rule for **every** user in `EXA_DBA_USERS`, including users that hold no explicit role
+* *AND* the resolution MUST NOT depend on any `PUBLIC` grant appearing in `EXA_DBA_ROLE_PRIVS` (the closure MUST treat `PUBLIC` as held by all users)
+* *AND* a real role that has been granted to `PUBLIC` MUST likewise resolve to every user (its grant chain reaches `PUBLIC` and fans out to all users)
+
 ### Scenario: A USER-scoped rule unions with ROLE-derived rules for the same phase
 
 * *GIVEN* an enabled `ROLE`-scoped rule for `ROLE_A` at phase `EXPAND` carrying functions `a`, `b`, `c` (`rule_id`s 10, 20, 30)
