@@ -27,9 +27,9 @@
 -- It does NOT activate the preprocessor; that remains a separate DBA decision.
 -- =============================================================================
 
-OPEN SCHEMA PREPROC_RT
-/
+OPEN SCHEMA PREPROC_RT;
 
+--/
 CREATE OR REPLACE PYTHON3 SCALAR SCRIPT PREPROC_RT.CONFD_JOB_V1(connection_name VARCHAR(128), job_name VARCHAR(128), params_json VARCHAR(2000000)) RETURNS VARCHAR(2000000) AS
 # =============================================================================
 # CONFD_JOB_V1  (PREPROC_RT.CONFD_JOB_V1)  — Python3 SCALAR UDF body
@@ -159,6 +159,7 @@ def run(ctx):
         return "ERR:" + str(e)
 /
 
+--/
 CREATE OR REPLACE LUA SCRIPT PREPROC_RT.CONTROL_DATABASE_V1() AS
 -- =============================================================================
 -- CONTROL_DATABASE_V1  (PREPROC_RT.CONTROL_DATABASE_V1)  — EXPAND-phase module
@@ -558,6 +559,7 @@ function expand(sqltext)
 end
 /
 
+--/
 CREATE OR REPLACE LUA SCRIPT PREPROC_RT.CONTROL_BUCKETFS_V1() AS
 -- =============================================================================
 -- CONTROL_BUCKETFS_V1  (PREPROC_RT.CONTROL_BUCKETFS_V1)  — EXPAND-phase module
@@ -892,9 +894,9 @@ function expand(sqltext)
 end
 /
 
-OPEN SCHEMA PREPROC
-/
+OPEN SCHEMA PREPROC;
 
+--/
 CREATE OR REPLACE LUA SCRIPT PREPROC.ADMIN_CONFD_JOB(job_name, params_json) RETURNS TABLE AS
 -- =============================================================================
 -- ADMIN_CONFD_JOB  (PREPROC.ADMIN_CONFD_JOB)  — Lua admin script body
@@ -975,6 +977,7 @@ end
 exit({{result_str}}, "result VARCHAR(2000000)")
 /
 
+
 -- Purpose: seed the EXPAND rules into PREPROC.CONFIG so that DBA role holders
 -- can use the `CONTROL DATABASE …` and `CONTROL BUCKETFS …` command surfaces.
 --
@@ -1002,8 +1005,7 @@ SELECT
     1
 WHERE NOT EXISTS (
     SELECT 1 FROM PREPROC.CONFIG WHERE script_name = 'PREPROC_RT.CONTROL_DATABASE_V1'
-)
-/
+);
 
 INSERT INTO PREPROC.CONFIG
     (rule_id, scope_type, scope_value, client_pattern, phase, script_name, function_name, enabled, version)
@@ -1019,9 +1021,6 @@ SELECT
     1
 WHERE NOT EXISTS (
     SELECT 1 FROM PREPROC.CONFIG WHERE script_name = 'PREPROC_RT.CONTROL_BUCKETFS_V1'
-)
-/
+);
 
-EXECUTE SCRIPT PREPROC.REFRESH
-/
-
+EXECUTE SCRIPT PREPROC.REFRESH;

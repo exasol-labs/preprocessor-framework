@@ -10,9 +10,9 @@
 --   ALTER SESSION SET sql_preprocessor_script = PREPROC_RT.MASTER;
 -- =============================================================================
 
-OPEN SCHEMA PREPROC_RT
-/
+OPEN SCHEMA PREPROC_RT;
 
+--/
 CREATE OR REPLACE LUA SCRIPT PREPROC_RT.DEMO_PING_V1() AS
 -- =============================================================================
 -- DEMO_PING_V1 preprocessor module  (PREPROC_RT.DEMO_PING_V1)
@@ -151,6 +151,7 @@ end
 /
 
 
+
 -- -----------------------------------------------------------------------------
 -- Register this module with the framework
 -- -----------------------------------------------------------------------------
@@ -164,7 +165,6 @@ end
 -- usable in convenience mode once the preprocessor is active and you hold
 -- PREPROC_ADMIN.
 
-EXECUTE SCRIPT PREPROC.RULE_ADD('ROLE', 'PREPROC_ADMIN', 'EXPAND', 'PREPROC_RT.DEMO_PING_V1', 'ping', NULL)
-/
+EXECUTE SCRIPT PREPROC.RULE_ADD('ROLE', 'PREPROC_ADMIN', 'EXPAND', 'PREPROC_RT.DEMO_PING_V1', 'ping', NULL);
 
 --   PREPROC ADD RULE ROLE PREPROC_ADMIN EXPAND PREPROC_RT.DEMO_PING_V1 ping
