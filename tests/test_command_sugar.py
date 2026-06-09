@@ -34,6 +34,7 @@ state; both are torn down unconditionally in the fixture, and the session
 preprocessor is always deactivated, mirroring test_master_dispatch.py.
 """
 
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -304,6 +305,8 @@ def test_malformed_add_rule_declined(sugar_env):
 
 def test_sugar_passes_luacheck():
     """The convenience module passes luacheck with zero warnings and zero errors."""
+    if shutil.which("luacheck") is None:
+        pytest.skip("luacheck binary is not installed")
     completed = subprocess.run(
         ["luacheck", "sql/lua/control_sugar_v1.lua"],
         cwd=_REPO_ROOT,
