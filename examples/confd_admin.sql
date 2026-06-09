@@ -978,49 +978,17 @@ exit({{result_str}}, "result VARCHAR(2000000)")
 /
 
 
--- Purpose: seed the EXPAND rules into PREPROC.CONFIG so that DBA role holders
--- can use the `CONTROL DATABASE …` and `CONTROL BUCKETFS …` command surfaces.
---
--- The rule is scoped to the built-in DBA role. Note: a user must HOLD the DBA
--- role (GRANT DBA TO <user>) to resolve this rule. The implicit superuser SYS
--- does not necessarily appear in the role-grant graph PREPROC.REFRESH walks, so
--- if you operate as SYS, either grant DBA to a dedicated operator user or add a
--- USER-scoped rule for SYS.
---
--- rule_id is allocated as MAX(rule_id)+1 over the sub-9000 operator band (the
--- 9000-9999 band is reserved for framework demo/seed rules). The WHERE NOT
--- EXISTS guard makes re-application a no-op.
+-- Register the two command surfaces with the framework, scoped to the built-in
+-- DBA role. The PREPROC command sugar registers each rule and auto-refreshes; it
+-- requires the preprocessor to be active for your session and that you hold
+-- PREPROC_ADMIN. A user must HOLD the DBA role (GRANT DBA TO <user>) for these
+-- rules to resolve to them — the implicit superuser SYS does not appear in the
+-- role-grant graph PREPROC.REFRESH walks, so operate as a DBA-role holder.
 
-INSERT INTO PREPROC.CONFIG
-    (rule_id, scope_type, scope_value, client_pattern, phase, script_name, function_name, enabled, version)
-SELECT
-    (SELECT COALESCE(MAX(rule_id), 0) + 1 FROM PREPROC.CONFIG WHERE rule_id < 9000),
-    'ROLE',
-    'DBA',
-    NULL,
-    'EXPAND',
-    'PREPROC_RT.CONTROL_DATABASE_V1',
-    'expand',
-    TRUE,
-    1
-WHERE NOT EXISTS (
-    SELECT 1 FROM PREPROC.CONFIG WHERE script_name = 'PREPROC_RT.CONTROL_DATABASE_V1'
-);
+PREPROC ADD RULE FOR ROLE DBA PHASE EXPAND SCRIPT PREPROC_RT.CONTROL_DATABASE_V1 FUNCTION expand;
 
-INSERT INTO PREPROC.CONFIG
-    (rule_id, scope_type, scope_value, client_pattern, phase, script_name, function_name, enabled, version)
-SELECT
-    (SELECT COALESCE(MAX(rule_id), 0) + 1 FROM PREPROC.CONFIG WHERE rule_id < 9000),
-    'ROLE',
-    'DBA',
-    NULL,
-    'EXPAND',
-    'PREPROC_RT.CONTROL_BUCKETFS_V1',
-    'expand',
-    TRUE,
-    1
-WHERE NOT EXISTS (
-    SELECT 1 FROM PREPROC.CONFIG WHERE script_name = 'PREPROC_RT.CONTROL_BUCKETFS_V1'
-);
+PREPROC ADD RULE FOR ROLE DBA PHASE EXPAND SCRIPT PREPROC_RT.CONTROL_BUCKETFS_V1 FUNCTION expand;
 
-EXECUTE SCRIPT PREPROC.REFRESH;
+-- If the preprocessor is not active yet, call the admin script directly instead:
+--   EXECUTE SCRIPT PREPROC.RULE_ADD('ROLE', 'DBA', 'EXPAND', 'PREPROC_RT.CONTROL_DATABASE_V1', 'expand', NULL);
+--   EXECUTE SCRIPT PREPROC.RULE_ADD('ROLE', 'DBA', 'EXPAND', 'PREPROC_RT.CONTROL_BUCKETFS_V1', 'expand', NULL);

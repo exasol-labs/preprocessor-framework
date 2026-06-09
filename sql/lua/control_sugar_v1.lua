@@ -167,13 +167,34 @@ end
 -- expand(sqltext) -> "EXECUTE SCRIPT PREPROC.<...>" for a recognised PREPROC
 -- command, else nil. nil covers both non-PREPROC statements and unrecognised
 -- PREPROC subcommands (fail-open: the original text reaches the engine).
+-- Remove leading whitespace and any leading run of full-line `--` comments, so a
+-- PREPROC command preceded by explanatory comments is still recognised. SQL
+-- clients (and the examples/ files) commonly submit a comment block together with
+-- the following statement; the preprocessor sees that raw text, so without this
+-- the command's first token would be `--` and the command would be declined and
+-- passed through to the engine as a syntax error. Only LEADING comment lines are
+-- stripped; the command keyword must follow them.
+local function strip_leading_comments(text)
+    local s = text
+    while true do
+        s = s:gsub("^%s+", "")
+        local without = s:gsub("^%-%-[^\n]*\n?", "", 1)
+        if without == s then
+            return s
+        end
+        s = without
+    end
+end
+
 function expand(sqltext)
     if type(sqltext) ~= "string" then
         return nil
     end
 
-    -- Trim surrounding whitespace and a single optional trailing semicolon.
-    local trimmed = sqltext:gsub("^%s*(.-)%s*$", "%1")
+    -- Drop leading comment lines, then trim surrounding whitespace and a single
+    -- optional trailing semicolon.
+    local decommented = strip_leading_comments(sqltext)
+    local trimmed = decommented:gsub("^%s*(.-)%s*$", "%1")
     local without_semicolon = trimmed:gsub(";%s*$", "")
     local clean = without_semicolon:gsub("^%s*(.-)%s*$", "%1")
 
@@ -232,9 +253,11 @@ function expand(sqltext)
             quote(script_name),
             quote(function_name),
         }
-        if norefresh then
-            args[#args + 1] = "true"
-        end
+        -- Always pass the trailing norefresh slot: the target admin scripts have
+        -- a fixed parameter list and Exasol requires an exact argument count, so
+        -- omitting it ("got N expected N+1") makes the expanded EXECUTE SCRIPT
+        -- fail. NOREFRESH -> true; otherwise NULL (the script then auto-refreshes).
+        args[#args + 1] = norefresh and "true" or "NULL"
         return execute_script(CONTROL.rule_add, args)
     end
 
@@ -245,9 +268,11 @@ function expand(sqltext)
         end
         local rule_id = word(3)
         local args = { rule_id }
-        if norefresh then
-            args[#args + 1] = "true"
-        end
+        -- Always pass the trailing norefresh slot: the target admin scripts have
+        -- a fixed parameter list and Exasol requires an exact argument count, so
+        -- omitting it ("got N expected N+1") makes the expanded EXECUTE SCRIPT
+        -- fail. NOREFRESH -> true; otherwise NULL (the script then auto-refreshes).
+        args[#args + 1] = norefresh and "true" or "NULL"
         return execute_script(CONTROL.rule_drop, args)
     end
 
@@ -256,9 +281,11 @@ function expand(sqltext)
             return nil
         end
         local args = { word(3) }
-        if norefresh then
-            args[#args + 1] = "true"
-        end
+        -- Always pass the trailing norefresh slot: the target admin scripts have
+        -- a fixed parameter list and Exasol requires an exact argument count, so
+        -- omitting it ("got N expected N+1") makes the expanded EXECUTE SCRIPT
+        -- fail. NOREFRESH -> true; otherwise NULL (the script then auto-refreshes).
+        args[#args + 1] = norefresh and "true" or "NULL"
         return execute_script(CONTROL.rule_disable, args)
     end
 
@@ -267,9 +294,11 @@ function expand(sqltext)
             return nil
         end
         local args = { word(3) }
-        if norefresh then
-            args[#args + 1] = "true"
-        end
+        -- Always pass the trailing norefresh slot: the target admin scripts have
+        -- a fixed parameter list and Exasol requires an exact argument count, so
+        -- omitting it ("got N expected N+1") makes the expanded EXECUTE SCRIPT
+        -- fail. NOREFRESH -> true; otherwise NULL (the script then auto-refreshes).
+        args[#args + 1] = norefresh and "true" or "NULL"
         return execute_script(CONTROL.rule_enable, args)
     end
 
@@ -301,9 +330,11 @@ function expand(sqltext)
             return nil
         end
         local args = { quote(word(3)) }
-        if norefresh then
-            args[#args + 1] = "true"
-        end
+        -- Always pass the trailing norefresh slot: the target admin scripts have
+        -- a fixed parameter list and Exasol requires an exact argument count, so
+        -- omitting it ("got N expected N+1") makes the expanded EXECUTE SCRIPT
+        -- fail. NOREFRESH -> true; otherwise NULL (the script then auto-refreshes).
+        args[#args + 1] = norefresh and "true" or "NULL"
         return execute_script(CONTROL.set_mode, args)
     end
 

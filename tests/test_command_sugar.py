@@ -157,7 +157,7 @@ def test_add_rule_expands_to_rule_add(sugar_env):
     )
     assert result == (
         "EXECUTE SCRIPT PREPROC.RULE_ADD("
-        "'ROLE', 'ANALYSTS', 'EXPAND', 'PREPROC_RT.DEMO_PING_V1', 'ping')"
+        "'ROLE', 'ANALYSTS', 'EXPAND', 'PREPROC_RT.DEMO_PING_V1', 'ping', NULL)"
     )
 
 
@@ -170,15 +170,65 @@ def test_add_rule_for_user_expands(sugar_env):
     )
     assert result == (
         "EXECUTE SCRIPT PREPROC.RULE_ADD("
-        "'USER', 'BOB', 'REWRITE', 'PREPROC_RT.DEMO_AUDIT_V1', 'tag')"
+        "'USER', 'BOB', 'REWRITE', 'PREPROC_RT.DEMO_AUDIT_V1', 'tag', NULL)"
+    )
+
+
+@pytest.mark.integration
+def test_add_rule_sugar_output_is_executable(sugar_env):
+    """The ADD RULE expansion is a RUNNABLE EXECUTE SCRIPT call, not just a string.
+
+    Regression guard for the missing-norefresh bug: the sugar must emit the
+    trailing argument so the call matches PREPROC.RULE_ADD's parameter list.
+    Executing the expansion for real must insert the rule — a short argument list
+    raises "expected N parameters but got N-1", which the string-only assertions
+    above never exercised.
+    """
+    scope_value = "PREPROC_SUGAR_EXEC_TEST"
+    expansion = _expand(
+        sugar_env,
+        f"PREPROC ADD RULE FOR USER {scope_value} PHASE EXPAND "
+        "SCRIPT PREPROC_RT.DEMO_PING_V1 FUNCTION ping",
+    )
+    try:
+        sugar_env.execute(expansion)  # run the expanded EXECUTE SCRIPT for real
+        count = sugar_env.execute(
+            "SELECT COUNT(*) FROM PREPROC.CONFIG WHERE scope_value = {v}",
+            {"v": scope_value},
+        ).fetchval()
+        assert count == 1, "the expanded RULE_ADD did not insert the rule"
+    finally:
+        sugar_env.execute("DELETE FROM PREPROC.CONFIG WHERE scope_value = {v}", {"v": scope_value})
+        sugar_env.execute("EXECUTE SCRIPT PREPROC.REFRESH")
+
+
+@pytest.mark.integration
+def test_command_with_leading_comment_is_recognized(sugar_env):
+    """A PREPROC command preceded by -- comment lines is still expanded.
+
+    SQL clients (and the examples/ files) submit a comment block together with the
+    following statement, and the preprocessor sees that raw text. The sugar must
+    skip leading comment lines rather than decline on a first token of '--'.
+    """
+    result = _expand(
+        sugar_env,
+        "-- register the ping module\n"
+        "-- (edit the scope to taste)\n"
+        "PREPROC ADD RULE FOR ROLE PREPROC_ADMIN PHASE EXPAND "
+        "SCRIPT PREPROC_RT.DEMO_PING_V1 FUNCTION ping",
+    )
+    assert result == (
+        "EXECUTE SCRIPT PREPROC.RULE_ADD("
+        "'ROLE', 'PREPROC_ADMIN', 'EXPAND', 'PREPROC_RT.DEMO_PING_V1', 'ping', NULL)"
     )
 
 
 @pytest.mark.integration
 def test_drop_rule_expands_to_rule_drop(sugar_env):
-    """DROP RULE 42 expands to RULE_DROP(42) with the rule_id UNQUOTED (numeric)."""
+    """DROP RULE 42 expands to RULE_DROP(42, NULL): rule_id UNQUOTED (numeric),
+    trailing NULL for the norefresh slot so the call matches the script signature."""
     result = _expand(sugar_env, "PREPROC DROP RULE 42")
-    assert result == "EXECUTE SCRIPT PREPROC.RULE_DROP(42)"
+    assert result == "EXECUTE SCRIPT PREPROC.RULE_DROP(42, NULL)"
 
 
 @pytest.mark.integration
@@ -188,9 +238,13 @@ def test_disable_enable_expand(sugar_env):
     Both carry the rule_id unquoted; the verb selects RULE_DISABLE vs RULE_ENABLE.
     """
     assert (
-        _expand(sugar_env, "PREPROC DISABLE RULE 42") == "EXECUTE SCRIPT PREPROC.RULE_DISABLE(42)"
+        _expand(sugar_env, "PREPROC DISABLE RULE 42")
+        == "EXECUTE SCRIPT PREPROC.RULE_DISABLE(42, NULL)"
     )
-    assert _expand(sugar_env, "PREPROC ENABLE RULE 42") == "EXECUTE SCRIPT PREPROC.RULE_ENABLE(42)"
+    assert (
+        _expand(sugar_env, "PREPROC ENABLE RULE 42")
+        == "EXECUTE SCRIPT PREPROC.RULE_ENABLE(42, NULL)"
+    )
 
 
 @pytest.mark.integration
@@ -219,7 +273,7 @@ def test_set_commands_expand(sugar_env):
     """
     assert (
         _expand(sugar_env, "PREPROC SET MODE enforce")
-        == "EXECUTE SCRIPT PREPROC.SET_MODE('enforce')"
+        == "EXECUTE SCRIPT PREPROC.SET_MODE('enforce', NULL)"
     )
     assert (
         _expand(sugar_env, "PREPROC SET SELF_DISABLE true")
@@ -263,7 +317,7 @@ def test_norefresh_is_case_insensitive_and_keyword_case_preserved(sugar_env):
     )
     assert (
         _expand(sugar_env, "PREPROC SET MODE MixedCase")
-        == "EXECUTE SCRIPT PREPROC.SET_MODE('MixedCase')"
+        == "EXECUTE SCRIPT PREPROC.SET_MODE('MixedCase', NULL)"
     )
 
 

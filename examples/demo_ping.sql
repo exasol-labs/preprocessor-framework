@@ -156,15 +156,12 @@ end
 -- Register this module with the framework
 -- -----------------------------------------------------------------------------
 -- A module does nothing until a PREPROC.CONFIG rule points at it and a REFRESH
--- resolves that rule. RULE_ADD does both (it auto-refreshes unless you pass a
--- non-NULL norefresh). Edit the scope below: 'ROLE' + a role name applies to
--- every holder of that role; 'USER' + a user name applies to one user.
---
--- Requires PREPROC_ADMIN (or DBA). Works whether or not the preprocessor is
--- active. The commented PREPROC ... line is the equivalent command-sugar form,
--- usable in convenience mode once the preprocessor is active and you hold
--- PREPROC_ADMIN.
+-- resolves that rule. The PREPROC command sugar below does both (RULE_ADD
+-- auto-refreshes). It requires the preprocessor to be active for your session
+-- and that you hold PREPROC_ADMIN. Edit the scope: FOR ROLE <role> applies to
+-- every holder of that role; FOR USER <user> applies to a single user.
 
-EXECUTE SCRIPT PREPROC.RULE_ADD('ROLE', 'PREPROC_ADMIN', 'EXPAND', 'PREPROC_RT.DEMO_PING_V1', 'ping', NULL);
+PREPROC ADD RULE FOR ROLE PREPROC_ADMIN PHASE EXPAND SCRIPT PREPROC_RT.DEMO_PING_V1 FUNCTION ping;
 
---   PREPROC ADD RULE ROLE PREPROC_ADMIN EXPAND PREPROC_RT.DEMO_PING_V1 ping
+-- If the preprocessor is not active yet, call the admin script directly instead:
+--   EXECUTE SCRIPT PREPROC.RULE_ADD('ROLE', 'PREPROC_ADMIN', 'EXPAND', 'PREPROC_RT.DEMO_PING_V1', 'ping', NULL);

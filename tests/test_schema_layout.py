@@ -35,6 +35,21 @@ def test_admin_role_owns_schema(installed):
 
 
 @pytest.mark.integration
+def test_runtime_schema_owned_by_admin(installed):
+    """PREPROC_RT must be owned by PREPROC_ADMIN.
+
+    REFRESH_CORE generates the PREPROC_RT.P_<hash> profile scripts under the
+    invoker's rights, so a PREPROC_ADMIN holder triggering a refresh must own the
+    runtime schema to create/replace/drop scripts there.
+    """
+    row = installed.execute(
+        "SELECT SCHEMA_OWNER FROM EXA_ALL_SCHEMAS WHERE SCHEMA_NAME = 'PREPROC_RT'"
+    ).fetchone()
+    assert row is not None, "PREPROC_RT schema not found in EXA_ALL_SCHEMAS"
+    assert row[0] == "PREPROC_ADMIN"
+
+
+@pytest.mark.integration
 def test_admin_tables_created(installed):
     """CONFIG, RESOLUTION, SETTINGS, and PROFILES must exist in the PREPROC schema.
 
@@ -210,6 +225,23 @@ def test_preproc_admin_dictionary_grant(installed):
         "AND PRIVILEGE = 'SELECT ANY DICTIONARY'"
     ).fetchall()
     assert len(rows) == 1, "SELECT ANY DICTIONARY not granted to PREPROC_ADMIN"
+
+
+@pytest.mark.integration
+def test_preproc_admin_create_script_grant(installed):
+    """CREATE SCRIPT must be granted to PREPROC_ADMIN.
+
+    REFRESH_CORE generates PREPROC_RT.P_<hash> profile scripts under the invoker's
+    rights; with PREPROC_RT owned by PREPROC_ADMIN, the CREATE SCRIPT system
+    privilege lets a PREPROC_ADMIN holder's refresh create/replace/drop them.
+    Without it the refresh fails with "insufficient privileges for creating a script".
+    """
+    rows = installed.execute(
+        "SELECT PRIVILEGE FROM EXA_DBA_SYS_PRIVS "
+        "WHERE GRANTEE = 'PREPROC_ADMIN' "
+        "AND PRIVILEGE = 'CREATE SCRIPT'"
+    ).fetchall()
+    assert len(rows) == 1, "CREATE SCRIPT not granted to PREPROC_ADMIN"
 
 
 @pytest.mark.integration
