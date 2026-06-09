@@ -14,9 +14,15 @@ entry point, keeps the rule configuration fresh as database roles change, and
 maintains a fail-open safety contract so a broken module never blocks a user's
 statement.
 
+In convenience mode it also self-optimizes per session: after the first
+statement, a session with no rules clears its preprocessor entirely and a
+rule-bearing session repoints to a generated, hash-named profile script with its
+rule chain baked in — so the per-statement MASTER lookup is paid once, not on
+every statement. See [docs/how-it-works.md](docs/how-it-works.md#session-self-optimization-zero-overhead-paths).
+
 ## Prerequisites
 
-- Exasol 2025.x instance (2025.2.0 verified)
+- Exasol 2025.x instance (2025.2.1 verified)
 - [uv](https://docs.astral.sh/uv/) for environment management
 - DBA-level credentials on the target instance
 
@@ -53,16 +59,42 @@ A DBA must run that statement manually to activate the preprocessor system-wide.
 
 ### 2a. Single-file deploy (alternative to CLI install)
 
-If you prefer an operator-friendly single SQL file, generate the bundle first:
+If you prefer a single SQL file over the CLI, use `release.sql` — one file that
+deploys the complete framework: the `PREPROC_ADMIN` role, both schemas, all
+tables, the `MY_PIPELINE` view, grants, the `MASTER` dispatcher, the
+`REFRESH`/`STATUS` engine, the full rule/mode admin control surface, and the
+`PREPROC ...` command sugar, followed by a final `REFRESH`. It deploys **no**
+demo preprocessors and does not activate the preprocessor (the `ALTER SYSTEM`
+step below still applies).
+
+`release.sql` is **generated from the `sql/` sources**, not committed to the
+repo, so it can never drift from the framework code. Get it either way:
 
 ```bash
-uv run preproc bundle --output deploy_all.sql
+# Generate locally:
+uv run preproc bundle --release          # writes ./release.sql
 ```
 
-Then run `deploy_all.sql` in EXAplus or DbVisualiser against a clean database.
-The file contains all schemas, tables, views, grants, and scripts — equivalent
-to `preproc install` but self-contained and auditable. It does not activate the
-preprocessor; the `ALTER SYSTEM` step below still applies.
+Or download the **`release-sql`** artifact built by CI on every push (Actions →
+a workflow run → Artifacts). Then run it in EXAplus or DbVisualiser against a
+**clean** database (the `/` on its own line is the statement delimiter).
+
+`release.sql` is clean-install only (its `CREATE ROLE`/`CREATE SCHEMA` are not
+guarded, and it omits the upgrade-only column ALTERs). For idempotent re-runs
+and column upgrades on an existing install, use `uv run preproc install`.
+
+### 2b. Optional add-ons: examples/
+
+The [`examples/`](examples/) folder holds ready-to-run preprocessor modules,
+**one per file**, each ending with the command that registers it with the
+framework. Deploy only the ones you want, after `release.sql`:
+
+| File | Phase | What it adds |
+|------|-------|--------------|
+| [`examples/demo_ping.sql`](examples/demo_ping.sql) | EXPAND | `PING` → `SELECT 'PONG'` (the canonical authoring reference) |
+| [`examples/demo_translate.sql`](examples/demo_translate.sql) | TRANSLATE | dialect transpilation via a companion `sqlglot` UDF |
+| [`examples/demo_audit.sql`](examples/demo_audit.sql) | REWRITE | appends an inert `/* PREPROC_AUDIT user=… */` comment |
+| [`examples/confd_admin.sql`](examples/confd_admin.sql) | EXPAND | real-world add-on: `CONTROL DATABASE …` / `CONTROL BUCKETFS …` via the Exasol ConfD gateway |
 
 ### 3. Smoke test: PING → PONG
 
@@ -119,6 +151,7 @@ preprocessor.
 
 - [docs/how-it-works.md](docs/how-it-works.md) — pipeline architecture, phase semantics, dispatch rules, and module authoring
 - [docs/operations.md](docs/operations.md) — install, activate, add rules, refresh, status, and troubleshooting
+- [examples/](examples/) — ready-to-run preprocessor modules, one per file, each self-registering
 
 ## Development
 

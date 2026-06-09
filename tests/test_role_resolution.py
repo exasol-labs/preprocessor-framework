@@ -225,6 +225,42 @@ def test_user_without_role_excluded(clean_resolution):
 
 
 @pytest.mark.integration
+def test_public_role_resolves_to_all_users(clean_resolution):
+    """A ROLE-scoped rule on the implicit PUBLIC role resolves to every user.
+
+    PUBLIC membership is automatic and never appears in EXA_DBA_ROLE_PRIVS, so a
+    closure that walks only explicit grants resolves a PUBLIC-scoped rule to
+    nobody. Every database user must carry the rule after refresh — including
+    users holding no explicit role at all.
+    """
+    conn = clean_resolution
+    _insert_rule(
+        conn,
+        rule_id=1,
+        scope_type="ROLE",
+        scope_value="PUBLIC",
+        phase="EXPAND",
+        script_name="TEST_SCRIPT",
+        function_name="public_fn",
+    )
+
+    _refresh(conn)
+
+    resolved = {
+        r[0]
+        for r in conn.execute(
+            "SELECT DISTINCT user_name FROM PREPROC.RESOLUTION WHERE function_name = 'public_fn'"
+        ).fetchall()
+    }
+    all_users = {r[0] for r in conn.execute("SELECT user_name FROM EXA_DBA_USERS").fetchall()}
+    assert all_users, "EXA_DBA_USERS returned no users; cannot validate PUBLIC resolution"
+    assert resolved == all_users, (
+        "PUBLIC-scoped rule did not resolve to all users; "
+        f"missing: {sorted(all_users - resolved)}, unexpected: {sorted(resolved - all_users)}"
+    )
+
+
+@pytest.mark.integration
 def test_user_unions_with_role_same_phase(clean_resolution, role_holder):
     """A USER-scoped rule unions additively with a ROLE-derived rule.
 

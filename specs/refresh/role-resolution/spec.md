@@ -1,6 +1,6 @@
 # Feature: Role and User Resolution
 
-Expands the scoped rules in `PREPROC.CONFIG` (`ROLE`- and `USER`-scoped) into the flat, per-user `PREPROC.RESOLUTION` table that the runtime pipeline view reads. Resolution walks the transitive role-grant graph so a rule scoped to a role applies to every user who holds that role directly or through nested role grants. The transitive expansion is performed in SQL using Exasol's native `CONNECT BY` hierarchical query; the Lua script only orchestrates (executes the SQL, owns the transaction). The rebuild is a single atomic operation that also stamps the last-refresh time, so a partially-applied resolution is never observable.
+Expands the scoped rules in `PREPROC.CONFIG` (`ROLE`- and `USER`-scoped) into the flat, per-user `PREPROC.RESOLUTION` table that the runtime pipeline view reads. Resolution walks the transitive role-grant graph so a rule scoped to a role applies to every user who holds that role directly or through nested role grants. The transitive expansion is performed in SQL using Exasol's native `CONNECT BY` hierarchical query; the Lua script only orchestrates (executes the SQL, owns the transaction). The rebuild is a single atomic operation that also stamps the last-refresh time, so a partially-applied resolution is never observable. This delta adds profile hash computation and profile script codegen as a step in the atomic rebuild, ensuring profile scripts are always consistent with the current resolution, and adds the generational retire-then-reclaim cleanup of orphaned profile scripts as further steps inside the same atomic rebuild.
 
 ## Background
 
@@ -39,6 +39,15 @@ Expands the scoped rules in `PREPROC.CONFIG` (`ROLE`- and `USER`-scoped) into th
 * *AND* user `CAROL` holds neither `ROLE_A` nor any role transitively granted `ROLE_A`
 * *WHEN* the refresh script runs
 * *THEN* `PREPROC.RESOLUTION` MUST contain no row for `CAROL` derived from that rule
+
+### Scenario: A rule scoped to the PUBLIC role resolves to every user
+
+* *GIVEN* an enabled rule scoped to `ROLE` `PUBLIC`
+* *AND* every database user implicitly holds `PUBLIC`, a membership that is automatic and never recorded as a row in `EXA_DBA_ROLE_PRIVS`
+* *WHEN* the refresh script runs
+* *THEN* `PREPROC.RESOLUTION` MUST contain a row carrying that rule for **every** user in `EXA_DBA_USERS`, including users that hold no explicit role
+* *AND* the resolution MUST NOT depend on any `PUBLIC` grant appearing in `EXA_DBA_ROLE_PRIVS` (the closure MUST treat `PUBLIC` as held by all users)
+* *AND* a real role that has been granted to `PUBLIC` MUST likewise resolve to every user (its grant chain reaches `PUBLIC` and fans out to all users)
 
 ### Scenario: A USER-scoped rule unions with ROLE-derived rules for the same phase
 
@@ -102,3 +111,42 @@ Expands the scoped rules in `PREPROC.CONFIG` (`ROLE`- and `USER`-scoped) into th
 * *WHEN* that user attempts to execute `PREPROC.REFRESH`
 * *THEN* the database MUST reject the execution with an insufficient-privileges error
 * *AND* `PREPROC.RESOLUTION` MUST remain unchanged
+
+### Scenario: Refresh computes and stores a profile_hash for every non-empty resolved user chain
+
+* *GIVEN* the resolution rebuild has produced at least one row for a given user
+* *WHEN* `PREPROC.REFRESH_CORE.rebuild()` completes
+* *THEN* `PREPROC.RESOLUTION` MUST contain a `profile_hash` value for that user's rows (all rows for the same user MUST carry the same hash)
+* *AND* the hash MUST be a deterministic function of the ordered `(phase, ordinal, script_name, function_name, client_pattern)` chain for that user
+* *AND* users with no resolved rows MUST have no rows in RESOLUTION and therefore no hash
+
+### Scenario: Profile_hash changes when a user's chain changes
+
+* *GIVEN* a user's resolved chain at refresh N is `[module_A.fn @ ordinal 1]`
+* *AND* the chain at refresh N+1 is `[module_A.fn @ ordinal 1, module_B.fn @ ordinal 2]` (a rule was added)
+* *WHEN* refresh N+1 runs
+* *THEN* the `profile_hash` for that user MUST differ from the hash produced by refresh N
+
+### Scenario: Rebuild atomicity is preserved with profile codegen
+
+* *GIVEN* a refresh is in progress
+* *WHEN* `PREPROC.REFRESH_CORE.rebuild()` executes
+* *THEN* the profile codegen step MUST run after RESOLUTION rows are computed but before the single COMMIT
+* *AND* the `PREPROC_RT.P_<hash>` script MUST be created (via CREATE OR REPLACE) before the COMMIT that makes the RESOLUTION rows (including their profile_hash) visible to readers
+* *AND* the fingerprint-first / single-commit atomicity invariant from ADR-010 MUST be preserved
+
+### Scenario: Profile codegen runs after every CONFIG mutation that triggers rebuild
+
+* *GIVEN* a mutating admin script (e.g. RULE_ADD, SET_MODE) triggers `PREPROC.REFRESH_CORE.rebuild()` via the ADR-018 auto-refresh mechanism
+* *WHEN* the rebuild completes
+* *THEN* profile scripts MUST be generated or refreshed for all current distinct non-empty user chains
+* *AND* the `profile_hash` columns in RESOLUTION MUST reflect the newly generated scripts
+
+### Scenario: Rebuild runs generate, retire, and reclaim phases in a fixed order within the atomic envelope
+
+* *GIVEN* a refresh is in progress
+* *WHEN* `PREPROC.REFRESH_CORE.rebuild()` executes
+* *THEN* the rebuild MUST perform the steps in the fixed order: capture fingerprint, DELETE/INSERT RESOLUTION, generate (`CREATE OR REPLACE` real bodies for all current chains, clearing `orphaned_at` for any re-adopted hash), retire (stub + stamp `orphaned_at` for newly-orphaned hashes), reclaim (`DROP SCRIPT` + delete `PREPROC.PROFILES` row for retired hashes that are now provably unpinned), stamp SETTINGS, then a single COMMIT
+* *AND* the generate phase MUST run before the retire phase so a re-adopted hash is restored to its real body and never left as a stub
+* *AND* all of generate, retire, and reclaim MUST occur before the single COMMIT so the entire sequence is atomic (ADR-010)
+* *AND* no committed RESOLUTION row MUST ever reference a `profile_hash` whose script has been dropped by the reclaim phase

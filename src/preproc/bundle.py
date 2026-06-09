@@ -68,11 +68,14 @@ def _read_source(path: Path, kind: str) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def _collect_install_statements() -> list[str]:
+def _collect_install_statements(skip: frozenset[str] = frozenset()) -> list[str]:
     """Return install DDL statements in ascending filename order.
 
     Reuses install.py's comment-aware splitter so comments and trailing
-    semicolons are stripped exactly as the CLI install applies them.
+    semicolons are stripped exactly as the CLI install applies them. Filenames
+    in ``skip`` are omitted — used by the release bundle to drop the
+    upgrade-only ``25_column_upgrades.sql`` (whose additive ALTERs error on a
+    clean database where ``20_tables.sql`` already defines those columns).
     """
     sql_files = sorted(_SQL_INSTALL_DIR.glob("*.sql"))
     if not sql_files:
@@ -80,68 +83,125 @@ def _collect_install_statements() -> list[str]:
 
     statements: list[str] = []
     for sql_file in sql_files:
+        if sql_file.name in skip:
+            continue
         sql_text = sql_file.read_text(encoding="utf-8")
         for _tolerate, statement in _split_statements(sql_text):
             statements.append(statement)
     return statements
 
 
-def _collect_script_statements() -> list[str]:
-    """Return the Lua and UDF CREATE OR REPLACE statements in deployment order.
+def _script_statements() -> dict[str, str]:
+    """Return every CREATE OR REPLACE script wrapper keyed by a short name.
 
     The Lua wrappers mirror install.py byte-for-byte. The UDF source already
-    contains its full CREATE statement; a trailing ``;`` is stripped so the
-    ``/`` terminator is the sole delimiter.
-
-    Deployment order:
-      PREPROC_RT: MASTER, DEMO_PING_V1, DEMO_TRANSLATE_V1, DEMO_AUDIT_V1, CONTROL_SUGAR_V1
-      PREPROC:    REFRESH_CORE (importable module, no RETURNS TABLE),
-                  REFRESH, STATUS, RULE_ADD, RULE_DROP, RULE_ENABLE, RULE_DISABLE,
-                  RULE_LIST, SET_MODE, SET_SELF_DISABLE
-      UDF:        DEMO_SQLGLOT_TRANSPILE_V1
+    contains its full CREATE statement. ``run_bundle`` (full) and
+    ``run_release_bundle`` (framework-only) each select and order from this map,
+    so the wrapper text lives in exactly one place.
     """
-    master_body = _read_source(_MASTER_LUA_PATH, "master.lua")
-    demo_ping_body = _read_source(_DEMO_PING_LUA_PATH, "demo_ping_v1.lua")
-    demo_translate_body = _read_source(_DEMO_TRANSLATE_LUA_PATH, "demo_translate_v1.lua")
-    demo_audit_body = _read_source(_DEMO_AUDIT_LUA_PATH, "demo_audit_v1.lua")
-    control_sugar_body = _read_source(_CONTROL_SUGAR_LUA_PATH, "control_sugar_v1.lua")
-    refresh_core_body = _read_source(_REFRESH_CORE_LUA_PATH, "refresh_core.lua")
-    refresh_body = _read_source(_REFRESH_LUA_PATH, "refresh.lua")
-    status_body = _read_source(_STATUS_LUA_PATH, "status.lua")
-    rule_add_body = _read_source(_RULE_ADD_LUA_PATH, "rule_add.lua")
-    rule_drop_body = _read_source(_RULE_DROP_LUA_PATH, "rule_drop.lua")
-    rule_enable_body = _read_source(_RULE_ENABLE_LUA_PATH, "rule_enable.lua")
-    rule_disable_body = _read_source(_RULE_DISABLE_LUA_PATH, "rule_disable.lua")
-    rule_list_body = _read_source(_RULE_LIST_LUA_PATH, "rule_list.lua")
-    set_mode_body = _read_source(_SET_MODE_LUA_PATH, "set_mode.lua")
-    set_self_disable_body = _read_source(_SET_SELF_DISABLE_LUA_PATH, "set_self_disable.lua")
-    udf_text = _read_source(_DEMO_UDF_PATH, "demo_sqlglot_transpile_v1.sql")
-
-    return [
-        f"CREATE OR REPLACE LUA SCRIPT PREPROC_RT.MASTER() AS\n{master_body}",
-        f"CREATE OR REPLACE LUA SCRIPT PREPROC_RT.DEMO_PING_V1() AS\n{demo_ping_body}",
-        f"CREATE OR REPLACE LUA SCRIPT PREPROC_RT.DEMO_TRANSLATE_V1() AS\n{demo_translate_body}",
-        f"CREATE OR REPLACE LUA SCRIPT PREPROC_RT.DEMO_AUDIT_V1() AS\n{demo_audit_body}",
-        f"CREATE OR REPLACE LUA SCRIPT PREPROC_RT.CONTROL_SUGAR_V1() AS\n{control_sugar_body}",
-        f"CREATE OR REPLACE LUA SCRIPT PREPROC.REFRESH_CORE() AS\n{refresh_core_body}",
-        f"CREATE OR REPLACE LUA SCRIPT PREPROC.REFRESH() RETURNS TABLE AS\n{refresh_body}",
-        f"CREATE OR REPLACE LUA SCRIPT PREPROC.STATUS() RETURNS TABLE AS\n{status_body}",
-        f"CREATE OR REPLACE LUA SCRIPT PREPROC.RULE_ADD("
+    return {
+        "MASTER": f"CREATE OR REPLACE LUA SCRIPT PREPROC_RT.MASTER() AS\n"
+        f"{_read_source(_MASTER_LUA_PATH, 'master.lua')}",
+        "DEMO_PING_V1": f"CREATE OR REPLACE LUA SCRIPT PREPROC_RT.DEMO_PING_V1() AS\n"
+        f"{_read_source(_DEMO_PING_LUA_PATH, 'demo_ping_v1.lua')}",
+        "DEMO_TRANSLATE_V1": f"CREATE OR REPLACE LUA SCRIPT PREPROC_RT.DEMO_TRANSLATE_V1() AS\n"
+        f"{_read_source(_DEMO_TRANSLATE_LUA_PATH, 'demo_translate_v1.lua')}",
+        "DEMO_AUDIT_V1": f"CREATE OR REPLACE LUA SCRIPT PREPROC_RT.DEMO_AUDIT_V1() AS\n"
+        f"{_read_source(_DEMO_AUDIT_LUA_PATH, 'demo_audit_v1.lua')}",
+        "CONTROL_SUGAR_V1": f"CREATE OR REPLACE LUA SCRIPT PREPROC_RT.CONTROL_SUGAR_V1() AS\n"
+        f"{_read_source(_CONTROL_SUGAR_LUA_PATH, 'control_sugar_v1.lua')}",
+        "REFRESH_CORE": f"CREATE OR REPLACE LUA SCRIPT PREPROC.REFRESH_CORE() AS\n"
+        f"{_read_source(_REFRESH_CORE_LUA_PATH, 'refresh_core.lua')}",
+        "REFRESH": f"CREATE OR REPLACE LUA SCRIPT PREPROC.REFRESH() RETURNS TABLE AS\n"
+        f"{_read_source(_REFRESH_LUA_PATH, 'refresh.lua')}",
+        "STATUS": f"CREATE OR REPLACE LUA SCRIPT PREPROC.STATUS() RETURNS TABLE AS\n"
+        f"{_read_source(_STATUS_LUA_PATH, 'status.lua')}",
+        "RULE_ADD": f"CREATE OR REPLACE LUA SCRIPT PREPROC.RULE_ADD("
         f"scope_type, scope_value, phase, script_name, function_name, norefresh) "
-        f"RETURNS TABLE AS\n{rule_add_body}",
-        f"CREATE OR REPLACE LUA SCRIPT PREPROC.RULE_DROP(rule_id, norefresh) "
-        f"RETURNS TABLE AS\n{rule_drop_body}",
-        f"CREATE OR REPLACE LUA SCRIPT PREPROC.RULE_ENABLE(rule_id, norefresh) "
-        f"RETURNS TABLE AS\n{rule_enable_body}",
-        f"CREATE OR REPLACE LUA SCRIPT PREPROC.RULE_DISABLE(rule_id, norefresh) "
-        f"RETURNS TABLE AS\n{rule_disable_body}",
-        f"CREATE OR REPLACE LUA SCRIPT PREPROC.RULE_LIST() RETURNS TABLE AS\n{rule_list_body}",
-        f"CREATE OR REPLACE LUA SCRIPT PREPROC.SET_MODE(mode, norefresh) "
-        f"RETURNS TABLE AS\n{set_mode_body}",
-        f"CREATE OR REPLACE LUA SCRIPT PREPROC.SET_SELF_DISABLE(value) "
-        f"RETURNS TABLE AS\n{set_self_disable_body}",
-        udf_text,
-    ]
+        f"RETURNS TABLE AS\n{_read_source(_RULE_ADD_LUA_PATH, 'rule_add.lua')}",
+        "RULE_DROP": f"CREATE OR REPLACE LUA SCRIPT PREPROC.RULE_DROP(rule_id, norefresh) "
+        f"RETURNS TABLE AS\n{_read_source(_RULE_DROP_LUA_PATH, 'rule_drop.lua')}",
+        "RULE_ENABLE": f"CREATE OR REPLACE LUA SCRIPT PREPROC.RULE_ENABLE(rule_id, norefresh) "
+        f"RETURNS TABLE AS\n{_read_source(_RULE_ENABLE_LUA_PATH, 'rule_enable.lua')}",
+        "RULE_DISABLE": f"CREATE OR REPLACE LUA SCRIPT PREPROC.RULE_DISABLE(rule_id, norefresh) "
+        f"RETURNS TABLE AS\n{_read_source(_RULE_DISABLE_LUA_PATH, 'rule_disable.lua')}",
+        "RULE_LIST": f"CREATE OR REPLACE LUA SCRIPT PREPROC.RULE_LIST() RETURNS TABLE AS\n"
+        f"{_read_source(_RULE_LIST_LUA_PATH, 'rule_list.lua')}",
+        "SET_MODE": f"CREATE OR REPLACE LUA SCRIPT PREPROC.SET_MODE(mode, norefresh) "
+        f"RETURNS TABLE AS\n{_read_source(_SET_MODE_LUA_PATH, 'set_mode.lua')}",
+        "SET_SELF_DISABLE": f"CREATE OR REPLACE LUA SCRIPT PREPROC.SET_SELF_DISABLE(value) "
+        f"RETURNS TABLE AS\n{_read_source(_SET_SELF_DISABLE_LUA_PATH, 'set_self_disable.lua')}",
+        "DEMO_SQLGLOT_TRANSPILE_V1": _read_source(_DEMO_UDF_PATH, "demo_sqlglot_transpile_v1.sql"),
+    }
+
+
+# Full bundle: framework + demo modules + UDF (deployment order).
+_FULL_SCRIPT_ORDER = [
+    "MASTER",
+    "DEMO_PING_V1",
+    "DEMO_TRANSLATE_V1",
+    "DEMO_AUDIT_V1",
+    "CONTROL_SUGAR_V1",
+    "REFRESH_CORE",
+    "REFRESH",
+    "STATUS",
+    "RULE_ADD",
+    "RULE_DROP",
+    "RULE_ENABLE",
+    "RULE_DISABLE",
+    "RULE_LIST",
+    "SET_MODE",
+    "SET_SELF_DISABLE",
+    "DEMO_SQLGLOT_TRANSPILE_V1",
+]
+
+# Release bundle: framework + control surface only — no demo modules, no UDF.
+_RELEASE_SCRIPT_ORDER = [
+    "MASTER",
+    "CONTROL_SUGAR_V1",
+    "REFRESH_CORE",
+    "REFRESH",
+    "STATUS",
+    "RULE_ADD",
+    "RULE_DROP",
+    "RULE_ENABLE",
+    "RULE_DISABLE",
+    "RULE_LIST",
+    "SET_MODE",
+    "SET_SELF_DISABLE",
+]
+
+_RELEASE_HEADER = """\
+-- =============================================================================
+-- preprocessor-framework — release.sql   (single-file framework deploy)
+-- =============================================================================
+-- GENERATED by `preproc bundle --release`; built by CI on every push. Do not
+-- hand-edit — change the sources under sql/ instead.
+--
+-- Deploys the COMPLETE framework into a CLEAN Exasol instance: the
+-- PREPROC_ADMIN role, the PREPROC and PREPROC_RT schemas, all tables, the
+-- MY_PIPELINE view, schema grants, the MASTER dispatcher, the REFRESH/STATUS
+-- engine, the full rule/mode admin control surface, and the PREPROC command
+-- sugar (CONTROL_SUGAR_V1). A final REFRESH resolves the seeded control-sugar
+-- rule. Deploys NO demo/example preprocessors — those live in examples/.
+--
+-- Run the whole file in EXAplus or DbVisualiser. Plain SQL statements end with
+-- `;`; each Lua script body is wrapped between a `--/` line and a lone `/` line
+-- (the EXAplus block delimiter) so the semicolons inside the body are not taken
+-- as statement terminators. Clean-install only: CREATE ROLE/SCHEMA are unguarded
+-- and the upgrade-only column ALTERs are omitted — use `preproc install` for
+-- idempotent re-runs / column upgrades.
+-- Does NOT activate the preprocessor (a deliberate DBA action):
+--   ALTER SYSTEM SET sql_preprocessor_script = PREPROC_RT.MASTER;
+-- =============================================================================
+
+"""
+
+
+def _collect_script_statements() -> list[str]:
+    """Return the full-bundle script wrappers in deployment order (incl. demos)."""
+    scripts = _script_statements()
+    return [scripts[name] for name in _FULL_SCRIPT_ORDER]
 
 
 def _emit(statement: str) -> str:
@@ -174,3 +234,59 @@ def run_bundle(output_path: Path) -> int:
     body = "".join(_emit(statement) for statement in statements)
     output_path.write_text(body, encoding="utf-8")
     return len(statements)
+
+
+def _strip_terminator(statement: str) -> str:
+    """Return the statement text without any trailing ``;`` or bare ``/`` line."""
+    text = statement.rstrip()
+    if text.endswith("/") and (text == "/" or text[-2] == "\n"):
+        text = text[:-1].rstrip()
+    if text.endswith(";"):
+        text = text[:-1].rstrip()
+    return text
+
+
+def _emit_sql(statement: str) -> str:
+    """Format a plain SQL statement terminated by ``;``."""
+    return f"{_strip_terminator(statement)};\n\n"
+
+
+def _emit_script(statement: str) -> str:
+    """Format a script CREATE wrapped in the EXAplus ``--/`` ... ``/`` block.
+
+    A Lua/PYTHON3 script body contains semicolons, so a ``;`` terminator would
+    split it mid-body. EXAplus treats everything between a ``--/`` line and a
+    lone ``/`` line as a single statement, ignoring the inner semicolons.
+    """
+    return f"--/\n{_strip_terminator(statement)}\n/\n\n"
+
+
+def run_release_bundle(output_path: Path) -> int:
+    """Generate the framework-only single-file release at output_path.
+
+    The release is the deploy artifact for a CLEAN database: install DDL (minus
+    the upgrade-only column ALTERs), the MASTER dispatcher, the PREPROC command
+    sugar, and the full admin control surface — but NO demo modules and NO UDF
+    (those ship as opt-in files under examples/). It ends with
+    ``EXECUTE SCRIPT PREPROC.REFRESH`` so the seeded control-sugar rule resolves
+    immediately. Returns the number of statements written (the header comment is
+    not counted).
+
+    Delimiters follow the EXAplus convention: plain SQL (install DDL, the final
+    REFRESH) is terminated by ``;``; each Lua script CREATE is wrapped between a
+    ``--/`` line and a lone ``/`` line so its body's semicolons are not treated
+    as terminators.
+
+    Raises FileNotFoundError if any required source is missing.
+    """
+    scripts = _script_statements()
+    install_statements = _collect_install_statements(skip=frozenset({"25_column_upgrades.sql"}))
+    script_statements = [scripts[name] for name in _RELEASE_SCRIPT_ORDER]
+
+    body = _RELEASE_HEADER
+    body += "".join(_emit_sql(statement) for statement in install_statements)
+    body += "".join(_emit_script(statement) for statement in script_statements)
+    body += _emit_sql("EXECUTE SCRIPT PREPROC.REFRESH")
+
+    output_path.write_text(body, encoding="utf-8")
+    return len(install_statements) + len(script_statements) + 1

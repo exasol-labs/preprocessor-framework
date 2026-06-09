@@ -21,6 +21,7 @@ Pipeline observation (skip-guarded)
     (run sql/demo/seed.sql first).
 """
 
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -183,6 +184,8 @@ def test_audit_module_deployed(installed):
 @pytest.mark.integration
 def test_audit_module_passes_luacheck(installed):
     """The audit module source passes luacheck with zero warnings/errors."""
+    if shutil.which("luacheck") is None:
+        pytest.skip("luacheck binary is not installed")
     result = subprocess.run(
         ["luacheck", "sql/lua/demo_audit_v1.lua"],
         cwd=_REPO_ROOT,

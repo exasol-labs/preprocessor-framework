@@ -11,13 +11,17 @@ The luacheck test needs no database and runs wherever the ``luacheck`` binary is
 available; it skips cleanly otherwise.
 """
 
+import re
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
+
+_REFRESH_CORE = _REPO_ROOT / "sql" / "lua" / "refresh_core.lua"
 
 _ACTIVATE = "ALTER SESSION SET sql_preprocessor_script = PREPROC_RT.MASTER"
 _DEACTIVATE = "ALTER SESSION SET sql_preprocessor_script = ''"
@@ -116,6 +120,33 @@ def test_lookup_failure_fails_open(installed):
         installed.execute("RENAME VIEW PREPROC_RT.MY_PIPELINE_BROKEN_TEST TO MY_PIPELINE")
 
 
+def test_master_is_inline_dispatcher():
+    """master.lua is the single canonical INLINE dispatcher, not an import wrapper.
+
+    The earlier import("PREPROC_RT.MASTER_CORE") indirection was abandoned: in the
+    Exasol preprocessor context the per-rule dynamic import() works only at
+    top-level script scope, never from inside a function of an imported module, so
+    a thin import-wrapper silently fail-opened every dispatch. The dispatch +
+    swap logic therefore lives INLINE in master.lua, which is now the one source
+    of truth for the dispatch contract (the retirement stub is sourced from this
+    body verbatim). This pins that: master.lua MUST carry the inline dispatch (the
+    MY_PIPELINE read, the dispatch loop, and the swap ALTER SESSION) and MUST NOT
+    import a MASTER_CORE module. The header comment legitimately documents WHY the
+    MASTER_CORE indirection was abandoned, so the no-import check strips ``--``
+    comment lines before asserting; if the import reappears in real code, the
+    inline-dispatcher invariant has been broken.
+    """
+    master_src = (_REPO_ROOT / "sql" / "lua" / "master.lua").read_text(encoding="utf-8")
+
+    assert "MY_PIPELINE" in master_src
+    assert "dispatch_rule" in master_src
+    assert "sql_preprocessor_script" in master_src
+
+    code_lines = [line for line in master_src.splitlines() if not line.lstrip().startswith("--")]
+    code = "\n".join(code_lines)
+    assert 'import("PREPROC_RT.MASTER_CORE"' not in code
+
+
 def test_master_passes_luacheck():
     """The Lua sources pass luacheck with the project configuration."""
     if shutil.which("luacheck") is None:
@@ -131,5 +162,103 @@ def test_master_passes_luacheck():
         )
     except OSError as exc:
         pytest.skip(f"luacheck is present on PATH but not executable: {exc}")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def _extract_long_string(source, name):
+    """Return the body of a ``local <name> = [=[ ... ]=]`` level-1 long string."""
+    match = re.search(
+        r"local " + re.escape(name) + r" = \[=\[(.*?)\]=\]",
+        source,
+        re.DOTALL,
+    )
+    assert match is not None, f"could not extract {name} from refresh_core.lua"
+    return match.group(1)
+
+
+def _generate_sample_profile_body():
+    """Build a P_<hash> body from the REAL codegen template with one baked rule.
+
+    Mirrors ``build_profile_body`` in refresh_core.lua: the two template halves
+    (``PROFILE_BODY_PREFIX`` / ``PROFILE_BODY_SUFFIX``) are extracted verbatim
+    from the source so this test validates the SAME template the live codegen
+    emits, not a hand-copied approximation. A single REWRITE rule with a NULL
+    client_pattern is spliced between them.
+    """
+    source = _REFRESH_CORE.read_text()
+    prefix = _extract_long_string(source, "PROFILE_BODY_PREFIX")
+    suffix = _extract_long_string(source, "PROFILE_BODY_SUFFIX")
+    rule = (
+        '{phase="REWRITE",ordinal=1,'
+        'script_name="PREPROC_RT.DEMO_AUDIT_V1",'
+        'function_name="tag",client_pattern=nil}'
+    )
+    return prefix + rule + suffix
+
+
+def test_retirement_stub_is_master_body():
+    """The retirement stub is MASTER's own body, so stub == MASTER by construction.
+
+    The earlier baked-in stub constant (``RETIREMENT_STUB_BODY``) was abandoned.
+    refresh_core.lua now sources the stub by reading ``PREPROC_RT.MASTER``'s own
+    SCRIPT_TEXT from the catalog and stripping the leading ``CREATE ... AS`` line
+    (``master_stub_body()``), so the deployed stub is byte-for-byte MASTER's body
+    — one source of truth, and a dispatch-contract change in master.lua
+    propagates to every stub created or refreshed afterward.
+
+    Because the stub IS the master.lua body, its lint coverage is exactly
+    ``test_master_passes_luacheck`` (which lints all of ``sql/lua/``); there is no
+    separate stub source to validate. This pins the contract: refresh_core.lua
+    sources the stub from MASTER's catalog text and bakes NO independent stub
+    body (no ``RETIREMENT_STUB_BODY`` constant, no MASTER_CORE import wrapper).
+    """
+    refresh_src = _REFRESH_CORE.read_text(encoding="utf-8")
+
+    assert "EXA_ALL_SCRIPTS" in refresh_src
+    assert "'PREPROC_RT'" in refresh_src and "'MASTER'" in refresh_src
+    assert "master_stub_body" in refresh_src
+
+    assert "RETIREMENT_STUB_BODY" not in refresh_src
+    assert 'import("PREPROC_RT.MASTER_CORE"' not in refresh_src
+
+
+def test_generated_profile_passes_luacheck():
+    """A generated profile script body must pass luacheck.
+
+    Profile bodies are codegen output, not source files under ``sql/lua/``, so
+    the suite's directory luacheck never sees them. This generates a body from
+    the real template halves and validates it standalone with the same Exasol
+    globals the body declares, guarding the codegen template against syntax or
+    lint regressions independently of a live database.
+    """
+    if shutil.which("luacheck") is None:
+        pytest.skip("luacheck binary is not installed")
+
+    body = _generate_sample_profile_body()
+    with tempfile.NamedTemporaryFile("w", suffix=".lua", delete=False, encoding="utf-8") as handle:
+        handle.write(body)
+        path = handle.name
+    try:
+        result = subprocess.run(
+            [
+                "luacheck",
+                path,
+                "--std",
+                "lua51",
+                "--globals",
+                "sqlparsing",
+                "pquery",
+                "null",
+                "import",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError as exc:
+        pytest.skip(f"luacheck is present on PATH but not executable: {exc}")
+    finally:
+        Path(path).unlink()
 
     assert result.returncode == 0, result.stdout + result.stderr

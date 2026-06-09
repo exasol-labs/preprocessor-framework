@@ -21,7 +21,8 @@ CREATE TABLE IF NOT EXISTS PREPROC.RESOLUTION (
     phase            VARCHAR(32)     NOT NULL,
     script_name      VARCHAR(128)    NOT NULL,
     function_name    VARCHAR(128)    NOT NULL,
-    ordinal          DECIMAL(9, 0)
+    ordinal          DECIMAL(9, 0),
+    profile_hash     VARCHAR(64)
 );
 
 CREATE TABLE IF NOT EXISTS PREPROC.SETTINGS (
@@ -34,5 +35,6 @@ CREATE TABLE IF NOT EXISTS PREPROC.SETTINGS (
 CREATE TABLE IF NOT EXISTS PREPROC.PROFILES (
     profile_hash  VARCHAR(64)   NOT NULL,
     manifest      VARCHAR(4000) NOT NULL,
-    created_at    TIMESTAMP     NOT NULL
+    created_at    TIMESTAMP     NOT NULL,
+    orphaned_at   TIMESTAMP
 );
