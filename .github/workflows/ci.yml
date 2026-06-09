@@ -1,10 +1,11 @@
 # CI workflow skeleton for preprocessor-framework
 #
-# Four jobs:
-#   lint    — Python ruff + Lua luacheck (always runs, no database required)
-#   unit    — pytest -m "not integration" (always green; no database)
-#   test    — full pytest against exasol/docker-db (continue-on-error: true)
-#   release — build release.sql and upload it as a downloadable artifact
+# Five jobs:
+#   lint           — Python ruff + Lua luacheck (always runs, no database)
+#   unit           — pytest -m "not integration" (always green; no database)
+#   test           — full pytest against exasol/docker-db (continue-on-error)
+#   release        — build release.sql and upload it as a per-run artifact
+#   github-release — on a v* tag, publish a GitHub Release with release.sql
 #
 # The docker-db image (exasol/docker-db:latest-8) can take 5-10 min to start,
 # so the integration job is marked continue-on-error to avoid blocking PRs while
@@ -184,3 +185,37 @@ jobs:
           name: release-sql
           path: release.sql
           if-no-files-found: error
+
+  # github-release: on a version tag (e.g. v1.2.0), publish a GitHub Release
+  # with the generated release.sql attached as a downloadable asset. Gated on the
+  # mandatory lint + unit checks so a tag never publishes a build that fails them
+  # (the docker-db integration job is informational / continue-on-error, so it is
+  # deliberately not a prerequisite here). Tag and push to trigger:
+  #   git tag v1.2.0 && git push origin v1.2.0
+  github-release:
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [lint, unit]
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install Python dependencies
+        run: uv sync
+
+      - name: Generate release.sql
+        run: uv run preproc bundle --release --output release.sql
+
+      - name: Publish GitHub Release with release.sql attached
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" release.sql \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes

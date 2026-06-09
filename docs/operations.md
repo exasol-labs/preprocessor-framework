@@ -95,10 +95,22 @@ framework code. Obtain it either way:
 uv run preproc bundle --release          # writes ./release.sql
 ```
 
-or download the **`release-sql`** artifact that CI builds on every push (the
-`release` job; Actions → workflow run → Artifacts). Run the file in EXAplus or
-DbVisualiser against a **clean** Exasol instance (the `/` on its own line is the
-statement delimiter — required because Lua bodies contain semicolons).
+or download a CI-built copy. CI produces it two ways:
+
+- **Every push** — the `release` job uploads `release.sql` as the **`release-sql`**
+  workflow artifact (Actions → workflow run → Artifacts); retained per the repo's
+  artifact-retention policy.
+- **On a version tag** (`v*`, e.g. `v1.2.0`) — the `github-release` job publishes
+  a **GitHub Release** with `release.sql` attached as a permanent, versioned
+  download (gated on the lint + unit checks). Cut one with:
+  ```bash
+  git tag v1.2.0 && git push origin v1.2.0
+  ```
+
+Run the file in EXAplus or DbVisualiser against a **clean** Exasol instance. Plain
+SQL statements end with `;`; each Lua script body is wrapped between a `--/` line
+and a lone `/` line (the EXAplus block delimiter) because the bodies contain
+semicolons.
 
 It deploys the `PREPROC_ADMIN` role, both schemas, all tables, the `MY_PIPELINE`
 view, schema grants, the `MASTER` dispatcher, the `REFRESH`/`STATUS` engine, the
