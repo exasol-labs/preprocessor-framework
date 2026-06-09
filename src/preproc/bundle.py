@@ -94,7 +94,10 @@ def _collect_script_statements() -> list[str]:
     ``/`` terminator is the sole delimiter.
 
     Deployment order:
-      PREPROC_RT: MASTER, DEMO_PING_V1, DEMO_TRANSLATE_V1, DEMO_AUDIT_V1, CONTROL_SUGAR_V1
+      PREPROC_RT: MASTER (the single canonical inline dispatcher; its body is
+                  read back from the catalog by the refresh path to build every
+                  retirement stub), DEMO_PING_V1, DEMO_TRANSLATE_V1,
+                  DEMO_AUDIT_V1, CONTROL_SUGAR_V1
       PREPROC:    REFRESH_CORE (importable module, no RETURNS TABLE),
                   REFRESH, STATUS, RULE_ADD, RULE_DROP, RULE_ENABLE, RULE_DISABLE,
                   RULE_LIST, SET_MODE, SET_SELF_DISABLE

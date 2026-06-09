@@ -7,11 +7,13 @@
 CREATE OR REPLACE VIEW PREPROC_RT.MY_PIPELINE AS
 SELECT
     s.self_disable_allowed,
+    s.mode,
     r.phase,
     r.client_pattern,
     r.script_name,
     r.function_name,
-    r.ordinal
+    r.ordinal,
+    r.profile_hash
 FROM PREPROC.SETTINGS s
 LEFT JOIN PREPROC.RESOLUTION r
     ON r.user_name = CURRENT_USER

@@ -203,6 +203,13 @@ def _deploy_master(connection: Any, verbose: bool) -> None:
         )
 
     connection.execute("OPEN SCHEMA PREPROC_RT")
+    # master.lua is the single canonical source for resolve -> dispatch -> swap.
+    # Its body is deployed verbatim as PREPROC_RT.MASTER; the refresh path reads
+    # this same body back from EXA_ALL_SCRIPTS to build every retirement stub, so
+    # a retired profile is byte-for-byte identical to MASTER (one source of truth,
+    # no second copy). The earlier MASTER_CORE import-module was removed: dynamic
+    # import() works only at top-level preprocessor scope, so the dispatch logic
+    # must live inline in MASTER, not behind an import wrapper.
     create_script = f"CREATE OR REPLACE LUA SCRIPT PREPROC_RT.MASTER() AS\n{lua_body}"
     connection.execute(create_script)
     create_demo_ping = (

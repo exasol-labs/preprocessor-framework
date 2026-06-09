@@ -210,3 +210,53 @@ def test_preproc_admin_dictionary_grant(installed):
         "AND PRIVILEGE = 'SELECT ANY DICTIONARY'"
     ).fetchall()
     assert len(rows) == 1, "SELECT ANY DICTIONARY not granted to PREPROC_ADMIN"
+
+
+@pytest.mark.integration
+def test_resolution_has_profile_hash_column(installed):
+    """PREPROC.RESOLUTION must have a PROFILE_HASH column."""
+    rows = installed.execute(
+        "SELECT COLUMN_NAME FROM EXA_ALL_COLUMNS "
+        "WHERE COLUMN_SCHEMA = 'PREPROC' AND COLUMN_TABLE = 'RESOLUTION' "
+        "AND COLUMN_NAME = 'PROFILE_HASH'"
+    ).fetchall()
+    assert len(rows) == 1, "PROFILE_HASH column not found in PREPROC.RESOLUTION"
+
+
+@pytest.mark.integration
+def test_pipeline_view_exposes_mode_and_hash(installed):
+    """PREPROC_RT.MY_PIPELINE must expose MODE and PROFILE_HASH columns."""
+    rows = installed.execute(
+        "SELECT COLUMN_NAME FROM EXA_ALL_COLUMNS "
+        "WHERE COLUMN_SCHEMA = 'PREPROC_RT' AND COLUMN_TABLE = 'MY_PIPELINE' "
+        "AND COLUMN_NAME IN ('MODE', 'PROFILE_HASH') "
+        "ORDER BY COLUMN_NAME"
+    ).fetchall()
+    col_names = [r[0] for r in rows]
+    assert "MODE" in col_names, f"MODE not found in MY_PIPELINE columns: {col_names}"
+    assert "PROFILE_HASH" in col_names, (
+        f"PROFILE_HASH not found in MY_PIPELINE columns: {col_names}"
+    )
+
+
+@pytest.mark.integration
+def test_profiles_has_orphaned_at_column(installed):
+    """PREPROC.PROFILES must have an ORPHANED_AT column."""
+    rows = installed.execute(
+        "SELECT COLUMN_NAME FROM EXA_ALL_COLUMNS "
+        "WHERE COLUMN_SCHEMA = 'PREPROC' AND COLUMN_TABLE = 'PROFILES' "
+        "AND COLUMN_NAME = 'ORPHANED_AT'"
+    ).fetchall()
+    assert len(rows) == 1, "ORPHANED_AT column not found in PREPROC.PROFILES"
+
+
+@pytest.mark.integration
+def test_orphaned_at_upgrade_idempotent(installed):
+    """Running install a second time must not drop ORPHANED_AT from PREPROC.PROFILES."""
+    run_install(installed)
+    rows = installed.execute(
+        "SELECT COLUMN_NAME FROM EXA_ALL_COLUMNS "
+        "WHERE COLUMN_SCHEMA = 'PREPROC' AND COLUMN_TABLE = 'PROFILES' "
+        "AND COLUMN_NAME = 'ORPHANED_AT'"
+    ).fetchall()
+    assert len(rows) == 1, "ORPHANED_AT column missing after re-install"
