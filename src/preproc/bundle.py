@@ -185,10 +185,12 @@ _RELEASE_HEADER = """\
 -- sugar (CONTROL_SUGAR_V1). A final REFRESH resolves the seeded control-sugar
 -- rule. Deploys NO demo/example preprocessors — those live in examples/.
 --
--- Run the whole file in EXAplus or DbVisualiser; the `/` on its own line is the
--- statement delimiter (Lua bodies contain semicolons). Clean-install only:
--- CREATE ROLE/SCHEMA are unguarded and the upgrade-only column ALTERs are
--- omitted — use `preproc install` for idempotent re-runs / column upgrades.
+-- Run the whole file in EXAplus or DbVisualiser. Plain SQL statements end with
+-- `;`; each Lua script body is wrapped between a `--/` line and a lone `/` line
+-- (the EXAplus block delimiter) so the semicolons inside the body are not taken
+-- as statement terminators. Clean-install only: CREATE ROLE/SCHEMA are unguarded
+-- and the upgrade-only column ALTERs are omitted — use `preproc install` for
+-- idempotent re-runs / column upgrades.
 -- Does NOT activate the preprocessor (a deliberate DBA action):
 --   ALTER SYSTEM SET sql_preprocessor_script = PREPROC_RT.MASTER;
 -- =============================================================================
@@ -234,6 +236,31 @@ def run_bundle(output_path: Path) -> int:
     return len(statements)
 
 
+def _strip_terminator(statement: str) -> str:
+    """Return the statement text without any trailing ``;`` or bare ``/`` line."""
+    text = statement.rstrip()
+    if text.endswith("/") and (text == "/" or text[-2] == "\n"):
+        text = text[:-1].rstrip()
+    if text.endswith(";"):
+        text = text[:-1].rstrip()
+    return text
+
+
+def _emit_sql(statement: str) -> str:
+    """Format a plain SQL statement terminated by ``;``."""
+    return f"{_strip_terminator(statement)};\n\n"
+
+
+def _emit_script(statement: str) -> str:
+    """Format a script CREATE wrapped in the EXAplus ``--/`` ... ``/`` block.
+
+    A Lua/PYTHON3 script body contains semicolons, so a ``;`` terminator would
+    split it mid-body. EXAplus treats everything between a ``--/`` line and a
+    lone ``/`` line as a single statement, ignoring the inner semicolons.
+    """
+    return f"--/\n{_strip_terminator(statement)}\n/\n\n"
+
+
 def run_release_bundle(output_path: Path) -> int:
     """Generate the framework-only single-file release at output_path.
 
@@ -245,14 +272,21 @@ def run_release_bundle(output_path: Path) -> int:
     immediately. Returns the number of statements written (the header comment is
     not counted).
 
+    Delimiters follow the EXAplus convention: plain SQL (install DDL, the final
+    REFRESH) is terminated by ``;``; each Lua script CREATE is wrapped between a
+    ``--/`` line and a lone ``/`` line so its body's semicolons are not treated
+    as terminators.
+
     Raises FileNotFoundError if any required source is missing.
     """
     scripts = _script_statements()
-    statements = (
-        _collect_install_statements(skip=frozenset({"25_column_upgrades.sql"}))
-        + [scripts[name] for name in _RELEASE_SCRIPT_ORDER]
-        + ["EXECUTE SCRIPT PREPROC.REFRESH"]
-    )
-    body = _RELEASE_HEADER + "".join(_emit(statement) for statement in statements)
+    install_statements = _collect_install_statements(skip=frozenset({"25_column_upgrades.sql"}))
+    script_statements = [scripts[name] for name in _RELEASE_SCRIPT_ORDER]
+
+    body = _RELEASE_HEADER
+    body += "".join(_emit_sql(statement) for statement in install_statements)
+    body += "".join(_emit_script(statement) for statement in script_statements)
+    body += _emit_sql("EXECUTE SCRIPT PREPROC.REFRESH")
+
     output_path.write_text(body, encoding="utf-8")
-    return len(statements)
+    return len(install_statements) + len(script_statements) + 1

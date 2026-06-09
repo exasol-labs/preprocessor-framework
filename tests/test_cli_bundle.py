@@ -284,10 +284,18 @@ def test_release_bundle_is_framework_only(tmp_path):
     assert "PYTHON3 SCALAR SCRIPT" not in text, "release bundle must not include the demo UDF"
     assert "ADD COLUMN" not in text, "release bundle must omit upgrade-only column ALTERs"
 
-    # The final statement is the REFRESH that resolves the seeded sugar rule.
-    last_statement = [s for s in text.split("\n/\n") if s.strip()][-1]
-    assert "EXECUTE SCRIPT PREPROC.REFRESH" in last_statement
-    assert "\n/\n" in text, "release bundle must use slash delimiters"
+    # Delimiter contract (EXAplus style): plain SQL is ';'-terminated; each Lua
+    # script CREATE is wrapped between a '--/' line and a lone '/' line so the
+    # semicolons inside the body are not treated as terminators.
+    assert "CREATE ROLE PREPROC_ADMIN;" in text, "install DDL must be ';'-terminated"
+    assert "--/\nCREATE OR REPLACE LUA SCRIPT PREPROC_RT.MASTER() AS" in text, (
+        "script bodies must be wrapped in a --/ ... / block"
+    )
+    # The file ends with the REFRESH (plain SQL, ';'-terminated) that resolves the
+    # seeded control-sugar rule.
+    assert text.rstrip().endswith("EXECUTE SCRIPT PREPROC.REFRESH;"), (
+        "release bundle must end with a ';'-terminated REFRESH"
+    )
 
 
 def test_cli_bundle_release_flag(tmp_path):
