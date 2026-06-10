@@ -24,7 +24,7 @@ statement delimiter (required because Lua/Python bodies contain semicolons).
 | `demo_ping.sql` | EXPAND | `PING` → `SELECT 'PONG'`. The canonical authoring reference — read its in-body comments for the full EXPAND module contract. |
 | `demo_translate.sql` | TRANSLATE | Transpiles a `--!dialect:<name>`-marked statement to Exasol SQL via the companion `sqlglot` Python3 UDF. Deploys two objects (UDF + module). |
 | `demo_audit.sql` | REWRITE | Appends an inert `/* PREPROC_AUDIT user=<CURRENT_USER> */` comment. Demonstration only — writes to no table. |
-| `confd_admin.sql` | EXPAND | A real-world add-on: the `CONTROL DATABASE …` and `CONTROL BUCKETFS …` SQL command surfaces, routed through a generic Exasol ConfD gateway UDF. Deploys five objects and self-registers two `ROLE DBA` rules. Requires a `CONFD_CONNECTION` object (see the file header). Vendored from the companion exa-confd-admin project. |
+| `confd_admin.sql` | EXPAND | A real-world add-on: the `CONTROL DATABASE …` and `CONTROL BUCKETFS …` SQL command surfaces, routed through a generic Exasol ConfD gateway UDF. Deploys five objects and self-registers two `ROLE DBA` rules. Requires a `CONFD_CONNECTION` object (see the file header). Vendored from the companion exa-confd-admin project. **Full command reference: [`confd_admin.md`](confd_admin.md).** |
 
 ## Registration scope
 

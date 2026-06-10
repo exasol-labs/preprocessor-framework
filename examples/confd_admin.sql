@@ -908,8 +908,21 @@ CREATE OR REPLACE LUA SCRIPT PREPROC.ADMIN_CONFD_JOB(job_name, params_json) RETU
 -- script. This script:
 --   1. resolves the ConfD CONNECTION object name (a constant — see below),
 --   2. calls the generic UDF PREPROC_RT.CONFD_JOB_V1(connection, job, params),
---   3. converts the UDF's ERR: sentinel into a loud script error, and
---   4. returns the ConfD job's JSON result as a single-row table.
+--   3. converts the UDF's ERR: sentinel into a loud script error,
+--   4. raises if the ConfD envelope reports a non-zero result_code, and
+--   5. breaks the job's result_output down into a readable two-column table
+--      (FIELD, VALUE_TEXT) — one row per leaf value — instead of returning one
+--      long JSON blob. Nested objects/arrays become dotted/indexed paths
+--      (e.g. nodes.active[1], usage_persistent[1].size), keys are sorted for
+--      stable output, and empty containers show as "(empty)".
+--
+-- Output shape
+--   Every job returns the same two columns, so a generic SHOW/inspect command is
+--   readable row-by-row in any SQL client. ConfD wraps each job in an envelope
+--   ({result_code, result_name, result_output, …}); we surface only the
+--   result_output payload on success (the part the operator cares about). The
+--   columns are FIELD / VALUE_TEXT — never RESULT or VALUE, both reserved
+--   keywords that would make the table description string invalid.
 --
 -- Why a generic admin script (not one per job)
 --   ConfD has dozens of jobs and a uniform call shape. Keeping ONE admin script
@@ -975,10 +988,87 @@ if string.sub(result_str, 1, 4) == "ERR:" then
     )
 end
 
--- Success: return the JSON result as a single-row, single-column table. The
--- output column is named CONFD_RESULT, not RESULT: RESULT is a reserved keyword
--- in Exasol and is rejected as a column name in the table description string.
-exit({{result_str}}, "confd_result VARCHAR(2000000)")
+-- Success path: break the JSON result down into a readable two-column table.
+-- Column names are FIELD / VALUE_TEXT, never RESULT or VALUE — both reserved
+-- keywords that Exasol rejects in the table description string.
+local COLS = "field VARCHAR(256), value_text VARCHAR(2000000)"
+
+-- cjson is available to Exasol Lua scripts via require (no global `json`).
+local cjson = require("cjson")
+local ok_decode, envelope = pcall(cjson.decode, result_str)
+if not ok_decode or type(envelope) ~= "table" then
+    -- Not JSON we can break down (shouldn't happen for a ConfD job) — surface
+    -- the raw text verbatim rather than failing the operator's command.
+    exit({ { "result", result_str } }, COLS)
+end
+
+-- ConfD wraps every job in an envelope; a non-zero result_code is a failure.
+-- Raise it loudly (same contract as the ERR: sentinel above) so a failed job is
+-- never mistaken for an empty result set.
+local code = envelope.result_code
+if type(code) == "number" and code ~= 0 then
+    error(
+        "PREPROC.ADMIN_CONFD_JOB: ConfD job '" .. tostring(job_name)
+            .. "' failed (code " .. tostring(code) .. "): "
+            .. tostring(envelope.result_desc or envelope.result_name or "")
+    )
+end
+
+-- Flatten an arbitrarily-nested decoded value into FIELD/VALUE_TEXT rows. Object
+-- keys are sorted for stable output and joined with '.'; array elements use a
+-- [i] suffix; JSON null and empty containers get explicit leaf markers so the
+-- operator never sees a blank where a value was expected.
+local JNULL = cjson.null
+local rows = {}
+
+local function flatten(prefix, value)
+    local label = (prefix ~= "" and prefix) or "value"
+    if value == JNULL then
+        rows[#rows + 1] = { label, "null" }
+        return
+    end
+    if type(value) ~= "table" then
+        rows[#rows + 1] = { label, tostring(value) }
+        return
+    end
+    local count = 0
+    for _ in pairs(value) do
+        count = count + 1
+    end
+    if count == 0 then
+        rows[#rows + 1] = { label, "(empty)" }
+    elseif count == #value then
+        for i = 1, #value do
+            flatten(prefix .. "[" .. i .. "]", value[i])
+        end
+    else
+        local keys = {}
+        for k in pairs(value) do
+            keys[#keys + 1] = tostring(k)
+        end
+        table.sort(keys)
+        for _, k in ipairs(keys) do
+            local child = (prefix == "") and k or (prefix .. "." .. k)
+            flatten(child, value[k])
+        end
+    end
+end
+
+-- We are mostly interested in result_output; if a job ever omits it, fall back
+-- to flattening the whole envelope so nothing is silently lost.
+local output = envelope.result_output
+if output == nil then
+    output = envelope
+end
+flatten("", output)
+
+-- A job that succeeds with no output (e.g. an abort/delete) yields zero rows;
+-- emit one status row so the operator sees a clear confirmation.
+if #rows == 0 then
+    rows[#rows + 1] = { "status", tostring(envelope.result_name or "OK") }
+end
+
+exit(rows, COLS)
 /
 
 
