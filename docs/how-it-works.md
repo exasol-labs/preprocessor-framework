@@ -35,7 +35,7 @@ EXECUTE and SELECT on this schema are granted to PUBLIC. Holds:
 | Object | Purpose |
 |---|---|
 | `PREPROC_RT.MASTER` | The dispatcher preprocessor script — also the single source for every retirement stub (see [session self-optimization](#session-self-optimization-zero-overhead-paths)) |
-| `PREPROC_RT.MY_PIPELINE` | Definer-rights view: current user's resolved pipeline, plus `mode` and `profile_hash` |
+| `PREPROC_RT.MY_PIPELINE` | Definer-rights view: current user's resolved pipeline, plus `mode`, `self_disable_allowed`, and `profile_hash` |
 | `PREPROC_RT.P_<hash>` | Generated per-chain profile scripts (one per distinct resolved rule chain); the swap target for convenience-mode sessions |
 | `PREPROC_RT.DEMO_PING_V1` | Demo command module (EXPAND phase) |
 | `PREPROC_RT.DEMO_TRANSLATE_V1` | Demo TRANSLATE module |

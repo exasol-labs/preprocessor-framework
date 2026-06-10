@@ -59,7 +59,7 @@ uv run preproc install --verbose
 | `PREPROC.SET_MODE` | Lua script (set framework mode) |
 | `PREPROC.SET_SELF_DISABLE` | Lua script (set self-disable policy) |
 | `PREPROC_RT` | Schema (PUBLIC-accessible) |
-| `PREPROC_RT.MY_PIPELINE` | View (definer-rights; scoped to `CURRENT_USER`; exposes `mode` + `profile_hash`) |
+| `PREPROC_RT.MY_PIPELINE` | View (definer-rights; scoped to `CURRENT_USER`; exposes `mode`, `self_disable_allowed`, and `profile_hash`) |
 | `PREPROC_RT.MASTER` | Lua script (dispatcher; also the source body for retirement stubs) |
 | `PREPROC_RT.DEMO_PING_V1` | Lua script (demo EXPAND module) |
 | `PREPROC_RT.DEMO_TRANSLATE_V1` | Lua script (demo TRANSLATE module) |
@@ -252,7 +252,7 @@ This gives an interactive shorthand without leaving SQL:
 
 | Sugar statement | Equivalent script call |
 |---|---|
-| `PREPROC ADD RULE scope_type scope_value phase script_name function_name` | `EXECUTE SCRIPT PREPROC.RULE_ADD(...)` |
+| `PREPROC ADD RULE FOR (ROLE\|USER) scope_value PHASE phase SCRIPT script_name FUNCTION function_name` | `EXECUTE SCRIPT PREPROC.RULE_ADD(...)` |
 | `PREPROC DROP RULE rule_id` | `EXECUTE SCRIPT PREPROC.RULE_DROP(rule_id, NULL)` |
 | `PREPROC ENABLE RULE rule_id` | `EXECUTE SCRIPT PREPROC.RULE_ENABLE(rule_id, NULL)` |
 | `PREPROC DISABLE RULE rule_id` | `EXECUTE SCRIPT PREPROC.RULE_DISABLE(rule_id, NULL)` |
@@ -265,7 +265,7 @@ This gives an interactive shorthand without leaving SQL:
 Append `NOREFRESH` to any mutating command to skip the automatic refresh:
 
 ```sql
-PREPROC ADD RULE ROLE ANALYSTS EXPAND PREPROC_RT.MY_MODULE_V1 expand NOREFRESH
+PREPROC ADD RULE FOR ROLE ANALYSTS PHASE EXPAND SCRIPT PREPROC_RT.MY_MODULE_V1 FUNCTION expand NOREFRESH
 PREPROC REFRESH
 ```
 
@@ -280,7 +280,7 @@ Use the sugar or call the script directly:
 
 ```sql
 -- Sugar (convenience mode, preprocessor active):
-PREPROC ADD RULE ROLE ANALYSTS EXPAND PREPROC_RT.MY_MODULE_V1 expand
+PREPROC ADD RULE FOR ROLE ANALYSTS PHASE EXPAND SCRIPT PREPROC_RT.MY_MODULE_V1 FUNCTION expand
 
 -- Direct script call:
 EXECUTE SCRIPT PREPROC.RULE_ADD('ROLE', 'ANALYSTS', 'EXPAND', 'PREPROC_RT.MY_MODULE_V1', 'expand', NULL);
