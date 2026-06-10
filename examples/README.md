@@ -25,6 +25,8 @@ statement delimiter (required because Lua/Python bodies contain semicolons).
 | `demo_translate.sql` | TRANSLATE | Transpiles a `--!dialect:<name>`-marked statement to Exasol SQL via the companion `sqlglot` Python3 UDF. Deploys two objects (UDF + module). |
 | `demo_audit.sql` | REWRITE | Appends an inert `/* PREPROC_AUDIT user=<CURRENT_USER> */` comment. Demonstration only — writes to no table. |
 | `confd_admin.sql` | EXPAND | A real-world add-on: the `CONTROL DATABASE …` and `CONTROL BUCKETFS …` SQL command surfaces, routed through a generic Exasol ConfD gateway UDF. Deploys four objects and self-registers two `ROLE DBA` rules. Requires a `CONFD_CONNECTION` object (see the file header). Vendored from the companion confd-via-sql project. **Full command reference: [`confd_admin.md`](confd_admin.md).** |
+| `ergonomics_cast.sql` | TRANSLATE | PostgreSQL-style `expr::type` cast shorthand → `CAST(expr AS type)`. Pure-Lua; skips strings/identifiers/comments; passes any unrecognised operand through unchanged. |
+| `ergonomics_trailing_comma.sql` | TRANSLATE | Removes optional trailing commas before `)` or a list-terminating keyword (`SELECT a, b, FROM t`). Pure-Lua; additive — statements without trailing commas are untouched. |
 
 ## Registration scope
 

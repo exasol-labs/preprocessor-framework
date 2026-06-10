@@ -872,3 +872,87 @@ The closure source UNIONs in a synthetic `'PUBLIC' -> user` edge for every user 
 ### Consequences
 
 `PUBLIC` is now a supported, documented scope that applies a rule to all users unconditionally. The fingerprint inputs are unchanged, so STATUS staleness detection is unaffected. The synthetic edges add one row per user to the closure input — negligible at any realistic user count.
+
+---
+
+## ADR-032: New `ergonomics/` spec domain rather than placing under `dispatch/`
+
+**Date:** 2026-06-10
+**Plan:** `add-ergonomics-cast-trailing-comma`
+**Status:** Accepted
+
+### Context
+
+The `dispatch/` domain covers framework dispatch mechanics — how phases work, how rules are dispatched, how audit rewrites apply. The two new ergonomics features (`cast-shorthand`, `trailing-comma`) are user-facing SQL conveniences delivered through the examples layer. Placing them under `dispatch/` would blur the boundary between framework internals and end-user SQL sugar. An `examples/` domain was also considered, but "examples" describes the delivery vehicle, not the capability; future non-example ergonomics features (if promoted to core install) should land in the same domain.
+
+### Decision
+
+Create a new `ergonomics/` top-level domain for the two new feature specs (`cast-shorthand`, `trailing-comma`), rather than adding them under the existing `dispatch/` domain.
+
+### Options Considered
+
+| Option | Verdict |
+|--------|---------|
+| New `ergonomics/` domain | Chosen — makes the user-facing-convenience vs dispatch-mechanics boundary explicit; keeps `dispatch/` coherent; future ergonomics features land in the same domain regardless of delivery vehicle |
+| Place under `dispatch/` | Rejected — `dispatch/` covers framework mechanics; ergonomics is a distinct concern |
+| New `examples/` domain | Rejected — names the delivery vehicle, not the capability; would exclude future core-install promotions |
+
+### Consequences
+
+The `ergonomics/` domain is the canonical home for user-facing SQL convenience transforms. The `dispatch/` domain stays focused on framework dispatch mechanics. Any future ergonomics feature — whether delivered via `examples/` or promoted to core install — belongs in `ergonomics/`.
+
+---
+
+## ADR-033: Conservative supported-operand subset for the cast shorthand scanner
+
+**Date:** 2026-06-10
+**Plan:** `add-ergonomics-cast-trailing-comma`
+**Status:** Accepted
+
+### Context
+
+The `ERGONOMICS_CAST_V1` module must scan backwards from each `::` token to find the left operand boundary. A wrong boundary silently corrupts SQL — the most dangerous failure mode in a preprocessing context. A fully general expression parser (tracking all operator precedences, subquery syntax, CASE, ARRAY, etc.) would be complex and still prone to edge cases. The module needs a documented, testable subset that covers the overwhelming majority of practical usage and fails closed on anything outside that subset.
+
+### Decision
+
+The backwards operand scan supports a specific, documented subset of primary expression forms: unqualified and dotted identifiers, parenthesised expressions, function calls (including schema-qualified UDF calls), string and numeric literals, and chained CAST results. Any `::` whose left operand is not in this subset causes the module to return the original text unchanged for the entire statement.
+
+### Options Considered
+
+| Option | Verdict |
+|--------|---------|
+| Conservative documented subset; fail closed on unrecognised operand | Chosen — wrong operand boundary silently corrupts SQL; the supported subset covers the overwhelming majority of practical `::` usage; failing closed on unusual forms is far preferable to emitting `CAST(wrong_expr AS type)` |
+| Fully general expression parsing | Rejected — complex, still prone to edge cases, out of scope for a single-pass Lua scanner |
+
+### Consequences
+
+The supported-operand subset is explicitly documented, so module authors know when to write `CAST(expr AS type)` explicitly instead. A `::` with an unrecognised left operand causes the module to return the original statement unchanged — it never emits a partial or corrupted rewrite. The scope limitation is a documented, testable contract.
+
+---
+
+## ADR-034: Trailing-comma recognition: structural `comma→)` plus conservative keyword set
+
+**Date:** 2026-06-10
+**Plan:** `add-ergonomics-cast-trailing-comma`
+**Status:** Accepted
+
+### Context
+
+`ERGONOMICS_TRAILING_COMMA_V1` must decide which commas are trailing commas and safe to remove. A purely structural rule (`comma → )`) is provably safe but misses the most common real-world case (`SELECT a, b, FROM t`). A full SQL grammar parser reintroduces the ~133–151 ms/statement UDF latency that motivated pure-Lua modules in the first place. A larger keyword set increases the risk of false positives on column aliases that happen to be reserved words.
+
+### Decision
+
+Two pattern classes are combined: (1) structural `comma → )` (always unambiguous), and (2) keyword-terminated: `comma → FROM|WHERE|GROUP|ORDER|HAVING|LIMIT|UNION|INTERSECT|EXCEPT|INTO|SET|ON|RETURNING` (case-insensitive, word-boundary-guarded). Commas outside these two patterns are never removed.
+
+### Options Considered
+
+| Option | Verdict |
+|--------|---------|
+| Structural `comma → )` plus conservative keyword set | Chosen — structural rule is provably safe; keyword set covers the dominant `SELECT a, b, FROM t` use case; word-boundary guard prevents false positives on identifier prefixes; conservative stance matches the additive-only governing guardrail |
+| Structural-only (`comma → )`) | Rejected — safe but misses `SELECT a, b, FROM t`, the most common user need |
+| Full SQL grammar parser | Rejected — requires sqlglot UDF; reintroduces ~133–151 ms/statement latency |
+| Larger keyword set | Rejected — higher false-positive risk on column aliases that happen to be reserved words |
+
+### Consequences
+
+The two recognition patterns are the documented, testable contract for the module. Commas outside the two patterns are left intact — the module errs on the side of leaving ambiguous commas rather than removing a syntactically required one. The word-boundary guard prevents false positives on identifiers such as `from_date` (FROM prefix) and `orders.id` (ORDER prefix), as verified by spot-check tests.
