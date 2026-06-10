@@ -5,7 +5,7 @@
 -- BUCKETFS …` SQL command surfaces to an installed preprocessor-framework. It
 -- deploys five objects and self-registers two DBA-scoped EXPAND rules, then
 -- refreshes — so the commands work as soon as the file finishes (for DBA-role
--- holders). Origin: the companion exa-confd-admin project; vendored here as a
+-- holders). Origin: the companion confd-via-sql project; vendored here as a
 -- complete, runnable example of a real-world command preprocessor.
 --
 -- Deploys: PREPROC_RT.CONFD_JOB_V1 (Python3 ConfD gateway UDF),
