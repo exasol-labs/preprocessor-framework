@@ -946,8 +946,10 @@ end
 
 -- Invoke the generic ConfD gateway UDF. Named binding keeps the values out of
 -- the SQL text.
+-- The column alias must NOT be RESULT: it is a reserved keyword in Exasol and
+-- would make this SELECT a syntax error. The value is read positionally below.
 local ok, res = pquery(
-    "SELECT PREPROC_RT.CONFD_JOB_V1(:c, :j, :p) AS result",
+    "SELECT PREPROC_RT.CONFD_JOB_V1(:c, :j, :p) AS confd_result",
     { c = CONFD_CONNECTION, j = job_name, p = pj }
 )
 if not ok then
@@ -973,8 +975,10 @@ if string.sub(result_str, 1, 4) == "ERR:" then
     )
 end
 
--- Success: return the JSON result as a single-row, single-column table.
-exit({{result_str}}, "result VARCHAR(2000000)")
+-- Success: return the JSON result as a single-row, single-column table. The
+-- output column is named CONFD_RESULT, not RESULT: RESULT is a reserved keyword
+-- in Exasol and is rejected as a column name in the table description string.
+exit({{result_str}}, "confd_result VARCHAR(2000000)")
 /
 
 
