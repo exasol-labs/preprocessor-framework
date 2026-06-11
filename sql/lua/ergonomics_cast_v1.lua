@@ -195,12 +195,37 @@ function cast_shorthand(sqltext)
     -- ------------------------------------------------------------------
     -- Main scanner loop
     -- ------------------------------------------------------------------
+    -- Output is accumulated into TABLES joined once with table.concat, never by
+    -- string ".." in a loop (Lua strings are immutable, so per-char concat is
+    -- O(n^2)). Two buffers mirror the original prefix/code_tail split:
+    --   parts -> finalized output BEFORE the current code segment
+    --   seg   -> the current contiguous code segment (the old `code_tail`), held
+    --            as chunks; concatenated to a string only when a :: needs to scan
+    --            its operand or when a string/comment/cast ends the segment.
+    -- Summed over the whole input this is O(n).
     local s = sqltext
     local n = #s
-    local buf = ""
-    local code_tail = ""  -- last contiguous code segment at end of buf
+
+    -- Fast path: no "::" bytes at all means there is nothing to rewrite. Avoids
+    -- the full scan for the overwhelmingly common case of cast-free statements.
+    -- (A "::" that exists only inside a string/comment still takes the slow path
+    -- but correctly produces an unchanged result.)
+    if not string.find(s, "::", 1, true) then
+        return sqltext
+    end
+
+    local parts = {}      -- output before the current code segment
+    local seg = {}        -- chunks of the current code segment
     local i = 1
     local changed = false
+
+    -- Move the current code segment into `parts` (it has ended), then reset it.
+    local function flush_seg()
+        if #seg > 0 then
+            parts[#parts + 1] = table.concat(seg)
+            seg = {}
+        end
+    end
 
     while i <= n do
         local c = s:sub(i, i)
@@ -220,8 +245,8 @@ function cast_shorthand(sqltext)
                     j = j + 1
                 end
             end
-            buf = buf .. s:sub(i, j - 1)
-            code_tail = ""
+            flush_seg()
+            parts[#parts + 1] = s:sub(i, j - 1)
             i = j
 
         elseif c == '"' then
@@ -239,8 +264,8 @@ function cast_shorthand(sqltext)
                     j = j + 1
                 end
             end
-            buf = buf .. s:sub(i, j - 1)
-            code_tail = ""
+            flush_seg()
+            parts[#parts + 1] = s:sub(i, j - 1)
             i = j
 
         elseif c == '-' and i + 1 <= n and s:sub(i + 1, i + 1) == '-' then
@@ -250,8 +275,8 @@ function cast_shorthand(sqltext)
                 j = j + 1
             end
             if j <= n then j = j + 1 end  -- include the newline
-            buf = buf .. s:sub(i, j - 1)
-            code_tail = ""
+            flush_seg()
+            parts[#parts + 1] = s:sub(i, j - 1)
             i = j
 
         elseif c == '/' and i + 1 <= n and s:sub(i + 1, i + 1) == '*' then
@@ -264,13 +289,13 @@ function cast_shorthand(sqltext)
                 end
                 j = j + 1
             end
-            buf = buf .. s:sub(i, j - 1)
-            code_tail = ""
+            flush_seg()
+            parts[#parts + 1] = s:sub(i, j - 1)
             i = j
 
         elseif c == ':' and i + 1 <= n and s:sub(i + 1, i + 1) == ':' then
             -- cast operator candidate
-            local operand, new_tail = scan_backward_operand(code_tail)
+            local operand, new_tail = scan_backward_operand(table.concat(seg))
             if operand == nil then
                 return sqltext
             end
@@ -278,16 +303,16 @@ function cast_shorthand(sqltext)
             if tname == nil then
                 return sqltext
             end
-            local prefix = string.sub(buf, 1, #buf - #code_tail)
-            local cast_expr = "CAST(" .. operand .. " AS " .. tname .. ")"
-            buf = prefix .. new_tail .. cast_expr
-            code_tail = cast_expr
+            -- new_tail is the part of the segment BEFORE the operand: it moves
+            -- into the finalized prefix. The cast expression becomes the new
+            -- current segment so a following :: chains onto it inside-out.
+            parts[#parts + 1] = new_tail
+            seg = { "CAST(" .. operand .. " AS " .. tname .. ")" }
             i = new_i
             changed = true
 
         else
-            buf = buf .. c
-            code_tail = code_tail .. c
+            seg[#seg + 1] = c
             i = i + 1
         end
     end
@@ -295,5 +320,6 @@ function cast_shorthand(sqltext)
     if not changed then
         return sqltext
     end
-    return buf
+    flush_seg()
+    return table.concat(parts)
 end

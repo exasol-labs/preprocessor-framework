@@ -121,9 +121,24 @@ function trailing_comma(sqltext)
     -- ------------------------------------------------------------------
     -- Main scanner loop
     -- ------------------------------------------------------------------
+    -- The only transformation is deleting trailing commas, so the output is the
+    -- input with some single bytes removed. Rather than rebuild the text one
+    -- character at a time (string ".." in a loop is O(n^2) because Lua strings
+    -- are immutable), we copy verbatim slices of the original between the commas
+    -- we delete and join them once with table.concat — O(n) overall. Strings and
+    -- comments are scanned only to skip past them (so their commas are not seen),
+    -- never copied char-by-char; they ride along in the next verbatim slice.
     local s = sqltext
     local n = #s
-    local buf = ""
+
+    -- Fast path: no comma anywhere means there is nothing to remove. Avoids the
+    -- full scan for the overwhelmingly common case of comma-free statements.
+    if not string.find(s, ",", 1, true) then
+        return sqltext
+    end
+
+    local parts = {}
+    local seg_start = 1  -- start (in s) of the current not-yet-copied run
     local i = 1
     local changed = false
 
@@ -145,7 +160,6 @@ function trailing_comma(sqltext)
                     j = j + 1
                 end
             end
-            buf = buf .. s:sub(i, j - 1)
             i = j
 
         elseif c == '"' then
@@ -163,7 +177,6 @@ function trailing_comma(sqltext)
                     j = j + 1
                 end
             end
-            buf = buf .. s:sub(i, j - 1)
             i = j
 
         elseif c == '-' and i + 1 <= n and s:sub(i + 1, i + 1) == '-' then
@@ -173,7 +186,6 @@ function trailing_comma(sqltext)
                 j = j + 1
             end
             if j <= n then j = j + 1 end
-            buf = buf .. s:sub(i, j - 1)
             i = j
 
         elseif c == '/' and i + 1 <= n and s:sub(i + 1, i + 1) == '*' then
@@ -186,21 +198,20 @@ function trailing_comma(sqltext)
                 end
                 j = j + 1
             end
-            buf = buf .. s:sub(i, j - 1)
             i = j
 
         elseif c == ',' then
-            -- comma: emit only if it is NOT a trailing comma
+            -- comma: delete it only when it is a trailing comma. Deletion means
+            -- copying the run up to (not including) this byte and skipping it;
+            -- everything after rides along in the next slice unchanged.
             if is_trailing(s, i) then
+                parts[#parts + 1] = s:sub(seg_start, i - 1)
+                seg_start = i + 1
                 changed = true
-                -- skip the comma; everything after it is emitted normally
-            else
-                buf = buf .. ','
             end
             i = i + 1
 
         else
-            buf = buf .. c
             i = i + 1
         end
     end
@@ -208,5 +219,6 @@ function trailing_comma(sqltext)
     if not changed then
         return sqltext
     end
-    return buf
+    parts[#parts + 1] = s:sub(seg_start, n)
+    return table.concat(parts)
 end
