@@ -144,12 +144,17 @@ def dispatch_env(installed):
     and drops the module — in that order, each guarded — so a failure mid-test
     cannot poison the session-scoped connection.
     """
+    # Clear CURRENT_USER's resolution first: install now seeds a DBA-scoped
+    # control-sugar bootstrap rule, and this connection (SYS) holds DBA, so it
+    # resolves that rule. These tests drive RESOLUTION directly, so start from a
+    # truly empty sandbox (this also clears any leftover from another test).
+    _delete_rules(installed)
     rule_count = installed.execute(
         "SELECT COUNT(*) FROM PREPROC.RESOLUTION WHERE user_name = CURRENT_USER"
     ).fetchval()
     assert rule_count == 0, (
         f"Expected 0 rules for CURRENT_USER before a dispatch test, got {rule_count} "
-        f"— a leftover rule invalidates the dispatch assertions"
+        f"— RESOLUTION could not be cleared"
     )
 
     _deploy_module(installed)

@@ -81,12 +81,16 @@ def translate_pipeline(installed):
     guarded — so a mid-test failure cannot leave the session-scoped connection
     activated or polluted.
     """
+    # Install now seeds a DBA-scoped control-sugar bootstrap rule and this
+    # connection (SYS) holds DBA, so it resolves that rule; clear CURRENT_USER's
+    # resolution to start from a clean single-rule pipeline.
+    _delete_rules(installed)
     rule_count = installed.execute(
         "SELECT COUNT(*) FROM PREPROC.RESOLUTION WHERE user_name = CURRENT_USER"
     ).fetchval()
     assert rule_count == 0, (
         f"Expected 0 RESOLUTION rules for CURRENT_USER before a pipeline test, "
-        f"got {rule_count} — a leftover rule invalidates the assertions"
+        f"got {rule_count} — RESOLUTION could not be cleared"
     )
 
     _seed_translate_rule(installed)

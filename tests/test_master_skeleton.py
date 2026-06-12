@@ -60,7 +60,11 @@ def test_normal_statement_passthrough(installed):
     this assertion fails, a leftover test rule is polluting the table and the
     no-rules coverage claim is false.
     """
-    # Verify the no-rules precondition explicitly so the coverage claim holds.
+    # Establish the no-rules precondition. Install now seeds a DBA-scoped
+    # control-sugar bootstrap rule and this connection (SYS) holds DBA, so it
+    # resolves that rule; clear CURRENT_USER's resolution so the no-rules
+    # sentinel path is genuinely exercised.
+    installed.execute("DELETE FROM PREPROC.RESOLUTION WHERE user_name = CURRENT_USER")
     rule_count = installed.execute(
         "SELECT COUNT(*) FROM PREPROC.RESOLUTION WHERE user_name = CURRENT_USER"
     ).fetchval()

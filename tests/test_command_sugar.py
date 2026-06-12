@@ -102,6 +102,10 @@ def sugar_env(installed):
     deploys both scripts, seeds the probe rule, and on teardown unconditionally
     deactivates the preprocessor, deletes seeded rules, and drops both scripts.
     """
+    # Install now seeds a DBA-scoped control-sugar bootstrap rule and this
+    # connection (SYS) holds DBA, so it resolves that rule; clear CURRENT_USER's
+    # resolution so the seeded probe rule is the only EXPAND rule in play.
+    _delete_rules(installed)
     rule_count = installed.execute(
         "SELECT COUNT(*) FROM PREPROC.RESOLUTION WHERE user_name = CURRENT_USER"
     ).fetchval()
@@ -374,22 +378,25 @@ def test_sugar_passes_luacheck():
 
 @pytest.mark.integration
 def test_sugar_bootstrap_rule_seeded(installed):
-    """After install, PREPROC.CONFIG holds an enabled EXPAND rule for the sugar module.
+    """After install, PREPROC.CONFIG holds enabled EXPAND sugar rules for PREPROC_ADMIN and DBA.
 
-    The install-time bootstrap (Group D) seeds a PREPROC_ADMIN-scoped EXPAND rule
-    pointing at PREPROC_RT.CONTROL_SUGAR_V1 / ``expand`` so the sugar can register
-    further rules — the chicken-and-egg resolution. This asserts that seed exists,
-    is enabled, and is in the EXPAND phase.
+    The install-time bootstrap seeds two ROLE-scoped EXPAND rules pointing at
+    PREPROC_RT.CONTROL_SUGAR_V1 / ``expand`` so the sugar can register further
+    rules (the chicken-and-egg resolution): one for PREPROC_ADMIN (delegated
+    preprocessor admins) and one for DBA (so SYS and database admins, who cannot
+    be granted PREPROC_ADMIN, get the sugar via the role-grant graph). This
+    asserts both seeds exist, are enabled, and are in the EXPAND phase.
     """
-    row = installed.execute(
+    rows = installed.execute(
         "SELECT scope_type, scope_value, phase, function_name, enabled "
         "FROM PREPROC.CONFIG "
-        "WHERE script_name = 'PREPROC_RT.CONTROL_SUGAR_V1'"
+        "WHERE script_name = 'PREPROC_RT.CONTROL_SUGAR_V1' "
+        "ORDER BY scope_value"
     ).fetchall()
-    assert len(row) == 1, f"expected exactly one CONFIG rule for the sugar module, got {len(row)}"
-    scope_type, scope_value, phase, function_name, enabled = row[0]
-    assert scope_type == "ROLE"
-    assert scope_value == "PREPROC_ADMIN"
-    assert phase == "EXPAND"
-    assert function_name == "expand"
-    assert enabled is True
+    assert len(rows) == 2, f"expected two CONFIG rules for the sugar module, got {len(rows)}"
+    for scope_type, scope_value, phase, function_name, enabled in rows:
+        assert scope_type == "ROLE"
+        assert phase == "EXPAND"
+        assert function_name == "expand"
+        assert enabled is True
+    assert {r[1] for r in rows} == {"DBA", "PREPROC_ADMIN"}

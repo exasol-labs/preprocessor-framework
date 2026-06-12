@@ -298,6 +298,26 @@ def test_release_bundle_is_framework_only(tmp_path):
     )
 
 
+def test_release_bundle_seeds_sugar_for_preproc_admin_and_dba(tmp_path):
+    """The control-sugar bootstrap is seeded for BOTH PREPROC_ADMIN and DBA.
+
+    SYS (and other superusers) cannot be granted PREPROC_ADMIN, but they hold DBA
+    and resolution walks the role-grant graph — so scoping the sugar to DBA as
+    well lets SYS/DBA holders use the `PREPROC ...` commands out of the box. This
+    guards that both ROLE-scoped seed rows ship in the release artifact.
+    """
+    out = tmp_path / "release.sql"
+    bundle.run_release_bundle(out)
+    text = out.read_text()
+
+    # Two CONTROL_SUGAR_V1 EXPAND seed INSERTs, one per role.
+    assert text.count("'PREPROC_RT.CONTROL_SUGAR_V1',") >= 2, (
+        "expected a control-sugar seed row for each of PREPROC_ADMIN and DBA"
+    )
+    assert "'PREPROC_ADMIN'," in text, "missing PREPROC_ADMIN-scoped control-sugar seed"
+    assert "'DBA'," in text, "missing DBA-scoped control-sugar seed"
+
+
 def test_cli_bundle_release_flag(tmp_path):
     """``preproc bundle --release`` writes a framework-only file via the CLI."""
     out = tmp_path / "release.sql"

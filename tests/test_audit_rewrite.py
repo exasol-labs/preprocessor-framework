@@ -133,6 +133,10 @@ def test_audit_runs_after_expand(audit_probe):
     )
     assert _AUDIT_MARKER in rewritten_expanded
 
+    # Install now seeds a DBA-scoped control-sugar bootstrap rule and this
+    # connection (SYS) holds DBA, so it resolves that rule; clear CURRENT_USER's
+    # resolution to start from a clean pipeline before seeding the audit rules.
+    audit_probe.execute("DELETE FROM PREPROC.RESOLUTION WHERE user_name = CURRENT_USER")
     rule_count = audit_probe.execute(
         "SELECT COUNT(*) FROM PREPROC.RESOLUTION WHERE user_name = CURRENT_USER"
     ).fetchval()

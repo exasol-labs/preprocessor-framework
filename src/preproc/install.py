@@ -336,6 +336,20 @@ def _deploy_admin_scripts(connection: Any, verbose: bool) -> None:
     )
 
 
+def _resolve_seeded_rules(connection: Any, verbose: bool) -> None:
+    """Run REFRESH so the seeded control-sugar rule resolves into RESOLUTION.
+
+    The install seeds the bootstrap control-sugar rule(s) into PREPROC.CONFIG but
+    those are inert until a REFRESH materialises PREPROC.RESOLUTION from config and
+    the live role-grant graph. Without this, a fresh CLI install leaves STATUS at
+    NEVER_REFRESHED and the `PREPROC ...` sugar does not dispatch — diverging from
+    the release.sql path, which ends with the same REFRESH. Idempotent.
+    """
+    if verbose:
+        print("EXECUTE SCRIPT PREPROC.REFRESH", file=sys.stdout)
+    connection.execute("EXECUTE SCRIPT PREPROC.REFRESH")
+
+
 def _print_activation_hint() -> None:
     """Print the activation statement and explain that a DBA must run it."""
     print(
@@ -383,6 +397,9 @@ def run_install(connection: Any, verbose: bool = False) -> None:
       2b. Deploy admin scripts: open PREPROC schema, execute CREATE OR REPLACE
           LUA SCRIPT PREPROC.REFRESH and PREPROC.STATUS (both RETURNS TABLE)
           with the bodies from sql/lua/refresh.lua and sql/lua/status.lua.
+      2c. Run EXECUTE SCRIPT PREPROC.REFRESH so the seeded control-sugar rule(s)
+          resolve into PREPROC.RESOLUTION (matching the release.sql path; without
+          it a fresh install stays NEVER_REFRESHED and the sugar is inert).
       3. Print (do NOT execute) the activation ALTER SYSTEM statement.
 
     This function is idempotent: re-running against an already-installed
@@ -401,4 +418,5 @@ def run_install(connection: Any, verbose: bool = False) -> None:
 
     _deploy_master(connection, verbose)
     _deploy_admin_scripts(connection, verbose)
+    _resolve_seeded_rules(connection, verbose)
     _print_activation_hint()
