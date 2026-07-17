@@ -1068,3 +1068,279 @@ The `PREPROC SET SYS_GROUPING <bool> [NOREFRESH]` verb is added directly to the 
 ### Consequences
 
 Editing `V1` in place and regenerating `release.sql` is harmless now because the project has no active sessions. This exception is strictly pre-release: any post-release grammar change must still go through `CONTROL_SUGAR_V2`, and that discipline remains the standing rule going forward.
+
+---
+
+## ADR-039: Framework as the single-slot multiplexer
+
+**Date:** 2026-07-17
+**Plan:** `add-module-ecosystem`
+**Status:** Accepted
+
+### Context
+
+Exasol exposes exactly ONE `sql_preprocessor_script` slot (one system-wide, one per session). Every preprocessor project today simply grabs it — this framework sets `PREPROC_RT.MASTER`; others (e.g. exasol-semantic-views) clear and set it to their own script — so two independent preprocessor projects cannot coexist: last writer wins.
+
+### Decision
+
+Position the framework as the sole owner of Exasol's one preprocessor slot; the module ecosystem is how every other syntax provider multiplexes through MASTER instead of fighting for the slot.
+
+### Options Considered
+
+| Option | Verdict |
+|--------|---------|
+| Framework as sole slot-owner and multiplexer | Chosen — only one dispatcher can occupy the slot; making it a shared, extensible multiplexer is the framework's core value proposition |
+| Let each project keep grabbing the slot (status quo) | Rejected — projects cannot coexist |
+| A per-session convention | Rejected — still last-writer-wins |
+
+### Consequences
+
+Every other syntax provider must hook in through MASTER dispatch rather than owning the slot itself. This is the foundational premise the entire module ecosystem operationalizes.
+
+---
+
+## ADR-040: One integration contract, not two
+
+**Date:** 2026-07-17
+**Plan:** `add-module-ecosystem`
+**Status:** Accepted
+
+### Context
+
+An earlier proposal split module integration into a "bundled module" kind and a heavyweight "subsystem" kind, requiring two separate contracts for authors to learn.
+
+### Decision
+
+A module is always `fn(text) -> nil|string` in a Lua script + a registration rule + a `module.toml`. No "bundled vs subsystem" split.
+
+### Options Considered
+
+| Option | Verdict |
+|--------|---------|
+| One contract for every module | Chosen — the dispatcher already treats every rule uniformly; what is behind the script is the author's concern |
+| Two contracts (bundled kind + subsystem kind) | Rejected by the owner — explicitly rejected as unnecessary complexity |
+
+### Consequences
+
+The SDK surface stays minimal and stable to document. A tiny transform and a whole subsystem-backed provider share the exact same registration and dispatch path.
+
+---
+
+## ADR-041: Deploy mode is orthogonal metadata
+
+**Date:** 2026-07-17
+**Plan:** `add-module-ecosystem`
+**Status:** Accepted
+
+### Context
+
+Modules can arrive either as a single self-contained artifact the CLI deploys, or as a project with its own installer that only needs its rule registered. This distinction risked becoming a second contract.
+
+### Decision
+
+`deploy_mode` (`library-deployed` | `self-deployed`) is a `module.toml` field describing how the artifact gets into the DB, not a second contract. Self-deployed modules are register-only for the CLI.
+
+### Options Considered
+
+| Option | Verdict |
+|--------|---------|
+| `deploy_mode` as metadata on the one contract | Chosen — keeps the contract single; lets a subsystem and a one-file module share the same registration and dispatch path |
+| Encode deployment differences as distinct module types | Rejected — reintroduces the two-kinds split ADR-040 rejects |
+
+### Consequences
+
+A future semantic-views hook-in becomes a straightforward register-only case rather than requiring a new contract type.
+
+---
+
+## ADR-042: Canonical artifact is one self-contained .sql; standard layout
+
+**Date:** 2026-07-17
+**Plan:** `add-module-ecosystem`
+**Status:** Accepted
+
+### Context
+
+Modules need a canonical, auditable, hand-carryable artifact shape that fits the air-gap deployment model and the `_V<N>` versioning discipline.
+
+### Decision
+
+The module is one `CREATE OR REPLACE LUA SCRIPT PREPROC_RT.<NAME>_V<N>` file under `modules/<name>/{<name>_v<N>.sql, module.toml, README.md, tests/}`.
+
+### Options Considered
+
+| Option | Verdict |
+|--------|---------|
+| One self-contained `.sql` artifact, standard layout | Chosen — mirrors the engine's `release.sql` philosophy; trivially hand-carryable for air-gap; easy to hash and verify |
+| Multi-file artifacts | Rejected — complicates hashing/verification and hand-carry |
+| A packaged archive format | Rejected — adds tooling weight for no MVP benefit |
+
+### Consequences
+
+Every module is a single auditable file whose integrity a sha256 digest can verify end to end, matching the engine's own bundling discipline.
+
+---
+
+## ADR-043: Federated registry with curated PR-an-entry
+
+**Date:** 2026-07-17
+**Plan:** `add-module-ecosystem`
+**Status:** Accepted
+
+### Context
+
+The registry must cover both central-library modules and external repos while keeping a human trust gate, since the CLI verifies and deploys code sight-unseen by the framework team.
+
+### Decision
+
+A generated federated index over central-library modules (auto-indexed) and external repos (one curated `registry/external/<name>.toml` block per module, human-reviewed). Pin by tag; verify sha256. No crawling.
+
+### Options Considered
+
+| Option | Verdict |
+|--------|---------|
+| Federated index, auto-indexed library + curated external entries | Chosen — human review is the trust gate; auto-indexing keeps the library effortless; pinning + sha make registry state reproducible and tamper-evident |
+| Automated discovery/crawling of repos | Rejected — no human trust gate |
+| A fully manual list | Rejected — loses the auto-indexing benefit for the library's own modules |
+
+### Consequences
+
+External modules only enter the registry through a reviewed PR, while library modules stay always-in-sync automatically via CI-generated indexing.
+
+---
+
+## ADR-044: Registry hosted in the central library repo
+
+**Date:** 2026-07-17
+**Plan:** `add-module-ecosystem`
+**Status:** Accepted
+
+### Context
+
+The registry index needs a home. Candidates were the framework repo, a dedicated registry repo, or the new central library repo that already holds every library module's `module.toml`.
+
+### Decision
+
+The registry index lives in the central library repo (`registry/index.json`, CI-generated), not in the framework repo and not in a separate dedicated registry repo (yet).
+
+### Options Considered
+
+| Option | Verdict |
+|--------|---------|
+| Registry hosted in the central library repo | Chosen — library CI already has all manifests locally (trivial, always-in-sync auto-index); index format is repo-agnostic so a future split is lift-and-shift |
+| A file in the framework repo | Rejected — would couple engine releases to registry churn and invert ownership |
+| A dedicated `preprocessor-registry` repo | Rejected — adds a third repo and cross-repo sync for no MVP benefit |
+
+### Consequences
+
+Registry churn is decoupled from framework releases. If a dedicated registry repo is ever warranted, the index format's repo-agnostic design makes that a lift-and-shift, not a rewrite.
+
+---
+
+## ADR-045: Air-gap discipline — the DB never fetches; the CLI is the bridge
+
+**Date:** 2026-07-17
+**Plan:** `add-module-ecosystem`
+**Status:** Accepted
+
+### Context
+
+Many customer databases have no internet egress. The module ecosystem must let operators fetch, verify, and deploy modules without ever requiring the database itself to reach the network.
+
+### Decision
+
+All fetch/verify/deploy happens on the operator's CLI machine; the database only receives SQL. `preproc module bundle` emits a self-contained `.sql` for no-egress databases; `--registry <path>` reads a local checkout.
+
+### Options Considered
+
+| Option | Verdict |
+|--------|---------|
+| CLI-side fetch/verify/deploy; DB is SQL-only | Chosen — matches ADR-006/007's DB-as-management-only-surface; satisfies the hard air-gap constraint |
+| DB-side fetch (e.g. a UDF pulling from GitHub) | Rejected — violates the no-egress hard constraint many customer DBs impose |
+
+### Consequences
+
+Air-gapped customers get a fully supported offline path (`bundle` + local `--registry`) with no reduced functionality versus online operation.
+
+---
+
+## ADR-046: Module V<N> lifecycle mirrors profile generate/retire/reclaim
+
+**Date:** 2026-07-17
+**Plan:** `add-module-ecosystem`
+**Status:** Accepted
+
+### Context
+
+A convenience-mode session can be pinned to a profile that baked an old module version. Naively replacing or dropping a live module version out from under such a session would break dispatch.
+
+### Decision
+
+Update is deploy `_V<N+1>` → repoint the CONFIG rule → refresh → mark-retire `_V<N>` → guarded reclaim (drop only when no enabled rule and no non-orphaned PROFILES manifest reference it). Provenance is recorded in `PREPROC.MODULES` with a PUBLIC-readable `PREPROC_RT.INSTALLED_MODULES` view.
+
+### Options Considered
+
+| Option | Verdict |
+|--------|---------|
+| Generational deploy/repoint/retire/reclaim, mirroring profile lifecycle | Chosen — the profile machinery already solved exactly this generational problem |
+| `CREATE OR REPLACE` a live version | Rejected — violates ADR-019 |
+| Immediate drop on retire | Rejected — catastrophic for pinned sessions, mirrors the never-same-refresh-drop hazard of ADR-022 |
+
+### Consequences
+
+Module updates get the same safety guarantees as profile updates, at the cost of carrying retired versions until reclaim is safe. Provenance is now queryable via `PREPROC_RT.INSTALLED_MODULES`.
+
+---
+
+## ADR-047: Idempotent RULE_ENSURE / declarative sync (closes BUG-008)
+
+**Date:** 2026-07-17
+**Plan:** `add-module-ecosystem`
+**Status:** Accepted
+
+### Context
+
+`RULE_ADD` stacks duplicate rules on repeated calls (BUG-008), which makes a TRANSLATE/REWRITE module run N times and defeats declarative re-apply — a problem `preproc module sync` needs solved to be safely idempotent.
+
+### Decision
+
+Add `PREPROC.RULE_ENSURE` (idempotent on the natural rule key, returns the existing `rule_id` when present) and make `preproc module sync` declarative and idempotent. `RULE_ADD` keeps its allocate-new behaviour.
+
+### Options Considered
+
+| Option | Verdict |
+|--------|---------|
+| New `RULE_ENSURE` surface alongside unchanged `RULE_ADD` | Chosen — a purpose-built ensure surface is the clean fix and the foundation `sync` needs |
+| Make `RULE_ADD` itself idempotent | Rejected — breaks its documented allocate-new behaviour and existing tests |
+| Leave dedupe to the CLI | Rejected — fragile, races under concurrent operations |
+
+### Consequences
+
+`preproc module sync` can be re-run safely against an unchanged desired state with no duplicate rules, closing BUG-008.
+
+---
+
+## ADR-048: Ergonomics migrated out of the framework as a clean move (module #1)
+
+**Date:** 2026-07-17
+**Plan:** `add-module-ecosystem`
+**Status:** Accepted
+
+### Context
+
+The module ecosystem needed a real proving case: a capability migrated end-to-end through the contract → package → registry → `preproc module add` path. `cast-shorthand` and `trailing-comma` were self-contained, examples-only ergonomics transforms already fully in-repo, never part of `release.sql`/`deploy_all.sql`.
+
+### Decision
+
+Remove `cast-shorthand` and `trailing-comma` from the framework (examples, `sql/lua` copies, tests, `ergonomics/` specs) and author them as two independent modules directly in the existing `exasol-labs/preprocessor-library` repo (`modules/cast-shorthand/`, `modules/trailing-comma/`). Leave a moved-to-library pointer in `examples/README.md`. Supersedes ADR-032's in-framework `ergonomics/` domain.
+
+### Options Considered
+
+| Option | Verdict |
+|--------|---------|
+| Clean move to the library repo | Chosen — ergonomics was never in the engine bundle, so removal changes no bundle output or statement count; it is the ideal proving case because it is self-contained and already fully in-repo |
+| A deprecation shim / keep a copy in the framework | Rejected — reintroduces the exact drift the ecosystem eliminates |
+
+### Consequences
+
+`specs/ergonomics/` is removed from the framework spec tree (superseding ADR-032's placement); the capability remains available via `preproc module add cast-shorthand` / `preproc module add trailing-comma` from the central library. This is the reference migration future modules follow.

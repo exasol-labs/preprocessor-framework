@@ -5,7 +5,7 @@
 **A config-driven SQL preprocessor framework for Exasol.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
-[![Exasol](https://img.shields.io/badge/Exasol-2025.x-1ba0e2.svg)](https://www.exasol.com/)
+[![Exasol](https://img.shields.io/badge/Exasol-2025.x%20%7C%202026.1-1ba0e2.svg)](https://www.exasol.com/)
 [![spec|driven](https://img.shields.io/badge/spec-driven-blue)](./specs/)
 
 </div>
@@ -34,14 +34,24 @@ running a refresh — never by rewriting the global script. The framework keeps
 the resolution fresh as database roles change, and holds a **fail-open** safety
 contract: a broken module is skipped, never blocking a user's statement.
 
+**Positioning:** Exasol's single-slot constraint means two independent
+preprocessor projects normally cannot coexist — whichever sets
+`sql_preprocessor_script` last wins, clobbering the other. This framework's
+core value is being the **sole owner of that one slot** and the
+**multiplexer** that dispatches to every registered syntax provider through
+`MASTER`. Anyone who wants to hook a syntax transform into the slot does so as
+a **module** — a stable, versioned, registry-discoverable unit — rather than
+fighting for the slot directly. See
+[Installing modules](#installing-modules) below.
+
 ## Quick Start
 
 You deploy the framework as a **single SQL artifact** — `release.sql` — run
 once against a clean Exasol instance by a DBA. No build toolchain required.
 
-> **Prerequisites:** an Exasol 2025.x instance (2025.2.1 verified), DBA-level
-> credentials, and a SQL client that handles script bodies — EXAplus or
-> DbVisualizer.
+> **Prerequisites:** an Exasol instance — verified on 2025.2.x and 2026.1
+> (2025.2.1 and 2026.1.0 confirmed live) — DBA-level credentials, and a SQL
+> client that handles script bodies — EXAplus or DbVisualizer.
 
 ### 1. Get the artifact
 
@@ -129,6 +139,28 @@ Each example's rule is scoped to a role — a user must **hold** that role for t
 rule to apply. Edit the trailing `RULE_ADD` call to change the scope. See
 [`examples/README.md`](examples/README.md) for details.
 
+### Installing modules
+
+Beyond the bundled examples, the `preproc module` CLI installs published
+**modules** — versioned, registry-discoverable syntax providers — straight
+from the community library,
+[`exasol-labs/preprocessor-library`](https://github.com/exasol-labs/preprocessor-library):
+
+```bash
+uv run preproc module list                 # see what's available
+uv run preproc module add cast-shorthand   # deploy + register in one step
+```
+
+This is also how the two ergonomics conveniences (`expr::type` cast shorthand
+and optional trailing commas) are installed today — they used to ship inside
+this framework's `examples/`, and now live as the library's first two proving
+modules instead. `preproc module` also covers `search`, `update`, `remove`,
+an offline `bundle` for air-gapped instances, and a declarative `sync`. See
+[docs/operations.md § Module management](docs/operations.md#module-management)
+for the full CLI reference and lifecycle, and
+[docs/module-authoring.md](docs/module-authoring.md) for the module contract
+if you want to write your own.
+
 ### Manage rules from SQL
 
 When the preprocessor is active and you hold `PREPROC_ADMIN`, the `PREPROC`
@@ -176,8 +208,10 @@ for the full lifecycle.
 ## Documentation
 
 - [docs/how-it-works.md](docs/how-it-works.md) — pipeline architecture, phase semantics, dispatch rules, and module authoring
-- [docs/operations.md](docs/operations.md) — install, activate, add rules, refresh, status, modes, and troubleshooting
+- [docs/operations.md](docs/operations.md) — install, activate, add rules, refresh, status, modes, module management, and troubleshooting
+- [docs/module-authoring.md](docs/module-authoring.md) — the module contract SDK: the `fn(text)->nil|string` function contract, the `module.toml` manifest schema, and versioning discipline
 - [examples/](examples/) — ready-to-run preprocessor modules, one per file, each self-registering
+- [exasol-labs/preprocessor-library](https://github.com/exasol-labs/preprocessor-library) — the community module library; browse or install with `preproc module add`
 
 ## Development
 

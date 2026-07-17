@@ -2,11 +2,20 @@
 
 [← README](../README.md) | [How it works →](how-it-works.md)
 
+There are two independent deploy surfaces, covered in different sections
+below: the **engine deploy** — run [`release.sql`](#single-file-deploy-releasesql)
+in a SQL client, no toolchain, DBA only — and **module install** — the
+`preproc module` CLI ([§ Module management](#module-management)), which needs
+`uv` and a live DB connection. A deployer who only ran `release.sql` does not
+need `uv` at all unless they also want to install library modules or use the
+CLI installer described immediately below.
+
 ## Installing
 
 ### Prerequisites
 
-- Exasol 2025.x instance (DBA-level credentials required)
+- An Exasol instance — verified on 2025.2.x and 2026.1 (DBA-level credentials
+  required)
 - uv installed locally
 - Repository checked out
 
@@ -431,10 +440,141 @@ exaplus -c myhost:8563 -u admin -p secret \
 If refresh is not run after role changes, users whose role memberships changed
 will run a stale pipeline until the next refresh.
 
-## Deploying a module
+## Module management
+
+The framework owns Exasol's one `sql_preprocessor_script` slot and
+multiplexes to every registered syntax provider through `MASTER` dispatch (see
+[README](../README.md#what-it-solves)). A **module** is that provider's
+packaging: a Lua entry function `fn(text) -> nil|string`, a registration rule,
+and a `module.toml` manifest. The `preproc module` CLI is the operator's
+air-gap bridge for discovering, deploying, updating, and retiring modules
+without hand-writing the SQL in the previous section. For the authoring side
+(writing a conformant module, the manifest schema, versioning discipline), see
+[docs/module-authoring.md](module-authoring.md).
+
+### `preproc module` subcommands
+
+All subcommands accept `--registry <path|url>` to select the federated index —
+a local checkout (offline) or a pinned `https://` raw URL (online). It defaults
+to the central library's index,
+[`exasol-labs/preprocessor-library`](https://github.com/exasol-labs/preprocessor-library)
+`registry/index.json`.
+
+| Subcommand | Database? | What it does |
+|---|---|---|
+| `preproc module list` | No | List every module in the registry with phase and deploy mode |
+| `preproc module search <term>` | No | Filter the registry listing by a substring of name or description |
+| `preproc module add <name> [--scope TYPE:value]` | Yes | Deploy the module's artifact (if `library-deployed`), register its rule via `RULE_ENSURE`, write a provenance row, refresh |
+| `preproc module update <name> [--scope TYPE:value]` | Yes | Deploy the registry's latest version alongside the current one, repoint the rule, refresh, then mark the old version retired |
+| `preproc module remove <name>` | Yes | Drop the module's rule(s), refresh, mark its provenance retired (does not drop the script — see [Reclaim](#reclaiming-a-retired-version)) |
+| `preproc module bundle <names...> --output <file>` | No | Emit one self-contained offline `.sql` (artifact + `RULE_ENSURE` calls) for hand-carrying to an air-gapped instance |
+| `preproc module validate <name>` | Optional | Static conformance checks always; when a database is configured, also scratch-deploys the module and smoke-tests it, then tears the scratch copy down |
+| `preproc module sync <manifest>` | Yes | Declaratively converge the database to a desired-state TOML file — add missing modules, update changed versions, retire dropped ones, in one pass with a single refresh |
+
+`--scope` overrides a module's `suggested_scope` from its manifest — pass
+`ROLE:<name>` or `USER:<name>`.
+
+Every mutating verb (`add`, `update`, `remove`, `sync`) resolves the database
+connection from the same environment variables as `preproc install` (see
+[Environment variables](#environment-variables)) and exits with code `2` if
+they are missing — no connection is attempted. `list`, `search`, `bundle`, and
+static `validate` never touch a database.
+
+### Online vs. air-gap flows
+
+**Online** — the common case. Point at the default (or a pinned) registry URL
+and let the CLI fetch, verify, and deploy over the DB connection in one step:
+
+```bash
+uv run preproc module add cast-shorthand
+uv run preproc module list --registry https://raw.githubusercontent.com/exasol-labs/preprocessor-library/main/registry/index.json
+```
+
+**Air-gap** — the database must never reach the network. Run `bundle` on a
+machine with GitHub access to produce a self-contained `.sql` (same
+`--/`…`/` delimiter convention as `release.sql`), hand-carry it to the
+air-gapped instance, and run it there directly — no CLI, no DB connection,
+needed on that side:
+
+```bash
+uv run preproc module bundle cast-shorthand trailing-comma --output offline_modules.sql
+# hand-carry offline_modules.sql to the air-gapped instance, then run it
+# with EXAplus / DbVisualizer as any other SQL file
+```
+
+An offline local checkout of the library repo also works as `--registry` for
+either flow (`--registry /path/to/preprocessor-library`), which is how CI and
+local development exercise the CLI without network access to GitHub.
+
+### Provenance: `PREPROC_RT.INSTALLED_MODULES`
+
+Every deploy/update/remove writes a row to `PREPROC.MODULES`, surfaced through
+the read-only `PREPROC_RT.INSTALLED_MODULES` view (PUBLIC-readable, like
+`MY_PIPELINE` — ADR-002):
+
+```sql
+SELECT name, version, source_repo, source_ref, sha256, script_name,
+       function_name, phase, deploy_mode, status, installed_at, retired_at
+FROM PREPROC_RT.INSTALLED_MODULES
+ORDER BY name, version;
+```
+
+Unlike `MY_PIPELINE`, there is no `CURRENT_USER` filter — provenance is global,
+and one module name can have more than one row: the currently `deployed`
+version and any not-yet-reclaimed `retired` predecessor.
+
+### Module lifecycle
+
+Modules follow the same never-mutate-a-live-object discipline as the
+framework's own profile scripts (generate → retire → reclaim):
+
+1. **add** — deploy `_V1`, register the rule (`RULE_ENSURE`), write
+   provenance, refresh.
+2. **update** = deploy `_V<N+1>` → repoint the existing rule from `_V<N>` to
+   `_V<N+1>` → refresh → mark `_V<N>` retired in provenance. Both versions'
+   scripts exist simultaneously during the repoint; `_V<N>` is never
+   `CREATE OR REPLACE`d.
+3. **remove** — drop the rule(s) naming the module's script, refresh, mark
+   provenance retired. The script itself is left in place (untouched
+   sessions cannot be stranded) until reclaimed.
+4. **reclaim** — the physical `DROP SCRIPT`, guarded: `PREPROC.MODULE_RECLAIM(name, version)`
+   drops a retired version only when no enabled `PREPROC.CONFIG` rule and no
+   live (non-orphaned) `PREPROC.PROFILES` manifest still reference it. Reclaim
+   is a separate, later admin call — it is not run automatically by `remove`
+   or `update`, mirroring the framework's own profile
+   [retire-then-reclaim](how-it-works.md#profile-cleanup-retire-then-reclaim)
+   invariant.
+
+`preproc module sync <manifest>` drives this whole lifecycle declaratively:
+diff the desired-state TOML against `INSTALLED_MODULES`, then add/update/retire
+whatever differs, in a single convergence pass with exactly one refresh. Re-running
+`sync` against an unchanged desired file is a true no-op (closes BUG-008):
+`RULE_ENSURE` returns the existing rule id rather than duplicating it.
+
+### Follow-ons
+
+Two items from this plan are deliberately deferred, not forgotten:
+
+- **exasol-semantic-views integration** — the module contract already
+  accommodates a `self-deployed`, register-only module (see the `module.toml`
+  example in [module-authoring.md](module-authoring.md#example-a-self-deployed-module-front-door-to-another-subsystem)),
+  but actually wiring that subsystem's front door in as a module needs
+  coordination with their team. Tracked as a follow-on spike.
+- **Standalone pip-installable test kit** — the library repo's CI currently
+  depends on this framework's package for connection/install helpers rather
+  than a separately published, independently versioned test harness.
+  Extracting that into its own pip-installable package is a follow-on; it
+  would let module authors outside this repo test against the framework
+  without a framework checkout.
+
+## Deploying a module by hand (no registry)
+
+For a one-off module that will never go through the registry — e.g. a private,
+unpublished module — the manual path still works exactly as before:
 
 1. Write the Lua module following the authoring contract in
-   [how-it-works.md](how-it-works.md#module-authoring-contract).
+   [how-it-works.md](how-it-works.md#module-authoring-contract) (or the fuller
+   SDK reference in [module-authoring.md](module-authoring.md)).
 2. Deploy it as a versioned script under a new name:
 
 ```sql
@@ -450,7 +590,10 @@ CREATE LUA SCRIPT PREPROC_RT.MY_COMMAND_V1() AS
 
 To update an existing module, deploy as `MY_COMMAND_V2`, repoint the rule to
 the new version, refresh, then retire `MY_COMMAND_V1` once no rule references
-it. Never use `CREATE OR REPLACE` on a live module.
+it. Never use `CREATE OR REPLACE` on a live module. This mirrors the `add`
+step of the CLI lifecycle above, minus the registry lookup and provenance
+row — a manually deployed module simply never appears in
+`PREPROC_RT.INSTALLED_MODULES`.
 
 ## Troubleshooting
 

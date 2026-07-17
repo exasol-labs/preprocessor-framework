@@ -34,6 +34,11 @@ _LUA_PATH_ATTRS = (
     "_SET_SELF_DISABLE_LUA_PATH",
     "_SET_SYS_GROUPING_LUA_PATH",
     "_CONTROL_SUGAR_LUA_PATH",
+    # Module lifecycle (added with add-module-ecosystem plan)
+    "_RULE_ENSURE_LUA_PATH",
+    "_MODULE_REGISTER_LUA_PATH",
+    "_MODULE_RETIRE_LUA_PATH",
+    "_MODULE_RECLAIM_LUA_PATH",
 )
 
 
@@ -133,6 +138,10 @@ def test_bundle_wraps_control_layer(monkeypatch, tmp_path):
         "PREPROC.RULE_ENABLE",
         "PREPROC.RULE_DISABLE",
         "PREPROC.RULE_LIST",
+        "PREPROC.RULE_ENSURE",
+        "PREPROC.MODULE_REGISTER",
+        "PREPROC.MODULE_RETIRE",
+        "PREPROC.MODULE_RECLAIM",
         "PREPROC.SET_MODE",
         "PREPROC.SET_SELF_DISABLE",
         "PREPROC.SET_SYS_GROUPING",
@@ -204,8 +213,8 @@ def test_bundle_count_matches_statements(monkeypatch, tmp_path):
 
     count = bundle.run_bundle(out)
 
-    # 3 DDL statements (2 schemas + 1 grant) + 16 Lua wrappers + 1 UDF = 20.
-    assert count == 20
+    # 3 DDL statements (2 schemas + 1 grant) + 20 Lua wrappers + 1 UDF = 24.
+    assert count == 24
 
 
 def test_bundle_missing_lua_source_raises(monkeypatch, tmp_path):
@@ -273,6 +282,10 @@ def test_release_bundle_is_framework_only(tmp_path):
         "CREATE OR REPLACE LUA SCRIPT PREPROC_RT.CONTROL_SUGAR_V1()",
         "CREATE OR REPLACE LUA SCRIPT PREPROC.REFRESH_CORE()",
         "CREATE OR REPLACE LUA SCRIPT PREPROC.RULE_ADD(",
+        "CREATE OR REPLACE LUA SCRIPT PREPROC.RULE_ENSURE(",
+        "CREATE OR REPLACE LUA SCRIPT PREPROC.MODULE_REGISTER(",
+        "CREATE OR REPLACE LUA SCRIPT PREPROC.MODULE_RETIRE(",
+        "CREATE OR REPLACE LUA SCRIPT PREPROC.MODULE_RECLAIM(",
         "CREATE OR REPLACE LUA SCRIPT PREPROC.SET_MODE(",
         "CREATE OR REPLACE LUA SCRIPT PREPROC.SET_SYS_GROUPING(",
     ):

@@ -25,8 +25,25 @@ statement delimiter (required because Lua/Python bodies contain semicolons).
 | `demo_translate.sql` | TRANSLATE | Transpiles a `--!dialect:<name>`-marked statement to Exasol SQL via the companion `sqlglot` Python3 UDF. Deploys two objects (UDF + module). |
 | `demo_audit.sql` | REWRITE | Appends an inert `/* PREPROC_AUDIT user=<CURRENT_USER> */` comment. Demonstration only — writes to no table. |
 | `confd_admin.sql` | EXPAND | A real-world add-on: the `CONTROL DATABASE …` and `CONTROL BUCKETFS …` SQL command surfaces, routed through a generic Exasol ConfD gateway UDF. Deploys four objects and self-registers two `ROLE DBA` rules. Requires a `CONFD_CONNECTION` object (see the file header). Vendored from the companion confd-via-sql project. **Full command reference: [`confd_admin.md`](confd_admin.md).** |
-| `ergonomics_cast.sql` | TRANSLATE | PostgreSQL-style `expr::type` cast shorthand → `CAST(expr AS type)`. Pure-Lua; skips strings/identifiers/comments; passes any unrecognised operand through unchanged. |
-| `ergonomics_trailing_comma.sql` | TRANSLATE | Removes optional trailing commas before `)` or a list-terminating keyword (`SELECT a, b, FROM t`). Pure-Lua; additive — statements without trailing commas are untouched. |
+
+## Ergonomics modules have moved
+
+The `cast-shorthand` (`expr::type` → `CAST(expr AS type)`) and
+`trailing-comma` (removes optional trailing commas) modules used to live here
+as `ergonomics_cast.sql` / `ergonomics_trailing_comma.sql`. They have moved to
+the community module library, [`exasol-labs/preprocessor-library`](https://github.com/exasol-labs/preprocessor-library),
+as the first two modules proving out the `preproc module` ecosystem. Install
+them with:
+
+```
+uv run preproc module add cast-shorthand
+uv run preproc module add trailing-comma
+```
+
+See [`docs/module-authoring.md`](../docs/module-authoring.md) for the module
+contract and [`docs/operations.md` § Module management](../docs/operations.md#module-management)
+for the `preproc module` CLI (`list` / `search` / `add` / `update` / `remove` /
+`bundle` / `validate` / `sync`).
 
 ## Registration scope
 

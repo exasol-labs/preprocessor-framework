@@ -58,6 +58,10 @@ _SET_MODE_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "set_mode.lua"
 _SET_SELF_DISABLE_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "set_self_disable.lua"
 _SET_SYS_GROUPING_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "set_sys_grouping.lua"
 _CONTROL_SUGAR_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "control_sugar_v1.lua"
+_RULE_ENSURE_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "rule_ensure.lua"
+_MODULE_REGISTER_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "module_register.lua"
+_MODULE_RETIRE_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "module_retire.lua"
+_MODULE_RECLAIM_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "module_reclaim.lua"
 
 _TOLERATE_MARKER = "--@tolerate-exists"
 _ALREADY_EXISTS_MSG = "already exists"
@@ -245,9 +249,13 @@ def _deploy_admin_scripts(connection: Any, verbose: bool) -> None:
       6. PREPROC.RULE_ENABLE   — RETURNS TABLE
       7. PREPROC.RULE_DISABLE  — RETURNS TABLE
       8. PREPROC.RULE_LIST     — RETURNS TABLE
-      9. PREPROC.SET_MODE      — RETURNS TABLE
-     10. PREPROC.SET_SELF_DISABLE — RETURNS TABLE
-     11. PREPROC.SET_SYS_GROUPING  — RETURNS TABLE
+      9. PREPROC.RULE_ENSURE   — RETURNS TABLE (idempotent module lifecycle)
+     10. PREPROC.MODULE_REGISTER — RETURNS TABLE (module lifecycle)
+     11. PREPROC.MODULE_RETIRE   — RETURNS TABLE (module lifecycle)
+     12. PREPROC.MODULE_RECLAIM  — RETURNS TABLE (module lifecycle)
+     13. PREPROC.SET_MODE      — RETURNS TABLE
+     14. PREPROC.SET_SELF_DISABLE — RETURNS TABLE
+     15. PREPROC.SET_SYS_GROUPING  — RETURNS TABLE
 
     pyexasol sends the bare CREATE statement without a trailing '/' delimiter
     (that delimiter is only needed for interactive SQL clients).
@@ -268,6 +276,10 @@ def _deploy_admin_scripts(connection: Any, verbose: bool) -> None:
         (_RULE_ENABLE_LUA_PATH, "rule_enable.lua"),
         (_RULE_DISABLE_LUA_PATH, "rule_disable.lua"),
         (_RULE_LIST_LUA_PATH, "rule_list.lua"),
+        (_RULE_ENSURE_LUA_PATH, "rule_ensure.lua"),
+        (_MODULE_REGISTER_LUA_PATH, "module_register.lua"),
+        (_MODULE_RETIRE_LUA_PATH, "module_retire.lua"),
+        (_MODULE_RECLAIM_LUA_PATH, "module_reclaim.lua"),
         (_SET_MODE_LUA_PATH, "set_mode.lua"),
         (_SET_SELF_DISABLE_LUA_PATH, "set_self_disable.lua"),
         (_SET_SYS_GROUPING_LUA_PATH, "set_sys_grouping.lua"),
@@ -287,6 +299,10 @@ def _deploy_admin_scripts(connection: Any, verbose: bool) -> None:
     rule_enable_body = _RULE_ENABLE_LUA_PATH.read_text(encoding="utf-8")
     rule_disable_body = _RULE_DISABLE_LUA_PATH.read_text(encoding="utf-8")
     rule_list_body = _RULE_LIST_LUA_PATH.read_text(encoding="utf-8")
+    rule_ensure_body = _RULE_ENSURE_LUA_PATH.read_text(encoding="utf-8")
+    module_register_body = _MODULE_REGISTER_LUA_PATH.read_text(encoding="utf-8")
+    module_retire_body = _MODULE_RETIRE_LUA_PATH.read_text(encoding="utf-8")
+    module_reclaim_body = _MODULE_RECLAIM_LUA_PATH.read_text(encoding="utf-8")
     set_mode_body = _SET_MODE_LUA_PATH.read_text(encoding="utf-8")
     set_self_disable_body = _SET_SELF_DISABLE_LUA_PATH.read_text(encoding="utf-8")
     set_sys_grouping_body = _SET_SYS_GROUPING_LUA_PATH.read_text(encoding="utf-8")
@@ -294,7 +310,8 @@ def _deploy_admin_scripts(connection: Any, verbose: bool) -> None:
     if verbose:
         print(
             "Deploying REFRESH_CORE, REFRESH, STATUS, RULE_ADD, RULE_DROP, "
-            "RULE_ENABLE, RULE_DISABLE, RULE_LIST, SET_MODE, SET_SELF_DISABLE, "
+            "RULE_ENABLE, RULE_DISABLE, RULE_LIST, RULE_ENSURE, MODULE_REGISTER, "
+            "MODULE_RETIRE, MODULE_RECLAIM, SET_MODE, SET_SELF_DISABLE, "
             "SET_SYS_GROUPING Lua scripts into PREPROC ...",
             file=sys.stdout,
         )
@@ -329,6 +346,24 @@ def _deploy_admin_scripts(connection: Any, verbose: bool) -> None:
     )
     connection.execute(
         f"CREATE OR REPLACE LUA SCRIPT PREPROC.RULE_LIST() RETURNS TABLE AS\n{rule_list_body}"
+    )
+    connection.execute(
+        f"CREATE OR REPLACE LUA SCRIPT PREPROC.RULE_ENSURE("
+        f"scope_type, scope_value, phase, script_name, function_name, client_pattern, norefresh) "
+        f"RETURNS TABLE AS\n{rule_ensure_body}"
+    )
+    connection.execute(
+        f"CREATE OR REPLACE LUA SCRIPT PREPROC.MODULE_REGISTER("
+        f"name, version, source, ref, sha256, script_name, function_name, phase, deploy_mode) "
+        f"RETURNS TABLE AS\n{module_register_body}"
+    )
+    connection.execute(
+        f"CREATE OR REPLACE LUA SCRIPT PREPROC.MODULE_RETIRE(name, version) "
+        f"RETURNS TABLE AS\n{module_retire_body}"
+    )
+    connection.execute(
+        f"CREATE OR REPLACE LUA SCRIPT PREPROC.MODULE_RECLAIM(name, version) "
+        f"RETURNS TABLE AS\n{module_reclaim_body}"
     )
     connection.execute(
         f"CREATE OR REPLACE LUA SCRIPT PREPROC.SET_MODE(mode, norefresh) "

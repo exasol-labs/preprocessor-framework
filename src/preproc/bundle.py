@@ -57,6 +57,10 @@ _SET_MODE_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "set_mode.lua"
 _SET_SELF_DISABLE_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "set_self_disable.lua"
 _SET_SYS_GROUPING_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "set_sys_grouping.lua"
 _CONTROL_SUGAR_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "control_sugar_v1.lua"
+_RULE_ENSURE_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "rule_ensure.lua"
+_MODULE_REGISTER_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "module_register.lua"
+_MODULE_RETIRE_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "module_retire.lua"
+_MODULE_RECLAIM_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "module_reclaim.lua"
 _DEMO_UDF_PATH = _REPO_ROOT / "sql" / "udf" / "demo_sqlglot_transpile_v1.sql"
 
 
@@ -128,6 +132,16 @@ def _script_statements() -> dict[str, str]:
         f"RETURNS TABLE AS\n{_read_source(_RULE_DISABLE_LUA_PATH, 'rule_disable.lua')}",
         "RULE_LIST": f"CREATE OR REPLACE LUA SCRIPT PREPROC.RULE_LIST() RETURNS TABLE AS\n"
         f"{_read_source(_RULE_LIST_LUA_PATH, 'rule_list.lua')}",
+        "RULE_ENSURE": f"CREATE OR REPLACE LUA SCRIPT PREPROC.RULE_ENSURE("
+        f"scope_type, scope_value, phase, script_name, function_name, client_pattern, norefresh) "
+        f"RETURNS TABLE AS\n{_read_source(_RULE_ENSURE_LUA_PATH, 'rule_ensure.lua')}",
+        "MODULE_REGISTER": f"CREATE OR REPLACE LUA SCRIPT PREPROC.MODULE_REGISTER("
+        f"name, version, source, ref, sha256, script_name, function_name, phase, deploy_mode) "
+        f"RETURNS TABLE AS\n{_read_source(_MODULE_REGISTER_LUA_PATH, 'module_register.lua')}",
+        "MODULE_RETIRE": f"CREATE OR REPLACE LUA SCRIPT PREPROC.MODULE_RETIRE(name, version) "
+        f"RETURNS TABLE AS\n{_read_source(_MODULE_RETIRE_LUA_PATH, 'module_retire.lua')}",
+        "MODULE_RECLAIM": f"CREATE OR REPLACE LUA SCRIPT PREPROC.MODULE_RECLAIM(name, version) "
+        f"RETURNS TABLE AS\n{_read_source(_MODULE_RECLAIM_LUA_PATH, 'module_reclaim.lua')}",
         "SET_MODE": f"CREATE OR REPLACE LUA SCRIPT PREPROC.SET_MODE(mode, norefresh) "
         f"RETURNS TABLE AS\n{_read_source(_SET_MODE_LUA_PATH, 'set_mode.lua')}",
         "SET_SELF_DISABLE": f"CREATE OR REPLACE LUA SCRIPT PREPROC.SET_SELF_DISABLE(value) "
@@ -154,6 +168,10 @@ _FULL_SCRIPT_ORDER = [
     "RULE_ENABLE",
     "RULE_DISABLE",
     "RULE_LIST",
+    "RULE_ENSURE",
+    "MODULE_REGISTER",
+    "MODULE_RETIRE",
+    "MODULE_RECLAIM",
     "SET_MODE",
     "SET_SELF_DISABLE",
     "SET_SYS_GROUPING",
@@ -172,6 +190,10 @@ _RELEASE_SCRIPT_ORDER = [
     "RULE_ENABLE",
     "RULE_DISABLE",
     "RULE_LIST",
+    "RULE_ENSURE",
+    "MODULE_REGISTER",
+    "MODULE_RETIRE",
+    "MODULE_RECLAIM",
     "SET_MODE",
     "SET_SELF_DISABLE",
     "SET_SYS_GROUPING",

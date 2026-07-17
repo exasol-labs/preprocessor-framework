@@ -17,6 +17,7 @@ from pathlib import Path
 from preproc.bundle import run_bundle, run_release_bundle
 from preproc.connection import MissingEnvError, connect_from_env
 from preproc.install import run_install
+from preproc.module.commands import add_module_parser, run_module
 
 
 def _cmd_install(args: argparse.Namespace) -> int:
@@ -116,6 +117,8 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    add_module_parser(subparsers)
+
     return parser
 
 
@@ -132,5 +135,7 @@ def main() -> None:
         sys.exit(_cmd_install(args))
     elif args.command == "bundle":
         sys.exit(_cmd_bundle(args))
+    elif args.command == "module":
+        sys.exit(run_module(args))
     else:
         parser.error(f"unknown command: {args.command}")
