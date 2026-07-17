@@ -108,10 +108,11 @@
 -- -----------------------------------------------------------------------------
 -- 9. NOREFRESH suffix threading  —  how the opt-out reaches the admin script
 -- -----------------------------------------------------------------------------
---   Every mutating command (ADD/DROP/ENABLE/DISABLE RULE, SET MODE) accepts an
---   optional trailing NOREFRESH keyword. The admin scripts take an optional
---   trailing boolean parameter that, when true, skips the in-script auto-refresh
---   (for batch workflows that refresh once at the end). The threading rule is
+--   Every mutating command (ADD/DROP/ENABLE/DISABLE RULE, SET MODE,
+--   SET SYS_GROUPING) accepts an optional trailing NOREFRESH keyword. The
+--   admin scripts take an optional trailing boolean parameter that, when true,
+--   skips the in-script auto-refresh (for batch workflows that refresh once at
+--   the end). The threading rule is
 --   purely textual: if the command ends in NOREFRESH, strip that keyword before
 --   parsing the rest, then append `, true` as the final argument of the emitted
 --   EXECUTE SCRIPT call. Non-mutating commands (LIST RULES, REFRESH, STATUS,
@@ -136,6 +137,7 @@ local CONTROL = {
     status = "PREPROC.STATUS",
     set_mode = "PREPROC.SET_MODE",
     set_self_disable = "PREPROC.SET_SELF_DISABLE",
+    set_sys_grouping = "PREPROC.SET_SYS_GROUPING",
 }
 
 -- Split a string into whitespace-delimited tokens, preserving original case.
@@ -344,6 +346,20 @@ function expand(sqltext)
             return nil
         end
         return execute_script(CONTROL.set_self_disable, { word(3) })
+    end
+
+    if verb == "SET" and upper_word(2) == "SYS_GROUPING" then
+        -- PREPROC SET SYS_GROUPING <bool> [NOREFRESH]  (mutating; accepts NOREFRESH)
+        if subcommand_count ~= 3 then
+            return nil
+        end
+        local args = { word(3) }
+        -- Always pass the trailing norefresh slot: the target admin scripts have
+        -- a fixed parameter list and Exasol requires an exact argument count, so
+        -- omitting it ("got N expected N+1") makes the expanded EXECUTE SCRIPT
+        -- fail. NOREFRESH -> true; otherwise NULL (the script then auto-refreshes).
+        args[#args + 1] = norefresh and "true" or "NULL"
+        return execute_script(CONTROL.set_sys_grouping, args)
     end
 
     return nil

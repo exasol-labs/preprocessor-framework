@@ -56,6 +56,7 @@ _RULE_DISABLE_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "rule_disable.lua"
 _RULE_LIST_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "rule_list.lua"
 _SET_MODE_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "set_mode.lua"
 _SET_SELF_DISABLE_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "set_self_disable.lua"
+_SET_SYS_GROUPING_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "set_sys_grouping.lua"
 _CONTROL_SUGAR_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "control_sugar_v1.lua"
 
 _TOLERATE_MARKER = "--@tolerate-exists"
@@ -246,6 +247,7 @@ def _deploy_admin_scripts(connection: Any, verbose: bool) -> None:
       8. PREPROC.RULE_LIST     — RETURNS TABLE
       9. PREPROC.SET_MODE      — RETURNS TABLE
      10. PREPROC.SET_SELF_DISABLE — RETURNS TABLE
+     11. PREPROC.SET_SYS_GROUPING  — RETURNS TABLE
 
     pyexasol sends the bare CREATE statement without a trailing '/' delimiter
     (that delimiter is only needed for interactive SQL clients).
@@ -268,6 +270,7 @@ def _deploy_admin_scripts(connection: Any, verbose: bool) -> None:
         (_RULE_LIST_LUA_PATH, "rule_list.lua"),
         (_SET_MODE_LUA_PATH, "set_mode.lua"),
         (_SET_SELF_DISABLE_LUA_PATH, "set_self_disable.lua"),
+        (_SET_SYS_GROUPING_LUA_PATH, "set_sys_grouping.lua"),
     ]
     for path, label in required:
         if not path.exists():
@@ -286,12 +289,13 @@ def _deploy_admin_scripts(connection: Any, verbose: bool) -> None:
     rule_list_body = _RULE_LIST_LUA_PATH.read_text(encoding="utf-8")
     set_mode_body = _SET_MODE_LUA_PATH.read_text(encoding="utf-8")
     set_self_disable_body = _SET_SELF_DISABLE_LUA_PATH.read_text(encoding="utf-8")
+    set_sys_grouping_body = _SET_SYS_GROUPING_LUA_PATH.read_text(encoding="utf-8")
 
     if verbose:
         print(
             "Deploying REFRESH_CORE, REFRESH, STATUS, RULE_ADD, RULE_DROP, "
-            "RULE_ENABLE, RULE_DISABLE, RULE_LIST, SET_MODE, SET_SELF_DISABLE "
-            "Lua scripts into PREPROC ...",
+            "RULE_ENABLE, RULE_DISABLE, RULE_LIST, SET_MODE, SET_SELF_DISABLE, "
+            "SET_SYS_GROUPING Lua scripts into PREPROC ...",
             file=sys.stdout,
         )
 
@@ -333,6 +337,10 @@ def _deploy_admin_scripts(connection: Any, verbose: bool) -> None:
     connection.execute(
         f"CREATE OR REPLACE LUA SCRIPT PREPROC.SET_SELF_DISABLE(value) "
         f"RETURNS TABLE AS\n{set_self_disable_body}"
+    )
+    connection.execute(
+        f"CREATE OR REPLACE LUA SCRIPT PREPROC.SET_SYS_GROUPING(value, norefresh) "
+        f"RETURNS TABLE AS\n{set_sys_grouping_body}"
     )
 
 

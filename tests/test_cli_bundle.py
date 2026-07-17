@@ -32,6 +32,7 @@ _LUA_PATH_ATTRS = (
     "_RULE_LIST_LUA_PATH",
     "_SET_MODE_LUA_PATH",
     "_SET_SELF_DISABLE_LUA_PATH",
+    "_SET_SYS_GROUPING_LUA_PATH",
     "_CONTROL_SUGAR_LUA_PATH",
 )
 
@@ -134,6 +135,7 @@ def test_bundle_wraps_control_layer(monkeypatch, tmp_path):
         "PREPROC.RULE_LIST",
         "PREPROC.SET_MODE",
         "PREPROC.SET_SELF_DISABLE",
+        "PREPROC.SET_SYS_GROUPING",
     ):
         assert f"CREATE OR REPLACE LUA SCRIPT {script}" in text, f"{script} not in bundle"
     # Convenience module
@@ -202,8 +204,8 @@ def test_bundle_count_matches_statements(monkeypatch, tmp_path):
 
     count = bundle.run_bundle(out)
 
-    # 3 DDL statements (2 schemas + 1 grant) + 15 Lua wrappers + 1 UDF = 19.
-    assert count == 19
+    # 3 DDL statements (2 schemas + 1 grant) + 16 Lua wrappers + 1 UDF = 20.
+    assert count == 20
 
 
 def test_bundle_missing_lua_source_raises(monkeypatch, tmp_path):
@@ -272,6 +274,7 @@ def test_release_bundle_is_framework_only(tmp_path):
         "CREATE OR REPLACE LUA SCRIPT PREPROC.REFRESH_CORE()",
         "CREATE OR REPLACE LUA SCRIPT PREPROC.RULE_ADD(",
         "CREATE OR REPLACE LUA SCRIPT PREPROC.SET_MODE(",
+        "CREATE OR REPLACE LUA SCRIPT PREPROC.SET_SYS_GROUPING(",
     ):
         assert present in text, f"release bundle missing {present!r}"
 

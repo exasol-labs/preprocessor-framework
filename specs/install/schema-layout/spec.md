@@ -1,6 +1,6 @@
 # Feature: Two-Schema Database Layout
 
-Establishes the foundational database objects the preprocessor framework dispatches from: a locked admin schema (`PREPROC`) holding configuration and a PUBLIC-accessible runtime schema (`PREPROC_RT`) holding the dispatcher, views, and (later) generated scripts. This slice extends the layout for resolution: `RESOLUTION` gains an `ordinal` column for deterministic within-phase dispatch order, `SETTINGS` gains a state-fingerprint column for staleness detection, `MY_PIPELINE` exposes `client_pattern` and orders by `phase, ordinal`, and the `PREPROC_ADMIN` role gains `SELECT ANY DICTIONARY` so the admin-owned refresh script can read the role-grant dictionary tables. This delta extends the layout to add a `profile_hash` column to `PREPROC.RESOLUTION`, an `orphaned_at` column to `PREPROC.PROFILES` (for the retire-then-reclaim cleanup lifecycle), and exposes `mode` and `profile_hash` from `PREPROC_RT.MY_PIPELINE` to support session self-optimization.
+Establishes the foundational database objects the preprocessor framework dispatches from: a locked admin schema (`PREPROC`) holding configuration and a PUBLIC-accessible runtime schema (`PREPROC_RT`) holding the dispatcher, views, and (later) generated scripts. This slice extends the layout for resolution: `RESOLUTION` gains an `ordinal` column for deterministic within-phase dispatch order, `SETTINGS` gains a state-fingerprint column for staleness detection, `MY_PIPELINE` exposes `client_pattern` and orders by `phase, ordinal`, and the `PREPROC_ADMIN` role gains `SELECT ANY DICTIONARY` so the admin-owned refresh script can read the role-grant dictionary tables. This delta extends the layout to add a `profile_hash` column to `PREPROC.RESOLUTION`, an `orphaned_at` column to `PREPROC.PROFILES` (for the retire-then-reclaim cleanup lifecycle), and exposes `mode` and `profile_hash` from `PREPROC_RT.MY_PIPELINE` to support session self-optimization. It further extends `PREPROC.SETTINGS` with a `group_sys_with_dba` BOOLEAN column that governs whether the `SYS` account is grouped with `DBA` during resolution. Fresh installs seed it `TRUE` (grouped — preserving today's behavior); existing installs gain it as a nullable additive upgrade whose `NULL` is treated as `TRUE` by the resolution `COALESCE`, so an upgrade changes no behavior.
 
 ## Background
 
@@ -8,6 +8,7 @@ Establishes the foundational database objects the preprocessor framework dispatc
 * All object creation is idempotent: schemas, tables, and views use `IF NOT EXISTS` or `CREATE OR REPLACE`; column additions on already-installed databases ship as guarded `ALTER TABLE ... ADD COLUMN` statements that tolerate "already exists" via the `--@tolerate-exists` applier contract.
 * The `PREPROC_ADMIN` role owns the `PREPROC` schema and every object in it, including the new refresh and status scripts. Objects in `PREPROC` are not granted to PUBLIC. All framework administration (refresh, status) is exposed as these DB-side scripts, callable from any SQL client by an admin; there is no external (Python) administration path. The CLI's only involvement is deployment — shipping the DDL and these Lua scripts during install.
 * `SELECT ANY DICTIONARY` is required to read `EXA_DBA_ROLE_PRIVS` and `EXA_DBA_USERS`; it is granted to `PREPROC_ADMIN` only.
+* The `group_sys_with_dba` column is nullable in both the fresh-install `CREATE TABLE` and the upgrade `ALTER TABLE`, matching the established additive-upgrade pattern (a NOT NULL add would fail on the existing single SETTINGS row); the seed sets the fresh-install value explicitly to `TRUE` and the resolution SQL `COALESCE`s a `NULL` to `TRUE`.
 
 ## Scenarios
 
@@ -33,7 +34,7 @@ Establishes the foundational database objects the preprocessor framework dispatc
 * *WHEN* the install DDL is applied
 * *THEN* the system MUST create table `PREPROC.CONFIG` with columns for role/user/client_pattern, phase, module script, function, enabled, and version
 * *AND* the system MUST create table `PREPROC.RESOLUTION` with columns user_name, client_pattern, phase, script, function, an `ordinal` column that records the deterministic within-phase dispatch order, and a `profile_hash` column (VARCHAR, nullable) that records the hash of the profile script generated for that user's chain
-* *AND* the system MUST create table `PREPROC.SETTINGS` with columns mode, self_disable_allowed, last_refresh, and a state-fingerprint column capturing the user/role-grant inputs seen at the last refresh
+* *AND* the system MUST create table `PREPROC.SETTINGS` with columns mode, self_disable_allowed, last_refresh, a state-fingerprint column capturing the user/role-grant inputs seen at the last refresh, and a nullable `group_sys_with_dba` BOOLEAN column that governs whether the `SYS` account participates in the ROLE-grant closure
 * *AND* the system MUST create table `PREPROC.PROFILES` mapping a hash to a manifest, including a nullable `orphaned_at` TIMESTAMP column that records when a profile's hash stopped being referenced by any current resolved chain (NULL while the profile is live/current)
 
 ### Scenario: SETTINGS is seeded with a single default row
@@ -42,6 +43,7 @@ Establishes the foundational database objects the preprocessor framework dispatc
 * *WHEN* the install DDL is applied
 * *THEN* the system MUST insert exactly one row into `PREPROC.SETTINGS`
 * *AND* the row SHALL default `mode` to convenience
+* *AND* the row SHALL default `group_sys_with_dba` to `TRUE` (grouped — preserving the pre-toggle behavior for fresh installs)
 * *AND* re-applying the DDL MUST NOT insert a second row
 
 ### Scenario: The CURRENT_USER-filtered pipeline view is created
@@ -103,3 +105,11 @@ Establishes the foundational database objects the preprocessor framework dispatc
 * *THEN* the system MUST add a nullable `orphaned_at` TIMESTAMP column to `PREPROC.PROFILES`
 * *AND* the upgrade MUST be expressed via the existing `--@tolerate-exists` additive `ALTER TABLE ... ADD COLUMN` pattern so that re-applying it on an install that already has the column is a no-op (no error, column unchanged)
 * *AND* existing `PREPROC.PROFILES` rows MUST retain their data with `orphaned_at` defaulting to NULL (treated as live/current)
+
+### Scenario: PREPROC.SETTINGS gains a group_sys_with_dba column via an idempotent upgrade
+
+* *GIVEN* an existing install where `PREPROC.SETTINGS` does not yet have a `group_sys_with_dba` column
+* *WHEN* the additive column-upgrade DDL is applied
+* *THEN* the system MUST add a nullable `group_sys_with_dba` BOOLEAN column to `PREPROC.SETTINGS`
+* *AND* the upgrade MUST be expressed via the existing `--@tolerate-exists` additive `ALTER TABLE ... ADD COLUMN` pattern so that re-applying it on an install that already has the column is a no-op (no error, column unchanged)
+* *AND* the existing single `PREPROC.SETTINGS` row MUST retain its data with `group_sys_with_dba` defaulting to `NULL`, which resolution treats as `TRUE` (grouped) via `COALESCE`, so the upgrade changes no resolution behavior

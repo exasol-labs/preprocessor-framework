@@ -74,11 +74,14 @@ def test_admin_tables_created(installed):
 @pytest.mark.integration
 def test_settings_seeded_single_row(installed):
     """PREPROC.SETTINGS must contain exactly one row with the expected defaults."""
-    rows = installed.execute("SELECT mode, self_disable_allowed FROM PREPROC.SETTINGS").fetchall()
+    rows = installed.execute(
+        "SELECT mode, self_disable_allowed, group_sys_with_dba FROM PREPROC.SETTINGS"
+    ).fetchall()
     assert len(rows) == 1, f"Expected exactly 1 row in PREPROC.SETTINGS, got {len(rows)}"
-    mode, self_disable_allowed = rows[0]
+    mode, self_disable_allowed, group_sys_with_dba = rows[0]
     assert mode == "convenience"
     assert self_disable_allowed is False
+    assert group_sys_with_dba is True
 
 
 @pytest.mark.integration
@@ -292,3 +295,47 @@ def test_orphaned_at_upgrade_idempotent(installed):
         "AND COLUMN_NAME = 'ORPHANED_AT'"
     ).fetchall()
     assert len(rows) == 1, "ORPHANED_AT column missing after re-install"
+
+
+@pytest.mark.integration
+def test_settings_has_group_sys_with_dba_column(installed):
+    """PREPROC.SETTINGS must have a nullable GROUP_SYS_WITH_DBA column.
+
+    Nullable (not NOT NULL) is a hard requirement: a NOT NULL add would fail
+    on the existing single SETTINGS row during an upgrade.
+    """
+    rows = installed.execute(
+        "SELECT COLUMN_IS_NULLABLE FROM EXA_ALL_COLUMNS "
+        "WHERE COLUMN_SCHEMA = 'PREPROC' AND COLUMN_TABLE = 'SETTINGS' "
+        "AND COLUMN_NAME = 'GROUP_SYS_WITH_DBA'"
+    ).fetchall()
+    assert len(rows) == 1, "GROUP_SYS_WITH_DBA column not found in PREPROC.SETTINGS"
+    assert rows[0][0] is True, "GROUP_SYS_WITH_DBA must be nullable"
+
+
+@pytest.mark.integration
+def test_group_sys_with_dba_upgrade_idempotent(installed):
+    """Re-applying the column upgrade must be a no-op and NULL must mean grouped.
+
+    Running install again re-applies ``25_column_upgrades.sql`` through its
+    ``--@tolerate-exists`` guard; GROUP_SYS_WITH_DBA must survive re-application
+    unchanged. Setting it to NULL directly (as an upgraded, not-yet-touched row
+    would have it) must not violate any constraint, and the COALESCE-to-TRUE
+    read pattern used by resolution must treat that NULL as grouped.
+    """
+    run_install(installed)
+    rows = installed.execute(
+        "SELECT COLUMN_NAME FROM EXA_ALL_COLUMNS "
+        "WHERE COLUMN_SCHEMA = 'PREPROC' AND COLUMN_TABLE = 'SETTINGS' "
+        "AND COLUMN_NAME = 'GROUP_SYS_WITH_DBA'"
+    ).fetchall()
+    assert len(rows) == 1, "GROUP_SYS_WITH_DBA column missing after re-install"
+
+    try:
+        installed.execute("UPDATE PREPROC.SETTINGS SET group_sys_with_dba = NULL")
+        grouped = installed.execute(
+            "SELECT COALESCE(group_sys_with_dba, TRUE) FROM PREPROC.SETTINGS"
+        ).fetchval()
+        assert grouped is True, "NULL group_sys_with_dba must be treated as grouped (TRUE)"
+    finally:
+        installed.execute("UPDATE PREPROC.SETTINGS SET group_sys_with_dba = TRUE")

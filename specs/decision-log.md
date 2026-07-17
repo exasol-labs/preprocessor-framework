@@ -956,3 +956,115 @@ Two pattern classes are combined: (1) structural `comma → )` (always unambiguo
 ### Consequences
 
 The two recognition patterns are the documented, testable contract for the module. Commas outside the two patterns are left intact — the module errs on the side of leaving ambiguous commas rather than removing a syntactically required one. The word-boundary guard prevents false positives on identifiers such as `from_date` (FROM prefix) and `orders.id` (ORDER prefix), as verified by spot-check tests.
+
+---
+
+## ADR-035: SYS escape-hatch policy — full-closure exclusion, SYS-only, default grouped
+
+**Date:** 2026-07-17
+**Plan:** `add-sys-grouping-toggle`
+**Status:** Accepted
+
+### Context
+
+BUG-002's onboarding fix seeded the control-sugar bootstrap for both `PREPROC_ADMIN` and `DBA`, so `SYS` — which cannot hold `PREPROC_ADMIN` but does hold `DBA` — can use the `PREPROC …` sugar. That fix left a policy tail: because resolution walks the role-grant closure and `SYS` holds `DBA`, every `DBA`-scoped (and `PUBLIC`-scoped, and nested-role) rule now reaches `SYS`. Some operators want `SYS` to remain a guaranteed raw-SQL recovery account, seeing untransformed SQL regardless of what rules the framework carries.
+
+### Decision
+
+`PREPROC.SETTINGS.group_sys_with_dba` (BOOLEAN, default TRUE) governs whether `SYS` participates in the ROLE-grant closure. When FALSE, `SYS` is excluded from the ENTIRE closure — DBA-derived, PUBLIC-derived, and nested-role-derived rows — so it sees raw SQL unless a USER-scoped rule names `SYS`. The exclusion applies to `SYS` only, not a general excluded-users list. Default TRUE preserves today's behavior; a NULL (upgraded install) is treated as TRUE.
+
+### Options Considered
+
+| Option | Verdict |
+|--------|---------|
+| Full-closure exclusion, SYS-only, default TRUE | Chosen — the product owner chose the cleanest guaranteed recovery path: `SYS` sees raw SQL unless a USER-scoped rule names it |
+| Exclude only `DBA`-scoped rules | Rejected — a `PUBLIC`- or nested-role rule would still reach `SYS`, defeating the break-glass guarantee |
+| A general `PREPROC.EXCLUDED_USERS` table/column | Rejected — `SYS` is the single Exasol account that cannot be granted `PREPROC_ADMIN`, so it is the only account needing role-independent recovery; a general list is scope creep with no requested use case |
+| Default FALSE (isolated) | Rejected — no behavior change on upgrade is a hard requirement |
+
+### Consequences
+
+`SYS` is the one Exasol superuser that cannot be granted `PREPROC_ADMIN`; a guaranteed raw-SQL recovery account is only meaningful if it is isolated from every rule that could reach it through the role graph. The USER arm stays live so an operator can still target SYS deliberately. A NULL toggle (upgraded install) is treated as TRUE with no backfill UPDATE required.
+
+---
+
+## ADR-036: SYS-grouping toggle applied as a single-arm pure-SQL predicate; USER arm and CTEs untouched
+
+**Date:** 2026-07-17
+**Plan:** `add-sys-grouping-toggle`
+**Status:** Accepted
+
+### Context
+
+The SYS escape-hatch policy (ADR-035) needs an enforcement mechanism inside `RESOLUTION_SQL`. `RESOLUTION_SQL` is a single static statement (ADR-006 orchestration model); the policy must be enforced without introducing Lua string branching or duplicating the query.
+
+### Decision
+
+The policy is enforced entirely inside the static `RESOLUTION_SQL` statement by appending `AND (u.user_name <> 'SYS' OR COALESCE((SELECT group_sys_with_dba FROM PREPROC.SETTINGS), TRUE) = TRUE)` to the ROLE-closure UNION arm's `EXA_DBA_USERS` join. The USER-scoped UNION arm and the downstream dedupe/ordinal CTEs are unchanged. No Lua string branching is introduced; `RESOLUTION_SQL` stays a single static statement.
+
+### Options Considered
+
+| Option | Verdict |
+|--------|---------|
+| Single-arm gate on the ROLE-closure UNION arm | Chosen — DBA, PUBLIC, and nested-role derivations all flow through the one closure arm, so a single `grantee <> 'SYS'` gate excludes SYS from the full closure at once |
+| Branch the SQL in Lua (build one of two RESOLUTION_SQL strings) | Rejected — duplicates the query and breaks the single-static-statement property |
+| Add a WHERE at the outer SELECT | Rejected — gating the closure arm is where DBA/PUBLIC/nested all converge, so one predicate covers all three; an outer WHERE would not distinguish arms |
+
+### Consequences
+
+The USER-scoped arm and every non-SYS holder are untouched. `COALESCE`-to-`TRUE` at the read site is the sole default guarantee, so no backfill UPDATE is needed on upgrade.
+
+---
+
+## ADR-037: SYS-grouping toggle excluded from the resolution state fingerprint
+
+**Date:** 2026-07-17
+**Plan:** `add-sys-grouping-toggle`
+**Status:** Accepted
+
+### Context
+
+`PREPROC.SETTINGS.group_sys_with_dba` changes resolution output, raising the question of whether it should be tracked by `FINGERPRINT_SQL` for STATUS staleness detection. `mode` is an existing precedent for a resolution-affecting setting excluded from the fingerprint because its setter always refreshes.
+
+### Decision
+
+`group_sys_with_dba` is NOT part of the resolution state fingerprint. `FINGERPRINT_SQL` in both `refresh_core.lua` and `status.lua` is left byte-for-byte identical. The setter (`SET_SYS_GROUPING`) always rebuilds and restamps on the refresh path, so STATUS reports CURRENT after a toggle change.
+
+### Options Considered
+
+| Option | Verdict |
+|--------|---------|
+| Exclude from `FINGERPRINT_SQL`; rely on the refreshing setter | Chosen — `mode` already sets the precedent; the fingerprint tracks user/role-grant inputs, not framework settings |
+| Fold the toggle into `FINGERPRINT_SQL` | Rejected — requires editing both verbatim copies (drift risk) for no benefit, since the setter always refreshes |
+
+### Consequences
+
+Staleness detection stays correct because settings changes are made through refreshing setters. Keeping the two `FINGERPRINT_SQL` copies identical remains a maintenance invariant.
+
+---
+
+## ADR-038: Command sugar added to CONTROL_SUGAR_V1 in place (pre-release exception); V2 discipline still governs post-release
+
+**Date:** 2026-07-17
+**Plan:** `add-sys-grouping-toggle`
+**Status:** Accepted
+
+### Context
+
+The never-`CREATE OR REPLACE`-a-live-dispatch-module discipline (ADR-019) exists to prevent an in-flight statement binding a stale module body while a new body compiles. The project wanted the `PREPROC SET SYS_GROUPING` verb shipped now, without deferring it to a future `CONTROL_SUGAR_V2`.
+
+### Decision
+
+The `PREPROC SET SYS_GROUPING <bool> [NOREFRESH]` verb is added directly to the live `CONTROL_SUGAR_V1` module in place, and `release.sql` is regenerated. No `CONTROL_SUGAR_V2` is created. The verb is MUTATING, so it accepts the trailing `NOREFRESH` suffix exactly like `PREPROC SET MODE`; it emits `EXECUTE SCRIPT PREPROC.SET_SYS_GROUPING(<value>, <slot>)` with the value passed UNQUOTED as a boolean literal (mirroring `SET SELF_DISABLE`'s unquoted `word(3)`, not `SET MODE`'s quoted value) and the `norefresh` slot always emitted (`true` when `NOREFRESH` present, else `NULL`). This exception is strictly pre-release: any POST-RELEASE grammar change MUST still go through `CONTROL_SUGAR_V2` (new module + repointed seed + retire once unreferenced), and that discipline remains the standing rule.
+
+### Options Considered
+
+| Option | Verdict |
+|--------|---------|
+| Edit live `CONTROL_SUGAR_V1` in place; regenerate `release.sql` | Chosen — the project is pre-first-release, so there are no active sessions and the stale-module-binding hazard (ADR-019) does not apply; a full `V2` dance is disproportionate for one break-glass verb |
+| Defer the sugar entirely (setter usable via `EXECUTE SCRIPT` only) | Rejected by the user, who wants the ergonomic verb shipped now |
+| New `CONTROL_SUGAR_V2` + reseed + retire | Rejected as disproportionate for one break-glass verb |
+
+### Consequences
+
+Editing `V1` in place and regenerating `release.sql` is harmless now because the project has no active sessions. This exception is strictly pre-release: any post-release grammar change must still go through `CONTROL_SUGAR_V2`, and that discipline remains the standing rule going forward.

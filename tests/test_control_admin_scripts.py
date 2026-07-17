@@ -68,6 +68,9 @@ _CONTROL_SCRIPTS = {
     "set_self_disable.lua": (
         "CREATE OR REPLACE LUA SCRIPT PREPROC.SET_SELF_DISABLE(value) RETURNS TABLE AS\n"
     ),
+    "set_sys_grouping.lua": (
+        "CREATE OR REPLACE LUA SCRIPT PREPROC.SET_SYS_GROUPING(value, norefresh) RETURNS TABLE AS\n"
+    ),
 }
 
 # Deployment order: REFRESH_CORE must exist before the scripts that import it.
@@ -80,6 +83,7 @@ _DEPLOY_ORDER = [
     "rule_list.lua",
     "set_mode.lua",
     "set_self_disable.lua",
+    "set_sys_grouping.lua",
 ]
 
 
@@ -149,6 +153,17 @@ def _enabled_of(connection, rule_id):
 def _mode(connection):
     """Read the single SETTINGS.mode value."""
     return connection.execute("SELECT mode FROM PREPROC.SETTINGS").fetchval()
+
+
+def _group_sys_with_dba(connection):
+    """Read SETTINGS.group_sys_with_dba, applying the production COALESCE-to-TRUE.
+
+    Mirrors the read-site default in RESOLUTION_SQL so a raw NULL (possible on a
+    freshly upgraded, never-set database) and an explicit TRUE compare equal.
+    """
+    return connection.execute(
+        "SELECT COALESCE(group_sys_with_dba, TRUE) FROM PREPROC.SETTINGS"
+    ).fetchval()
 
 
 def _add_rule(connection, scope_type, scope_value, phase, norefresh=False):
@@ -378,6 +393,98 @@ def test_set_self_disable_updates_flag(clean_config):
     finally:
         connection.execute(
             f"EXECUTE SCRIPT PREPROC.SET_SELF_DISABLE({original_literal})"
+        ).fetchall()
+
+
+@pytest.mark.integration
+def test_set_sys_grouping_updates_and_refreshes(clean_config):
+    """SET_SYS_GROUPING updates the flag and auto-refreshes (last_refresh advances)."""
+    connection = clean_config
+    original = _group_sys_with_dba(connection)
+    new_value = not original
+    new_literal = "TRUE" if new_value else "FALSE"
+    original_literal = "TRUE" if original else "FALSE"
+    refresh_before = _last_refresh(connection)
+    try:
+        rows = connection.execute(
+            f"EXECUTE SCRIPT PREPROC.SET_SYS_GROUPING({new_literal}, FALSE)"
+        ).fetchall()
+        assert rows[0][0] is new_value
+        assert _group_sys_with_dba(connection) is new_value
+        assert _last_refresh(connection) != refresh_before, "auto-refresh must restamp last_refresh"
+    finally:
+        connection.execute(
+            f"EXECUTE SCRIPT PREPROC.SET_SYS_GROUPING({original_literal}, FALSE)"
+        ).fetchall()
+
+
+@pytest.mark.integration
+def test_set_sys_grouping_rejects_non_boolean(clean_config):
+    """A non-boolean value raises and leaves SETTINGS and RESOLUTION unchanged."""
+    connection = clean_config
+    before_value = _group_sys_with_dba(connection)
+    resolution_before = _resolution_count(connection)
+    refresh_before = _last_refresh(connection)
+
+    with pytest.raises(Exception):  # noqa: PT011 - any DB-side rejection is acceptable
+        connection.execute("EXECUTE SCRIPT PREPROC.SET_SYS_GROUPING('nope', FALSE)").fetchall()
+
+    assert _group_sys_with_dba(connection) == before_value
+    assert _resolution_count(connection) == resolution_before
+    assert _last_refresh(connection) == refresh_before
+
+
+@pytest.mark.integration
+def test_set_sys_grouping_norefresh_skips_refresh(clean_config):
+    """SET_SYS_GROUPING with norefresh=TRUE updates the flag but does not refresh."""
+    connection = clean_config
+    original = _group_sys_with_dba(connection)
+    new_value = not original
+    new_literal = "TRUE" if new_value else "FALSE"
+    original_literal = "TRUE" if original else "FALSE"
+    refresh_before = _last_refresh(connection)
+    try:
+        rows = connection.execute(
+            f"EXECUTE SCRIPT PREPROC.SET_SYS_GROUPING({new_literal}, TRUE)"
+        ).fetchall()
+        assert rows[0][0] is new_value
+        assert _group_sys_with_dba(connection) is new_value
+        assert _last_refresh(connection) == refresh_before, (
+            "norefresh must not restamp last_refresh"
+        )
+    finally:
+        connection.execute(
+            f"EXECUTE SCRIPT PREPROC.SET_SYS_GROUPING({original_literal}, TRUE)"
+        ).fetchall()
+
+
+@pytest.mark.integration
+def test_set_sys_grouping_leaves_other_settings_and_status_current(clean_config):
+    """SET_SYS_GROUPING changes only the grouping flag; mode/self_disable/STATUS unaffected."""
+    connection = clean_config
+    before = connection.execute(
+        "SELECT mode, self_disable_allowed FROM PREPROC.SETTINGS"
+    ).fetchall()[0]
+    original = _group_sys_with_dba(connection)
+    new_value = not original
+    new_literal = "TRUE" if new_value else "FALSE"
+    original_literal = "TRUE" if original else "FALSE"
+    try:
+        connection.execute(
+            f"EXECUTE SCRIPT PREPROC.SET_SYS_GROUPING({new_literal}, FALSE)"
+        ).fetchall()
+
+        after = connection.execute(
+            "SELECT mode, self_disable_allowed FROM PREPROC.SETTINGS"
+        ).fetchall()[0]
+        assert after[0] == before[0], "mode must be untouched"
+        assert after[1] == before[1], "self_disable_allowed must be untouched"
+
+        status_row = connection.execute("EXECUTE SCRIPT PREPROC.STATUS").fetchall()[0]
+        assert status_row[1] == "CURRENT", "STATUS must report CURRENT after the auto-refresh"
+    finally:
+        connection.execute(
+            f"EXECUTE SCRIPT PREPROC.SET_SYS_GROUPING({original_literal}, FALSE)"
         ).fetchall()
 
 

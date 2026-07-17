@@ -146,6 +146,18 @@ refresh closure injects a synthetic `PUBLIC → user` edge for every user in
 `EXA_DBA_USERS`; PUBLIC then resolves like a role held by all users (and any
 real role granted *to* PUBLIC fans out to all users the same way).
 
+`SYS` cannot hold `PREPROC_ADMIN` but does hold `DBA`, so it flows through the
+same ROLE-closure arm as every other `DBA`-derived, `PUBLIC`-derived, and
+nested-role rule. `PREPROC.SETTINGS.group_sys_with_dba` (seeded `TRUE`) governs
+whether that closure includes `SYS`: grouped (`TRUE`, the default) resolves
+`SYS` like any other `DBA` holder; isolated (`FALSE`) excludes `SYS` from the
+**entire** ROLE-closure arm at once — DBA, PUBLIC, and nested roles alike — so
+`SYS` sees raw, untransformed SQL as a guaranteed break-glass recovery path. A
+`USER`-scoped rule naming `SYS` is unaffected by the toggle and still resolves
+either way, since it flows through the separate USER-scoped union arm. See
+[SYS-grouping (break-glass recovery)](operations.md#sys-grouping-break-glass-recovery)
+for the operator-facing setter.
+
 ## client_pattern matching
 
 `client_pattern` is compared against the connecting client's application

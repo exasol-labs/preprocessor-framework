@@ -228,6 +228,7 @@ def test_install_deploys_control_layer(installed):
         "RULE_LIST",
         "SET_MODE",
         "SET_SELF_DISABLE",
+        "SET_SYS_GROUPING",
     )
     for script_name in preproc_scripts:
         row = installed.execute(

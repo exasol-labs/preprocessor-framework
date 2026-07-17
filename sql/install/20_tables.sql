@@ -29,7 +29,8 @@ CREATE TABLE IF NOT EXISTS PREPROC.SETTINGS (
     mode                 VARCHAR(32)  NOT NULL,
     self_disable_allowed BOOLEAN      NOT NULL,
     last_refresh         TIMESTAMP,
-    state_fingerprint    VARCHAR(64)
+    state_fingerprint    VARCHAR(64),
+    group_sys_with_dba   BOOLEAN      -- nullable; NULL is COALESCE'd to TRUE (grouped) at read time
 );
 
 CREATE TABLE IF NOT EXISTS PREPROC.PROFILES (

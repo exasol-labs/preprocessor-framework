@@ -1,17 +1,21 @@
 # Feature: Admin Control Scripts
 
-Provides the complete SQL-only administrative surface for the preprocessor framework as `EXECUTE SCRIPT` entry points in the `PREPROC` admin schema, so every config and settings mutation an operator performs goes through a validating script rather than direct DML. The scripts own rule lifecycle (add, drop, enable, disable, list) and settings management (mode, self-disable flag), validate their inputs so the scripted path is the obviously-correct one, and keep `PREPROC.RESOLUTION` current by auto-refreshing after each mutation (with an opt-out for batch workflows). Direct `INSERT`/`UPDATE`/`DELETE` against `PREPROC.CONFIG` remains technically possible (invoker rights preclude a hard lock) but is declared unsupported.
+Provides the complete SQL-only administrative surface for the preprocessor framework as `EXECUTE SCRIPT` entry points in the `PREPROC` admin schema, so every config and settings mutation an operator performs goes through a validating script rather than direct DML. The scripts own rule lifecycle (add, drop, enable, disable, list) and settings management (mode, self-disable flag), validate their inputs so the scripted path is the obviously-correct one, and keep `PREPROC.RESOLUTION` current by auto-refreshing after each mutation (with an opt-out for batch workflows). Direct `INSERT`/`UPDATE`/`DELETE` against `PREPROC.CONFIG` remains technically possible (invoker rights preclude a hard lock) but is declared unsupported. This adds `PREPROC.SET_SYS_GROUPING`, the setter for the `PREPROC.SETTINGS.group_sys_with_dba` policy. `group_sys_with_dba` joins `mode` and `self_disable_allowed` as the operator-mutable settings columns; because the value changes resolution (whether `SYS` receives ROLE-derived rows), the setter auto-refreshes like `SET_MODE` (with the same `NOREFRESH` opt-out), rather than being a pure settings write like `SET_SELF_DISABLE`.
 
 ## Background
 
 * The control scripts live in the `PREPROC` admin schema alongside `REFRESH` and `STATUS`, are deployed by `preproc install` and emitted by `preproc bundle`, and are unversioned `CREATE OR REPLACE LUA SCRIPT` objects (they are not dispatched modules, so the `_V1` versioning discipline does not apply — same precedent as `REFRESH`/`STATUS`, ADR-008).
 * The scripts run with INVOKER rights (Exasol Lua constraint): a caller must already hold the underlying DML privileges on `PREPROC.CONFIG`/`PREPROC.SETTINGS`, which are granted to `PREPROC_ADMIN`. A non-admin caller fails at the first table access with an insufficient-privileges error before any mutation. Hard lockdown of direct DML is therefore impossible; the scripts win on validation and convenience, not enforcement (validation + convention).
 * All `pquery` calls bind parameters with named `:param` placeholders sourced from a keyed table; positional `?` placeholders silently fail under Exasol Lua and MUST NOT be used.
-* Mutating scripts (`RULE_ADD`, `RULE_DROP`, `RULE_ENABLE`, `RULE_DISABLE`, `SET_MODE`, `SET_SELF_DISABLE`) auto-run the refresh logic inside the same script invocation after a successful mutation, because an EXPAND expansion is a single statement and a separate `REFRESH` call cannot be chained. A `NOREFRESH` parameter suppresses the auto-refresh for batch workflows where the caller will refresh once at the end.
+* Mutating scripts (`RULE_ADD`, `RULE_DROP`, `RULE_ENABLE`, `RULE_DISABLE`, `SET_MODE`, `SET_SELF_DISABLE`, `SET_SYS_GROUPING`) auto-run the refresh logic inside the same script invocation after a successful mutation, because an EXPAND expansion is a single statement and a separate `REFRESH` call cannot be chained. A `NOREFRESH` parameter suppresses the auto-refresh for batch workflows where the caller will refresh once at the end.
 * Read-only scripts (`RULE_LIST`) are `RETURNS TABLE` and never mutate `CONFIG`, `SETTINGS`, or `RESOLUTION`.
 * `PREPROC.CONFIG` has no ordinal column; ordering within a phase is derived by refresh from `rule_id` ascending. The operator rule_id space is below the reserved demo range (9000–9999); `RULE_ADD` auto-allocates rule_ids from the operator space and never collides with the demo range.
-* `PREPROC.SETTINGS` is a single-row table with columns `mode`, `self_disable_allowed`, `last_refresh`, `state_fingerprint`. Only `mode` and `self_disable_allowed` are operator-mutable through the control surface; `last_refresh` and `state_fingerprint` are owned by refresh.
+* `PREPROC.SETTINGS` is a single-row table with columns `mode`, `self_disable_allowed`, `last_refresh`, `state_fingerprint`, `group_sys_with_dba`. `mode`, `self_disable_allowed`, and `group_sys_with_dba` are operator-mutable through the control surface; `last_refresh` and `state_fingerprint` are owned by refresh.
 * Script existence validation uses the dictionary view `EXA_ALL_SCRIPTS` (or `EXA_ALL_SCRIPTS`-equivalent), readable by the admin caller.
+* `PREPROC.SET_SYS_GROUPING` is modelled on `PREPROC.SET_MODE`: it is an unversioned `CREATE OR REPLACE LUA SCRIPT`, runs with INVOKER rights, binds `:param` placeholders, validates its argument BEFORE any UPDATE (side-effect-free rejection), then either runs the shared refresh logic or, under `NOREFRESH`, commits the UPDATE on its own. It is `RETURNS TABLE` and returns the new value.
+* Its parameter list is `(value, norefresh)`, declared in the `CREATE` header emitted by `install.py` / `bundle.py` (parameters are bare names, no SQL types). `value` is the new boolean policy; a trailing `norefresh` boolean suppresses the auto-refresh for batch workflows.
+* Validation domain: the boolean argument must be a genuine boolean (`TRUE` or `FALSE`). Any other value — `NULL`, a string, a number — is rejected with a validation error naming the offending value, before any UPDATE, so a bad call leaves `PREPROC.SETTINGS` exactly as it was. This mirrors `SET_MODE`'s validate-first whitelist, with `{TRUE, FALSE}` as the whitelist.
+* The command sugar (`PREPROC …`) exposes this setter as `PREPROC SET SYS_GROUPING <bool> [NOREFRESH]`, added to the live `CONTROL_SUGAR_V1` module in place. This in-place grammar change is a pre-release exception justified by there being no active sessions yet (the never-`CREATE OR REPLACE`-a-live-dispatch-module hazard of ADR-019 does not apply); any POST-release grammar change MUST still arrive via a new `CONTROL_SUGAR_V2`. The full sugar contract lives in the `control/command-sugar` feature; here the setter remains directly invocable as `EXECUTE SCRIPT PREPROC.SET_SYS_GROUPING(...)`.
 
 ## Scenarios
 
@@ -132,3 +136,36 @@ Provides the complete SQL-only administrative surface for the preprocessor frame
 * *GIVEN* the control-script Lua sources
 * *WHEN* luacheck is run against them
 * *THEN* luacheck MUST report zero warnings and zero errors for those files
+
+### Scenario: SET_SYS_GROUPING updates the grouping flag and auto-refreshes
+
+* *GIVEN* a caller holding `PREPROC_ADMIN`
+* *AND* an enabled rule scoped to `ROLE` `DBA`
+* *WHEN* the caller executes `SET_SYS_GROUPING` with the value `FALSE` and no `NOREFRESH`
+* *THEN* the script MUST update `PREPROC.SETTINGS.group_sys_with_dba` to `FALSE`
+* *AND* the script MUST run the shared refresh logic so `PREPROC.RESOLUTION` reflects the new policy (`SYS` no longer carries the `DBA`-derived row) before the call returns
+* *AND* the script SHOULD return the new `group_sys_with_dba` value so the caller can observe the outcome
+
+### Scenario: SET_SYS_GROUPING rejects a non-boolean value side-effect-free
+
+* *GIVEN* a caller holding `PREPROC_ADMIN`
+* *WHEN* the caller executes `SET_SYS_GROUPING` with a value that is not a genuine boolean (for example a string or `NULL`)
+* *THEN* the script MUST reject the call with a validation error naming the offending value
+* *AND* the script MUST NOT update `PREPROC.SETTINGS`
+* *AND* `PREPROC.RESOLUTION` MUST remain unchanged
+
+### Scenario: SET_SYS_GROUPING with NOREFRESH commits without rebuilding
+
+* *GIVEN* a caller holding `PREPROC_ADMIN`
+* *WHEN* the caller executes `SET_SYS_GROUPING` with a valid boolean value and the `NOREFRESH` flag set
+* *THEN* the script MUST update `PREPROC.SETTINGS.group_sys_with_dba` and commit
+* *AND* the script MUST NOT rebuild `PREPROC.RESOLUTION`
+* *AND* `PREPROC.SETTINGS.last_refresh` MUST be unchanged by the call
+
+### Scenario: SET_SYS_GROUPING changes only the grouping flag among operator settings
+
+* *GIVEN* a caller holding `PREPROC_ADMIN`
+* *AND* known current values of `PREPROC.SETTINGS.mode` and `PREPROC.SETTINGS.self_disable_allowed`
+* *WHEN* the caller executes `SET_SYS_GROUPING` with a valid boolean value
+* *THEN* the script MUST NOT alter `PREPROC.SETTINGS.mode` or `PREPROC.SETTINGS.self_disable_allowed`
+* *AND* on the refresh path `PREPROC.SETTINGS.last_refresh` and `state_fingerprint` MAY be restamped by the rebuild, so STATUS reports the resolution as CURRENT after the call

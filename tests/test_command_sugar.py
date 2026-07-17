@@ -286,6 +286,37 @@ def test_set_commands_expand(sugar_env):
 
 
 @pytest.mark.integration
+def test_set_sys_grouping_expands(sugar_env):
+    """SET SYS_GROUPING expands to SET_SYS_GROUPING with an unquoted boolean.
+
+    Like SET SELF_DISABLE (and unlike SET MODE), the boolean value is passed
+    through unquoted since it is a boolean argument, not a string. With no
+    NOREFRESH suffix the trailing slot is NULL (the script then auto-refreshes).
+    """
+    assert (
+        _expand(sugar_env, "PREPROC SET SYS_GROUPING FALSE")
+        == "EXECUTE SCRIPT PREPROC.SET_SYS_GROUPING(FALSE, NULL)"
+    )
+    assert (
+        _expand(sugar_env, "PREPROC SET SYS_GROUPING TRUE")
+        == "EXECUTE SCRIPT PREPROC.SET_SYS_GROUPING(TRUE, NULL)"
+    )
+
+
+@pytest.mark.integration
+def test_set_sys_grouping_norefresh_threaded(sugar_env):
+    """A trailing NOREFRESH on SET SYS_GROUPING threads ``true`` into the slot.
+
+    The suffix is stripped before subcommand parsing and reappears only as the
+    extra boolean argument; the value itself stays unquoted.
+    """
+    assert (
+        _expand(sugar_env, "PREPROC SET SYS_GROUPING FALSE NOREFRESH")
+        == "EXECUTE SCRIPT PREPROC.SET_SYS_GROUPING(FALSE, true)"
+    )
+
+
+@pytest.mark.integration
 def test_norefresh_suffix_threaded(sugar_env):
     """A trailing NOREFRESH appends a ``, true`` final argument to mutating commands.
 

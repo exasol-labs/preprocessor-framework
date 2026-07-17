@@ -58,6 +58,7 @@ uv run preproc install --verbose
 | `PREPROC.RULE_LIST` | Lua script (list all CONFIG rules) |
 | `PREPROC.SET_MODE` | Lua script (set framework mode) |
 | `PREPROC.SET_SELF_DISABLE` | Lua script (set self-disable policy) |
+| `PREPROC.SET_SYS_GROUPING` | Lua script (set SYS role-grouping policy) |
 | `PREPROC_RT` | Schema (PUBLIC-accessible) |
 | `PREPROC_RT.MY_PIPELINE` | View (definer-rights; scoped to `CURRENT_USER`; exposes `mode`, `self_disable_allowed`, and `profile_hash`) |
 | `PREPROC_RT.MASTER` | Lua script (dispatcher; also the source body for retirement stubs) |
@@ -232,6 +233,7 @@ direct-DML bootstrap boundary.
 | `PREPROC.RULE_LIST` | — | Return all rules from CONFIG ordered by rule_id |
 | `PREPROC.SET_MODE` | `mode, norefresh` | Set the framework mode (`'convenience'` or `'strict'`); auto-refresh unless `norefresh` |
 | `PREPROC.SET_SELF_DISABLE` | `value` | Allow or disallow user self-disable (`TRUE` / `FALSE`) |
+| `PREPROC.SET_SYS_GROUPING` | `value, norefresh` | Group `SYS` with `DBA` (`TRUE`, default) or isolate it from the entire role closure (`FALSE`); auto-refresh unless `norefresh` |
 | `PREPROC.REFRESH` | — | Rebuild RESOLUTION from CONFIG and current role grants |
 | `PREPROC.STATUS` | — | Report whether RESOLUTION is current or stale |
 
@@ -261,6 +263,7 @@ This gives an interactive shorthand without leaving SQL:
 | `PREPROC STATUS` | `EXECUTE SCRIPT PREPROC.STATUS()` |
 | `PREPROC SET MODE mode` | `EXECUTE SCRIPT PREPROC.SET_MODE(mode, NULL)` |
 | `PREPROC SET SELF_DISABLE value` | `EXECUTE SCRIPT PREPROC.SET_SELF_DISABLE(value)` |
+| `PREPROC SET SYS_GROUPING value` | `EXECUTE SCRIPT PREPROC.SET_SYS_GROUPING(value, NULL)` |
 
 Append `NOREFRESH` to any mutating command to skip the automatic refresh:
 
@@ -302,6 +305,35 @@ Column reference for `PREPROC.CONFIG`:
 | `function_name` | Exported function name, e.g. `'expand'` |
 | `enabled` | `TRUE` to include; `FALSE` to exclude from next refresh |
 | `version` | Informational integer; no dispatch semantics |
+
+### SYS-grouping (break-glass recovery)
+
+`PREPROC.SETTINGS.group_sys_with_dba` controls whether the `SYS` account is
+grouped with `DBA` during resolution. `SYS` cannot hold `PREPROC_ADMIN` but
+does hold `DBA`, so with the seeded default `TRUE` (grouped), `SYS` resolves
+every `DBA`-scoped, `PUBLIC`-scoped, and nested-role rule exactly like any
+other `DBA` holder.
+
+Set it to `FALSE` to isolate `SYS` as a guaranteed raw-SQL break-glass recovery
+account: `SYS` is excluded from the ENTIRE role-grant closure (`DBA`, `PUBLIC`,
+and nested roles alike) and sees untransformed SQL regardless of what rules
+the framework carries — unless a `USER`-scoped rule explicitly names `SYS`,
+which still resolves in either state.
+
+```sql
+EXECUTE SCRIPT PREPROC.SET_SYS_GROUPING(FALSE, NULL);   -- isolate SYS (auto-refreshes)
+EXECUTE SCRIPT PREPROC.SET_SYS_GROUPING(TRUE, NULL);    -- re-group SYS with DBA (default)
+```
+
+Or via sugar: `PREPROC SET SYS_GROUPING FALSE`. Like `SET_MODE`, the setter
+rejects a non-boolean value before writing (side-effect-free), auto-refreshes
+unless `NOREFRESH` is appended, and is not folded into the state fingerprint —
+`PREPROC.STATUS` reports `CURRENT` immediately after the refresh it triggers.
+The value is not surfaced in the `STATUS` result set; observe it directly:
+
+```sql
+SELECT group_sys_with_dba FROM PREPROC.SETTINGS;
+```
 
 ## Refresh
 

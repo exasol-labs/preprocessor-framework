@@ -165,6 +165,23 @@ local FINGERPRINT_SQL = [[
 -- resolves a rule scoped to PUBLIC (origin_role = 'PUBLIC') to ALL users, and
 -- also resolves any real role granted TO PUBLIC to all users transitively (its
 -- chain reaches the synthetic PUBLIC node and fans out to every user).
+--
+-- SYS-grouping gate (configurable break-glass isolation): the ROLE-closure arm's
+-- JOIN EXA_DBA_USERS carries one extra predicate --
+--     AND (u.user_name <> 'SYS'
+--          OR COALESCE((SELECT group_sys_with_dba FROM PREPROC.SETTINGS), TRUE) = TRUE)
+-- -- so that when PREPROC.SETTINGS.group_sys_with_dba is FALSE the grantee SYS is
+-- dropped from this arm. DBA-derived, PUBLIC-derived, and nested-role-derived rows
+-- ALL flow through this single closure arm (they differ only by origin_role but
+-- share the EXA_DBA_USERS grantee join), so this one predicate excludes SYS from
+-- the ENTIRE role closure at once -- SYS's guaranteed raw-SQL recovery path. The
+-- toggle is read as a scalar subquery over the single-row SETTINGS, so
+-- RESOLUTION_SQL stays a single static statement with no Lua branching. COALESCE-
+-- to-TRUE makes a missing or NULL value (an upgraded install whose additive column
+-- was never set) behave as grouped with NO backfill UPDATE -- the read site is the
+-- sole guarantee. The USER-scoped UNION arm is deliberately NOT gated, so a USER
+-- rule whose scope_value is 'SYS' still resolves while SYS is isolated from every
+-- role; the downstream deduped/ordinal CTEs are likewise untouched.
 local RESOLUTION_SQL = [[
     WITH scoped_rules AS (
         SELECT
@@ -191,6 +208,8 @@ local RESOLUTION_SQL = [[
            AND cfg.scope_value = closure.origin_role
         JOIN EXA_DBA_USERS u
             ON u.user_name = closure.grantee
+           AND (u.user_name <> 'SYS'
+                OR COALESCE((SELECT group_sys_with_dba FROM PREPROC.SETTINGS), TRUE) = TRUE)
         UNION ALL
         SELECT
             cfg.scope_value      AS user_name,

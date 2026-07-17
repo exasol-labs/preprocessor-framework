@@ -55,6 +55,7 @@ _RULE_DISABLE_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "rule_disable.lua"
 _RULE_LIST_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "rule_list.lua"
 _SET_MODE_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "set_mode.lua"
 _SET_SELF_DISABLE_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "set_self_disable.lua"
+_SET_SYS_GROUPING_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "set_sys_grouping.lua"
 _CONTROL_SUGAR_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "control_sugar_v1.lua"
 _DEMO_UDF_PATH = _REPO_ROOT / "sql" / "udf" / "demo_sqlglot_transpile_v1.sql"
 
@@ -131,6 +132,9 @@ def _script_statements() -> dict[str, str]:
         f"RETURNS TABLE AS\n{_read_source(_SET_MODE_LUA_PATH, 'set_mode.lua')}",
         "SET_SELF_DISABLE": f"CREATE OR REPLACE LUA SCRIPT PREPROC.SET_SELF_DISABLE(value) "
         f"RETURNS TABLE AS\n{_read_source(_SET_SELF_DISABLE_LUA_PATH, 'set_self_disable.lua')}",
+        "SET_SYS_GROUPING": f"CREATE OR REPLACE LUA SCRIPT PREPROC.SET_SYS_GROUPING("
+        f"value, norefresh) "
+        f"RETURNS TABLE AS\n{_read_source(_SET_SYS_GROUPING_LUA_PATH, 'set_sys_grouping.lua')}",
         "DEMO_SQLGLOT_TRANSPILE_V1": _read_source(_DEMO_UDF_PATH, "demo_sqlglot_transpile_v1.sql"),
     }
 
@@ -152,6 +156,7 @@ _FULL_SCRIPT_ORDER = [
     "RULE_LIST",
     "SET_MODE",
     "SET_SELF_DISABLE",
+    "SET_SYS_GROUPING",
     "DEMO_SQLGLOT_TRANSPILE_V1",
 ]
 
@@ -169,6 +174,7 @@ _RELEASE_SCRIPT_ORDER = [
     "RULE_LIST",
     "SET_MODE",
     "SET_SELF_DISABLE",
+    "SET_SYS_GROUPING",
 ]
 
 _RELEASE_HEADER = """\

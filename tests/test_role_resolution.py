@@ -27,6 +27,17 @@ Role-holder strategy
     and the user holds no sensitive privileges. Synthetic names such as
     ``PREPROC_TEST_DAVE`` are used only for USER-scoped CONFIG rows, which need
     no real database user.
+
+SYS-grouping policy
+    Five tests exercise ``PREPROC.SETTINGS.group_sys_with_dba``: grouped (the
+    default TRUE) folds SYS into the ROLE closure so DBA- and PUBLIC-scoped rules
+    reach it; isolated (FALSE) drops SYS from the ENTIRE closure (DBA + PUBLIC +
+    nested) while a USER-scoped SYS rule still resolves and other DBA holders are
+    unaffected; a NULL value is treated as grouped. The toggle is flipped with a
+    direct UPDATE — self-contained, with no dependency on the SET_SYS_GROUPING
+    admin script — and the ``restore_sys_grouping`` fixture resets it to TRUE on
+    teardown so the shared session's single SETTINGS row never leaks a non-default
+    policy into later tests or other suites.
 """
 
 import os
@@ -39,6 +50,7 @@ _ROLE_A = "PREPROC_TEST_ROLE_A"
 _ROLE_B = "PREPROC_TEST_ROLE_B"
 _SYNTHETIC_USER = "PREPROC_TEST_DAVE"
 _TEST_USER = "PREPROC_TEST_HOLDER"
+_SYS = "SYS"
 
 
 @pytest.fixture
@@ -72,6 +84,19 @@ def role_holder(installed):
     except Exception:
         pass  # user already exists from a prior run — that is fine
     return _TEST_USER
+
+
+@pytest.fixture
+def restore_sys_grouping(installed):
+    """Reset group_sys_with_dba to its grouped default (TRUE) after the test.
+
+    The toggle lives in the shared, session-scoped single PREPROC.SETTINGS row,
+    which clean_resolution does not touch. A test that isolates SYS (FALSE or
+    NULL) must not leak that policy into later tests or other suites, so this
+    fixture restores TRUE on teardown regardless of what the test set.
+    """
+    yield installed
+    installed.execute("UPDATE PREPROC.SETTINGS SET group_sys_with_dba = TRUE")
 
 
 def _insert_rule(
@@ -134,6 +159,24 @@ def _resolution_for(connection, user_name):
         "ORDER BY phase, ordinal",
         {"u": user_name},
     ).fetchall()
+
+
+def _set_sys_grouping(connection, sql_literal):
+    """Set PREPROC.SETTINGS.group_sys_with_dba to a raw SQL literal.
+
+    Takes an unquoted literal — ``TRUE``, ``FALSE``, or ``NULL`` — matching how
+    the schema-layout suite manipulates the column, so a NULL is a genuine SQL
+    NULL (an upgraded, never-set row) rather than a bound parameter.
+    """
+    connection.execute(f"UPDATE PREPROC.SETTINGS SET group_sys_with_dba = {sql_literal}")
+
+
+def _sys_row_count(connection, function_name):
+    """Return how many RESOLUTION rows SYS carries for a given function_name."""
+    return connection.execute(
+        "SELECT COUNT(*) FROM PREPROC.RESOLUTION WHERE user_name = {u} AND function_name = {f}",
+        {"u": _SYS, "f": function_name},
+    ).fetchval()
 
 
 @pytest.mark.integration
@@ -528,3 +571,183 @@ def test_refresh_requires_admin(installed):
             installed.execute(f"DROP USER {non_admin} CASCADE")
         except Exception:
             pass
+
+
+@pytest.mark.integration
+def test_sys_grouped_receives_dba_and_public_rules(clean_resolution, restore_sys_grouping):
+    """With grouping enabled (default), SYS resolves DBA- and PUBLIC-scoped rules.
+
+    SYS holds DBA as every Exasol superuser does, so a ROLE DBA rule reaches SYS
+    through the closure; a ROLE PUBLIC rule reaches every user via the synthetic
+    PUBLIC edge. Both rows must materialise for SYS when group_sys_with_dba is
+    TRUE — identical to any other DBA holder.
+    """
+    conn = clean_resolution
+    _set_sys_grouping(conn, "TRUE")
+    _insert_rule(
+        conn,
+        rule_id=1,
+        scope_type="ROLE",
+        scope_value="DBA",
+        phase="EXPAND",
+        script_name="DBA_SCRIPT",
+        function_name="dba_fn",
+    )
+    _insert_rule(
+        conn,
+        rule_id=2,
+        scope_type="ROLE",
+        scope_value="PUBLIC",
+        phase="EXPAND",
+        script_name="PUBLIC_SCRIPT",
+        function_name="public_fn",
+    )
+
+    _refresh(conn)
+
+    functions = {r[2] for r in _resolution_for(conn, _SYS)}
+    assert "dba_fn" in functions, "SYS did not receive the DBA-derived rule while grouped"
+    assert "public_fn" in functions, "SYS did not receive the PUBLIC-derived rule while grouped"
+
+
+@pytest.mark.integration
+def test_sys_excluded_from_full_closure_when_isolated(clean_resolution, restore_sys_grouping):
+    """With grouping disabled, SYS gets no ROLE-derived row from DBA or PUBLIC.
+
+    These are the only role-closure paths SYS actually has: Exasol forbids
+    granting any role to SYS *or* to DBA ("cannot grant roles to DBA"), so a
+    nested role above SYS is not constructible and needs no dedicated case. The
+    SYS gate is a single path-independent predicate on the ROLE-closure arm
+    (grantee <> 'SYS'), so excluding SYS from both a DBA-scoped and a
+    PUBLIC-scoped rule at once proves the full-closure exclusion for every path
+    SYS can hold. (Generic transitive nesting is covered by the non-SYS
+    nested-role tests elsewhere in this suite.)
+    """
+    conn = clean_resolution
+    _set_sys_grouping(conn, "FALSE")
+    _insert_rule(
+        conn,
+        rule_id=1,
+        scope_type="ROLE",
+        scope_value="DBA",
+        phase="EXPAND",
+        script_name="DBA_SCRIPT",
+        function_name="dba_fn",
+    )
+    _insert_rule(
+        conn,
+        rule_id=2,
+        scope_type="ROLE",
+        scope_value="PUBLIC",
+        phase="EXPAND",
+        script_name="PUBLIC_SCRIPT",
+        function_name="public_fn",
+    )
+
+    _refresh(conn)
+
+    sys_role_rows = conn.execute(
+        "SELECT COUNT(*) FROM PREPROC.RESOLUTION "
+        "WHERE user_name = {u} "
+        "AND function_name IN ('dba_fn', 'public_fn')",
+        {"u": _SYS},
+    ).fetchval()
+    assert sys_role_rows == 0, (
+        "SYS received a ROLE-derived row while isolated; the full-closure "
+        "exclusion did not cover DBA + PUBLIC"
+    )
+
+
+@pytest.mark.integration
+def test_sys_user_scoped_rule_survives_isolation(clean_resolution, restore_sys_grouping):
+    """A USER-scoped rule naming SYS resolves even while SYS is isolated from roles.
+
+    The SYS gate lives only on the ROLE-closure arm, so the untouched USER arm
+    still emits the row for scope_value = 'SYS' when group_sys_with_dba is FALSE.
+    """
+    conn = clean_resolution
+    _set_sys_grouping(conn, "FALSE")
+    _insert_rule(
+        conn,
+        rule_id=1,
+        scope_type="USER",
+        scope_value=_SYS,
+        phase="EXPAND",
+        script_name="USER_SYS_SCRIPT",
+        function_name="user_sys_fn",
+    )
+
+    _refresh(conn)
+
+    sys_rows = _resolution_for(conn, _SYS)
+    assert ("EXPAND", "USER_SYS_SCRIPT", "user_sys_fn", 1) in sys_rows, (
+        "USER-scoped SYS rule was removed under isolation; the gate must touch "
+        "only the ROLE-closure arm"
+    )
+
+
+@pytest.mark.integration
+def test_non_sys_dba_holder_unaffected_by_toggle(
+    clean_resolution, role_holder, restore_sys_grouping
+):
+    """With grouping disabled, a non-SYS DBA holder still gets DBA-scoped rules.
+
+    The gate excludes only the SYS account, never any other DBA holder. The test
+    holder is granted DBA, and after refresh with group_sys_with_dba = FALSE it
+    must carry the DBA-derived row while SYS does not.
+    """
+    conn = clean_resolution
+    try:
+        conn.execute(f"GRANT DBA TO {role_holder}")
+        _set_sys_grouping(conn, "FALSE")
+        _insert_rule(
+            conn,
+            rule_id=1,
+            scope_type="ROLE",
+            scope_value="DBA",
+            phase="EXPAND",
+            script_name="DBA_SCRIPT",
+            function_name="dba_fn",
+        )
+
+        _refresh(conn)
+
+        holder_rows = _resolution_for(conn, role_holder)
+        assert ("EXPAND", "DBA_SCRIPT", "dba_fn", 1) in holder_rows, (
+            "a non-SYS DBA holder lost its DBA-derived rule under isolation"
+        )
+        assert _sys_row_count(conn, "dba_fn") == 0, (
+            "SYS was not excluded from the DBA rule under isolation"
+        )
+    finally:
+        try:
+            conn.execute(f"REVOKE DBA FROM {role_holder}")
+        except Exception:
+            pass
+
+
+@pytest.mark.integration
+def test_null_grouping_treated_as_grouped(clean_resolution, restore_sys_grouping):
+    """A NULL group_sys_with_dba (upgraded, never-set) resolves as grouped for SYS.
+
+    Setting the toggle to a genuine SQL NULL mimics an upgraded install whose
+    additive column was never populated. COALESCE-to-TRUE at the read site must
+    place the DBA-derived row for SYS with no backfill UPDATE having run.
+    """
+    conn = clean_resolution
+    _set_sys_grouping(conn, "NULL")
+    _insert_rule(
+        conn,
+        rule_id=1,
+        scope_type="ROLE",
+        scope_value="DBA",
+        phase="EXPAND",
+        script_name="DBA_SCRIPT",
+        function_name="dba_fn",
+    )
+
+    _refresh(conn)
+
+    assert _sys_row_count(conn, "dba_fn") >= 1, (
+        "NULL group_sys_with_dba was not treated as grouped for SYS"
+    )
