@@ -96,16 +96,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up uv
-        uses: astral-sh/setup-uv@v5
-
-      - name: Install Python dependencies
-        run: uv sync
-
-      # Reclaim disk before starting docker-db. On ubuntu-latest the preinstalled
-      # toolchains (.NET, Android SDK, GHC, …) leave too little room for the DB's
-      # EXAStorage volume — without this the engine fails at stage3 with
-      # "Failed to create volume: insufficient space" and never becomes ready.
+      # Reclaim disk BEFORE anything is installed. On ubuntu-latest the
+      # preinstalled toolchains (.NET, Android SDK, GHC, …) leave too little room
+      # for the DB's EXAStorage volume — without this the engine fails at stage3
+      # with "Failed to create volume: insufficient space" and never becomes
+      # ready. This MUST run before "Set up uv": tool-cache:true wipes
+      # /opt/hostedtoolcache, so freeing after uv is installed would delete uv.
       - name: Free up disk space
         uses: jlumbroso/free-disk-space@main
         with:
@@ -114,6 +110,12 @@ jobs:
 
       - name: Show available disk space
         run: df -h /
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install Python dependencies
+        run: uv sync
 
       # Start the Exasol database container.
       # --privileged is required by docker-db (uses cgroups internally).
