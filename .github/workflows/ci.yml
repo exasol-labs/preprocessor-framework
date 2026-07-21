@@ -102,10 +102,22 @@ jobs:
       - name: Install Python dependencies
         run: uv sync
 
+      # Reclaim disk before starting docker-db. On ubuntu-latest the preinstalled
+      # toolchains (.NET, Android SDK, GHC, …) leave too little room for the DB's
+      # EXAStorage volume — without this the engine fails at stage3 with
+      # "Failed to create volume: insufficient space" and never becomes ready.
+      - name: Free up disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          large-packages: true
+
+      - name: Show available disk space
+        run: df -h /
+
       # Start the Exasol database container.
       # --privileged is required by docker-db (uses cgroups internally).
-      # --shm-size=2g gives the DB enough shared memory to complete boot; the
-      # default 64m is too small and the engine can stall before it is ready.
+      # --shm-size=2g gives the DB shared memory headroom during boot.
       # Port 8563 is the default Exasol client port. The image tag is pinned to a
       # concrete version rather than the floating latest-8 so a silent upstream
       # bump can't change boot behaviour underneath us.
