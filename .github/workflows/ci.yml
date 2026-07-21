@@ -83,14 +83,13 @@ jobs:
   # ---------------------------------------------------------------------------
   # test: full integration suite against exasol/docker-db
   #
-  # continue-on-error: true — docker-db is slow to start and may flake in CI.
-  # This job is informational; the lint + unit jobs are the mandatory gates.
+  # A mandatory gate: once disk is reclaimed the DB boots reliably (~70s to
+  # ready) and the suite runs in ~7-8 min, so a failure here now blocks the run
+  # rather than being informational.
   # ---------------------------------------------------------------------------
   test:
     name: Integration tests (docker-db)
     runs-on: ubuntu-latest
-    # Mark continue-on-error so a slow/flaky boot does not block PRs.
-    continue-on-error: true
 
     steps:
       - name: Checkout
@@ -218,16 +217,15 @@ jobs:
           if-no-files-found: error
 
   # github-release: on a version tag (e.g. v1.2.0), publish a GitHub Release
-  # with the generated release.sql attached as a downloadable asset. Gated on the
-  # mandatory lint + unit checks so a tag never publishes a build that fails them
-  # (the docker-db integration job is informational / continue-on-error, so it is
-  # deliberately not a prerequisite here). Tag and push to trigger:
+  # with the generated release.sql attached as a downloadable asset. Gated on all
+  # three mandatory checks — lint, unit, and the docker-db integration suite — so
+  # a tag never publishes a build that fails any of them. Tag and push to trigger:
   #   git tag v1.2.0 && git push origin v1.2.0
   github-release:
     name: Publish GitHub Release
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [lint, unit]
+    needs: [lint, unit, test]
     permissions:
       contents: write
     steps:
