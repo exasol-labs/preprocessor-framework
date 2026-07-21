@@ -212,10 +212,18 @@ jobs:
       - name: Generate release.sql
         run: uv run preproc bundle --release --output release.sql
 
+      # Idempotent: if the release already exists (e.g. it was created from the
+      # GitHub UI, which also creates the tag that triggers this workflow), just
+      # attach/replace release.sql instead of failing on a duplicate create.
       - name: Publish GitHub Release with release.sql attached
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" release.sql \
-            --title "${GITHUB_REF_NAME}" \
-            --generate-notes
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            echo "Release ${GITHUB_REF_NAME} already exists — uploading release.sql."
+            gh release upload "${GITHUB_REF_NAME}" release.sql --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" release.sql \
+              --title "${GITHUB_REF_NAME}" \
+              --generate-notes
+          fi
