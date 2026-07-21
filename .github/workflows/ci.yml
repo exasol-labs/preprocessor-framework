@@ -104,14 +104,19 @@ jobs:
 
       # Start the Exasol database container.
       # --privileged is required by docker-db (uses cgroups internally).
-      # Port 8563 is the default Exasol client port.
+      # --shm-size=2g gives the DB enough shared memory to complete boot; the
+      # default 64m is too small and the engine can stall before it is ready.
+      # Port 8563 is the default Exasol client port. The image tag is pinned to a
+      # concrete version rather than the floating latest-8 so a silent upstream
+      # bump can't change boot behaviour underneath us.
       - name: Start Exasol docker-db
         run: |
           docker run -d \
             --name exasol \
             --privileged \
+            --shm-size=2g \
             -p 8563:8563 \
-            exasol/docker-db:latest-8
+            exasol/docker-db:8.29.13
 
       # Poll until the database is ready to accept connections.
       # docker-db can take 5-10 minutes on a cold runner; use a generous timeout.
@@ -159,6 +164,18 @@ jobs:
           # Disable TLS verification — docker-db uses a self-signed certificate.
           EXASOL_TLS_VERIFY: "0"
         run: uv run pytest -v
+
+      # If anything above failed (DB never became ready, or pytest errored), dump
+      # the container's own logs and status. Without this, CI only shows the
+      # client-side "not ready yet" retries and the actual boot failure inside the
+      # container is invisible. Runs on failure only; never masks a green run.
+      - name: Dump Exasol container logs on failure
+        if: failure()
+        run: |
+          echo "===== docker ps -a ====="
+          docker ps -a || true
+          echo "===== docker logs exasol ====="
+          docker logs exasol || true
 
   # release: build the single-file framework deploy and publish it as an
   # artifact. release.sql is NOT committed to the repo — it is generated from the
