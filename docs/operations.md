@@ -603,10 +603,10 @@ framework — it is whatever the operator named it, referenced by the
 
 Upload the library's release tarball (`preproc-lib-<ver>.tar.gz`) into the
 bucket the CONNECTION points at, using your usual BucketFS upload path (e.g.
-a `curl PUT` to the BucketFS write service, or any BucketFS client). Building
-that tarball — the preprocessor-library repo's release-tarball build and CI
-packaging — is a separate, later plan (Phase 2); this section only covers
-consuming an already-built one.
+a `curl PUT` to the BucketFS write service, or any BucketFS client). The
+`preprocessor-library` repo builds that tarball with `scripts/build_release.py`
+(and attaches it to each `v*` GitHub Release); it lays out `registry/index.json`
+plus each module artifact exactly as the resolver reads them.
 
 Note on how BucketFS stores it: BucketFS auto-extracts an uploaded archive
 into a directory on the UDF mount as soon as it lands, rather than leaving the
