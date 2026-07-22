@@ -258,6 +258,76 @@ sessions ⇒ all retired profiles are reclaimable.
 > every dispatch. MASTER is therefore the single canonical **inline** dispatcher,
 > and the stub is sourced from MASTER's catalog body.
 
+## In-database install path
+
+Alongside the CLI's `preproc module add` (operator machine, Python/uv
+toolchain, network reach to the DB), the framework also supports installing a
+module entirely from SQL: `EXECUTE SCRIPT PREPROC.MODULE_INSTALL(source,
+module_name, scope)`, or the equivalent `PREPROC INSTALL MODULE …` sugar.
+This section covers the architecture behind that path; see [Operations §
+In-database module install](operations.md#in-database-module-install) for the
+operator-facing how-to.
+
+### Capability split: a resolver UDF reads, an orchestrator writes
+
+Exasol Lua scripts have no filesystem, BucketFS, or network access (mission
+Constraints; ADR-001) — only a UDF can read BucketFS or reach the network,
+and only a Lua `EXECUTE SCRIPT` can run DDL. The in-database install path
+therefore splits along that capability line:
+
+- A Python3 **resolver UDF**, admin-only in `PREPROC`, reads a source
+  (`bucketfs:` via the cluster-local mount, or `https:` via a network fetch),
+  parses `registry/index.json`, selects the requested module's entry, and
+  verifies its `sha256`. It returns the artifact text plus registry metadata,
+  or a structured failure indicator — it never raises.
+- A Lua **orchestrator**, `PREPROC.MODULE_INSTALL`, drives the resolver and
+  then re-homes the CLI's five-step `deploy_module` sequence into the
+  database: `OPEN SCHEMA` / `CREATE OR REPLACE` the versioned script,
+  `RULE_ENSURE` the activation rule, `MODULE_REGISTER` the provenance row,
+  and a final `REFRESH`. `PREPROC.MODULE_CATALOG` drives the same resolver
+  read-only, for discovery, without ever reaching the write steps.
+
+This re-homes the sequence rather than vendoring the CLI's Python package
+into a UDF — the end-state is byte-identical to a CLI `preproc module add`:
+the same `PREPROC_RT.<NAME>_V<N>` script, `PREPROC.CONFIG` rule, and
+`PREPROC.MODULES` provenance row, so `MASTER` / `MY_PIPELINE` dispatch
+behaves identically regardless of which path installed a module.
+
+### Abort-before-write
+
+Any resolver failure — a `sha256` mismatch, the module missing from the
+index, an unreadable source, or an unreachable HTTPS host / network error —
+aborts the orchestrator before it reaches the write steps. Nothing is
+created: no script, no `PREPROC.CONFIG` rule, no `PREPROC.MODULES` provenance
+row. This mirrors the CLI's own `fetch_and_verify_artifact` invariant of
+leaving the database consistent on any verification failure — the in-database
+path re-homes that same ordering (verify fully, then write) rather than
+writing optimistically and rolling back.
+
+### Air-gap safety
+
+A BucketFS read is cluster-local: the resolver reads the CONNECTION-mounted
+file through the filesystem the UDF already runs on, performing no network
+egress. This is what makes the BucketFS-staged path air-gap-safe even though
+it is now a UDF, not the CLI, doing the reading. An `https:` source is the
+one path that does leave the cluster, and it is used only when the operator
+supplies an `https:` source — no settings toggle exists to gate it — so a
+no-egress cluster simply fails the GET rather than silently falling back to
+anything.
+
+The privilege boundary underneath both source kinds is the same one
+`PREPROC.REFRESH` / `REFRESH_CORE` already rely on: Exasol has no
+definer-rights Lua scripts (ADR-001), so `MODULE_INSTALL` and
+`MODULE_CATALOG` run with INVOKER rights, and the caller must hold
+`PREPROC_ADMIN` — the role that owns `PREPROC` / `PREPROC_RT`, holds
+`CREATE SCRIPT`, and (once the operator grants it) ACCESS on the BucketFS
+CONNECTION. `REFRESH_CORE` already proves a Lua admin script can `CREATE OR
+REPLACE` scripts at runtime under this exact role, when it generates
+`PREPROC_RT.P_<hash>` profile scripts during every refresh — `MODULE_INSTALL`
+reuses the identical boundary rather than inventing a new one. The resolver
+UDF(s) are admin-only in `PREPROC` and never granted to PUBLIC, so a
+non-admin cannot reach BucketFS or the network through this surface either.
+
 ## Module authoring contract
 
 A module is a Lua script in `PREPROC_RT`. Its exported functions are loaded by

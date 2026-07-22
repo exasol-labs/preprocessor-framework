@@ -1,6 +1,6 @@
 # Feature: Two-Schema Database Layout
 
-Establishes the foundational database objects the preprocessor framework dispatches from: a locked admin schema (`PREPROC`) holding configuration and a PUBLIC-accessible runtime schema (`PREPROC_RT`) holding the dispatcher, views, and (later) generated scripts. This slice extends the layout for resolution: `RESOLUTION` gains an `ordinal` column for deterministic within-phase dispatch order, `SETTINGS` gains a state-fingerprint column for staleness detection, `MY_PIPELINE` exposes `client_pattern` and orders by `phase, ordinal`, and the `PREPROC_ADMIN` role gains `SELECT ANY DICTIONARY` so the admin-owned refresh script can read the role-grant dictionary tables. This delta extends the layout to add a `profile_hash` column to `PREPROC.RESOLUTION`, an `orphaned_at` column to `PREPROC.PROFILES` (for the retire-then-reclaim cleanup lifecycle), and exposes `mode` and `profile_hash` from `PREPROC_RT.MY_PIPELINE` to support session self-optimization. It further extends `PREPROC.SETTINGS` with a `group_sys_with_dba` BOOLEAN column that governs whether the `SYS` account is grouped with `DBA` during resolution. Fresh installs seed it `TRUE` (grouped — preserving today's behavior); existing installs gain it as a nullable additive upgrade whose `NULL` is treated as `TRUE` by the resolution `COALESCE`, so an upgrade changes no behavior.
+Establishes the foundational database objects the preprocessor framework dispatches from: a locked admin schema (`PREPROC`) holding configuration and a PUBLIC-accessible runtime schema (`PREPROC_RT`) holding the dispatcher, views, and (later) generated scripts. This slice extends the layout for resolution: `RESOLUTION` gains an `ordinal` column for deterministic within-phase dispatch order, `SETTINGS` gains a state-fingerprint column for staleness detection, `MY_PIPELINE` exposes `client_pattern` and orders by `phase, ordinal`, and the `PREPROC_ADMIN` role gains `SELECT ANY DICTIONARY` so the admin-owned refresh script can read the role-grant dictionary tables. This delta extends the layout to add a `profile_hash` column to `PREPROC.RESOLUTION`, an `orphaned_at` column to `PREPROC.PROFILES` (for the retire-then-reclaim cleanup lifecycle), and exposes `mode` and `profile_hash` from `PREPROC_RT.MY_PIPELINE` to support session self-optimization. It further extends `PREPROC.SETTINGS` with a `group_sys_with_dba` BOOLEAN column that governs whether the `SYS` account is grouped with `DBA` during resolution. Fresh installs seed it `TRUE` (grouped — preserving today's behavior); existing installs gain it as a nullable additive upgrade whose `NULL` is treated as `TRUE` by the resolution `COALESCE`, so an upgrade changes no behavior. This delta further extends the layout for the in-database module installer: the locked admin schema `PREPROC` gains the admin-only resolver UDF(s), `PREPROC.MODULE_INSTALL`, and `PREPROC.MODULE_CATALOG` — owned by `PREPROC_ADMIN` and NEVER granted to PUBLIC. The BucketFS source used by the installer is an operator-created CONNECTION object; the framework never creates it.
 
 ## Background
 
@@ -9,6 +9,8 @@ Establishes the foundational database objects the preprocessor framework dispatc
 * The `PREPROC_ADMIN` role owns the `PREPROC` schema and every object in it, including the new refresh and status scripts. Objects in `PREPROC` are not granted to PUBLIC. All framework administration (refresh, status) is exposed as these DB-side scripts, callable from any SQL client by an admin; there is no external (Python) administration path. The CLI's only involvement is deployment — shipping the DDL and these Lua scripts during install.
 * `SELECT ANY DICTIONARY` is required to read `EXA_DBA_ROLE_PRIVS` and `EXA_DBA_USERS`; it is granted to `PREPROC_ADMIN` only.
 * The `group_sys_with_dba` column is nullable in both the fresh-install `CREATE TABLE` and the upgrade `ALTER TABLE`, matching the established additive-upgrade pattern (a NOT NULL add would fail on the existing single SETTINGS row); the seed sets the fresh-install value explicitly to `TRUE` and the resolution SQL `COALESCE`s a `NULL` to `TRUE`.
+* The resolver Python3 UDF(s), `PREPROC.MODULE_INSTALL`, and `PREPROC.MODULE_CATALOG` are objects in the locked `PREPROC` admin schema owned by `PREPROC_ADMIN`. Unlike the runtime schema, `PREPROC` is not granted to PUBLIC (ADR-002), so these objects are admin-only — the resolver, which reaches BucketFS/network, is never invokable by an ordinary user.
+* The BucketFS source is an operator responsibility: the operator creates the Exasol CONNECTION object and grants ACCESS on it to `PREPROC_ADMIN`; the framework install DDL creates no CONNECTION. The source string names that CONNECTION (`bucketfs:<CONNECTION_NAME>/<path>`), so no connection name is hardcoded.
 
 ## Scenarios
 
@@ -113,3 +115,19 @@ Establishes the foundational database objects the preprocessor framework dispatc
 * *THEN* the system MUST add a nullable `group_sys_with_dba` BOOLEAN column to `PREPROC.SETTINGS`
 * *AND* the upgrade MUST be expressed via the existing `--@tolerate-exists` additive `ALTER TABLE ... ADD COLUMN` pattern so that re-applying it on an install that already has the column is a no-op (no error, column unchanged)
 * *AND* the existing single `PREPROC.SETTINGS` row MUST retain its data with `group_sys_with_dba` defaulting to `NULL`, which resolution treats as `TRUE` (grouped) via `COALESCE`, so the upgrade changes no resolution behavior
+
+### Scenario: The resolver UDF and install/catalog scripts are created admin-only in PREPROC
+
+* *GIVEN* schema `PREPROC` exists with its admin tables
+* *WHEN* the install DDL and UDF/Lua deployment are applied
+* *THEN* the system MUST create the resolver Python3 UDF(s), the Lua script `PREPROC.MODULE_INSTALL`, and the Lua script `PREPROC.MODULE_CATALOG`, all owned by `PREPROC_ADMIN`
+* *AND* none of them MUST be executable by PUBLIC
+* *AND* re-deploying them with `CREATE OR REPLACE` MUST succeed without error
+
+### Scenario: The BucketFS source is an operator-created CONNECTION, not a framework object
+
+* *GIVEN* a DBA preparing an air-gapped in-database install from a BucketFS-staged release tarball
+* *WHEN* the framework install DDL is applied
+* *THEN* the install DDL MUST NOT create any BucketFS CONNECTION object
+* *AND* the in-database installer MUST resolve the BucketFS location from a CONNECTION named in the source string (`bucketfs:<CONNECTION_NAME>/<path>`)
+* *AND* using that CONNECTION MUST require the operator to have created it and granted ACCESS on it to `PREPROC_ADMIN`

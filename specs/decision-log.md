@@ -1344,3 +1344,141 @@ Remove `cast-shorthand` and `trailing-comma` from the framework (examples, `sql/
 ### Consequences
 
 `specs/ergonomics/` is removed from the framework spec tree (superseding ADR-032's placement); the capability remains available via `preproc module add cast-shorthand` / `preproc module add trailing-comma` from the central library. This is the reference migration future modules follow.
+
+---
+
+## ADR-049: DB-side module install as a first-class ALTERNATIVE deployment path
+
+**Date:** 2026-07-21
+**Plan:** `add-in-db-module-install`
+**Status:** Accepted
+
+### Context
+
+`preproc module add` deploys a module by fetching + verifying the artifact on the operator's CLI machine and then issuing SQL. Many DBAs manage Exasol purely through a SQL client and would rather stage a release once in BucketFS (or point at an HTTPS source) and install from SQL, never touching a Python/uv toolchain. ADR-007's strategic direction is the framework owning its management surface end-to-end, "eventually intercepting and controlling its own management syntax from within the preprocessor" — but ADR-007 deliberately kept *deployment* in the CLI.
+
+### Decision
+
+Ship `PREPROC.MODULE_INSTALL(source, module_name, scope)` — driven by a Python resolver UDF and a Lua orchestrator that re-homes the CLI's five-step `deploy_module` sequence into the DB — as an ALTERNATIVE to `preproc module add`. The end-state is byte-identical to a CLI install (script + rule + provenance row); `sha256` verification aborts before any write; a self-deployed module is register-only.
+
+### Options Considered
+
+| Option | Verdict |
+|--------|---------|
+| Python resolver UDF + Lua orchestrator re-homing `deploy_module`, byte-identical end-state | Chosen — extends ADR-007's vision to deployment without superseding it; the CLI stays fully supported and both paths converge on the same end-state |
+| Keep deployment CLI-only (ADR-007's original split) | Rejected — leaves no SQL-only deployment path for DBAs without a Python/uv toolchain |
+| Vendor the whole `preproc` package into a UDF | Rejected — far heavier than re-implementing the ~3 resolver functions for Phase 1 |
+
+### Consequences
+
+A DBA can now install a module entirely from SQL with no external toolchain, while `MASTER`/`MY_PIPELINE` dispatch is unchanged regardless of which path installed the module. The CLI + `bundle` + local `--registry` air-gap path remains the default, first-class path.
+
+---
+
+## ADR-050: BucketFS-staged in-DB read is air-gap-safe; refines ADR-045
+
+**Date:** 2026-07-21
+**Plan:** `add-in-db-module-install`
+**Status:** Accepted
+
+### Context
+
+ADR-045 established that all fetch/verify/deploy happens on the operator's CLI machine because the database must never be required to reach the network on a no-egress cluster. ADR-045 rejected "DB-side fetch (a UDF pulling from GitHub)" as network egress, but never considered a UDF reading a locally-staged, cluster-replicated bundle.
+
+### Decision
+
+A UDF reading the cluster-replicated release tarball natively via the BucketFS mount (`/buckets/…`, located by an operator-created CONNECTION named in the source string) involves NO network egress — nothing leaves the DB perimeter. This is established as a NEW air-gap-safe option, not the option ADR-045 rejected.
+
+### Options Considered
+
+| Option | Verdict |
+|--------|---------|
+| BucketFS-native UDF read via an operator-created CONNECTION | Chosen — a cluster-local file read is not egress; satisfies the hard air-gap constraint |
+| Treat any DB-side read as an air-gap violation and forbid it | Rejected — conflates a local BucketFS read with genuine network egress |
+
+### Consequences
+
+Air-gapped clusters gain a fully SQL-side install path via BucketFS staging. ADR-045 is refined, not reversed — the CLI's no-egress guarantee for external fetches still holds.
+
+---
+
+## ADR-051: HTTPS DB-fetch is activated implicitly by an `https:` source — no toggle; further departs from ADR-045
+
+**Date:** 2026-07-21
+**Plan:** `add-in-db-module-install`
+**Status:** Accepted
+
+### Context
+
+Egress-permitted clusters could benefit from a lower-friction HTTPS install path direct from SQL. An earlier design considered a default-off admin toggle gating this path, mirroring the caution of ADR-045.
+
+### Decision
+
+Ship the HTTPS reader (`urllib` GET of `registry/index.json` + the artifact, `sha256`-verified). It runs whenever the `source` uses the `https:` scheme — there is NO settings toggle and NO stored flag. Activation is implicit: the operator opts in by supplying an `https://` source AND the cluster being able to reach the host. On a cluster with no outbound egress the GET fails with a clear network error and NO partial deploy occurs (abort-before-write holds). BucketFS native read (ADR-050) remains the recommended default for no-egress customers.
+
+### Options Considered
+
+| Option | Verdict |
+|--------|---------|
+| No toggle — implicit activation via the `https:` scheme | Chosen — the operator has already opted in twice over (source scheme + cluster egress); a separate toggle is redundant friction |
+| A default-off admin toggle (`SET_DB_FETCH` / `allow_https_fetch`) | Rejected on user feedback — dropped as unnecessary friction for the lowest-friction-UX goal |
+| Never ship HTTPS at all | Rejected — leaves egress-permitted clusters without the lowest-friction path |
+
+### Consequences
+
+Egress-permitted clusters get a one-step SQL install from an HTTPS source with no admin toggle to manage. ADR-045's no-egress guarantee is preserved by physics, not policy, for clusters that have no outbound path.
+
+---
+
+## ADR-052: In-DB install runs invoker-rights under the PREPROC_ADMIN boundary; resolver UDFs are admin-only
+
+**Date:** 2026-07-21
+**Plan:** `add-in-db-module-install`
+**Status:** Accepted
+
+### Context
+
+The feature was first framed around "definer-rights scripts owned by PREPROC_ADMIN so a delegated admin installs without raw CREATE SCRIPT rights." That framing is inconsistent with the verified repo reality: Exasol has NO definer-rights Lua scripts (ADR-001) — this is precisely why the two-schema definer-rights-VIEW bridge exists.
+
+### Decision
+
+`MODULE_INSTALL`, `MODULE_CATALOG`, and the resolver UDF(s) run with INVOKER rights and live in the locked `PREPROC` schema owned by `PREPROC_ADMIN`; the resolver UDFs are NEVER granted to PUBLIC. The caller MUST hold `PREPROC_ADMIN`, which confers ownership of `PREPROC`/`PREPROC_RT`, the `CREATE SCRIPT` system privilege, and — once the operator grants it — ACCESS on the BucketFS CONNECTION. The "delegated admin" is a `PREPROC_ADMIN` grantee, not a DBA.
+
+### Options Considered
+
+| Option | Verdict |
+|--------|---------|
+| Invoker rights + `PREPROC_ADMIN` role boundary, admin-only resolver UDFs | Chosen — matches the boundary `REFRESH_CORE` already uses to `CREATE` `P_<hash>` scripts at refresh time; closes the hole where a non-admin could invoke the DB's BucketFS/network reader |
+| Definer-rights scripts owned by `PREPROC_ADMIN` | Rejected — not possible; Exasol has no definer-rights Lua scripts |
+
+### Consequences
+
+Installing a module without a DBA account or system-wide `CREATE ANY SCRIPT` is possible for any `PREPROC_ADMIN` grantee, while the resolver's BucketFS/network access is never reachable by an ordinary user.
+
+---
+
+## ADR-053: Intercepted `PREPROC INSTALL MODULE` maps onto MODULE_INSTALL per ADR-008
+
+**Date:** 2026-07-21
+**Plan:** `add-in-db-module-install`
+**Status:** Accepted
+
+### Context
+
+ADR-008 keeps admin entry points syntax-mappable so a future intercepted statement can map cleanly onto them. The in-DB module installer is that future slice for install and catalog discovery.
+
+### Decision
+
+Add `PREPROC INSTALL MODULE <name> FROM '<source>' FOR (ROLE|USER) <x>` (plus `PREPROC CATALOG MODULES FROM …`) to the live `CONTROL_SUGAR_V1` module in place, each rewriting into exactly one `EXECUTE SCRIPT PREPROC.<SCRIPT>(...)`. The `FOR (ROLE|USER) x` clause becomes the `scope` `TYPE:value` argument (activation target). The scripted entry points remain the stable, syntax-mappable contract; the sugar is additive.
+
+### Options Considered
+
+| Option | Verdict |
+|--------|---------|
+| Extend `CONTROL_SUGAR_V1` in place (ADR-038 pre-release exception) | Chosen — reuses the established pre-release in-place-edit exception; a second EXPAND module would just compete in the same phase for no benefit |
+| A separate `INSTALL_SUGAR_V1` EXPAND module | Rejected — no benefit over extending the existing sugar module pre-release |
+| No sugar — require `EXECUTE SCRIPT` directly | Rejected — loses the readable-keyword-command UX the sugar layer exists for |
+
+### Consequences
+
+DBAs get a readable `PREPROC INSTALL MODULE …` / `PREPROC CATALOG MODULES …` surface that funnels through the same validating admin scripts as the scripted entry points, with no new privilege introduced by the sugar layer.

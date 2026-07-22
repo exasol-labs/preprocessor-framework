@@ -10,6 +10,20 @@
 -- this grant a non-DBA admin's refresh fails with "insufficient privileges for
 -- creating a script".
 --
+-- This same system privilege is what PREPROC.MODULE_INSTALL needs for its own
+-- CREATE OR REPLACE LUA SCRIPT PREPROC_RT.<NAME>_V<N> step (the in-database
+-- module installer, ADR-052/053) -- no separate grant is required for it.
+--
+-- PREPROC.MODULE_RESOLVER_V1 (the resolver UDF), PREPROC.MODULE_INSTALL, and
+-- PREPROC.MODULE_CATALOG need no EXECUTE grant of their own to be usable by
+-- PREPROC_ADMIN: all three are CREATEd in the locked PREPROC schema owned by
+-- PREPROC_ADMIN (10_schemas.sql), and any grantee of that role holds owner
+-- rights over role-owned objects -- the same mechanism that already lets
+-- PREPROC.REFRESH call the importable PREPROC.REFRESH_CORE with no extra
+-- grant. Because PREPROC (unlike PREPROC_RT) carries no schema-level PUBLIC
+-- grant (50_grants.sql), none of the three is ever reachable by a non-admin
+-- user -- admin-only is enforced structurally, not by an extra GRANT.
+--
 -- GRANT is idempotent on Exasol (re-granting an existing privilege is a no-op).
 
 GRANT CREATE SCRIPT TO PREPROC_ADMIN;

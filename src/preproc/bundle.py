@@ -61,7 +61,10 @@ _RULE_ENSURE_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "rule_ensure.lua"
 _MODULE_REGISTER_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "module_register.lua"
 _MODULE_RETIRE_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "module_retire.lua"
 _MODULE_RECLAIM_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "module_reclaim.lua"
+_MODULE_INSTALL_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "module_install.lua"
+_MODULE_CATALOG_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "module_catalog.lua"
 _DEMO_UDF_PATH = _REPO_ROOT / "sql" / "udf" / "demo_sqlglot_transpile_v1.sql"
+_MODULE_RESOLVER_UDF_PATH = _REPO_ROOT / "sql" / "udf" / "module_resolver_v1.sql"
 
 
 def _read_source(path: Path, kind: str) -> str:
@@ -150,6 +153,12 @@ def _script_statements() -> dict[str, str]:
         f"value, norefresh) "
         f"RETURNS TABLE AS\n{_read_source(_SET_SYS_GROUPING_LUA_PATH, 'set_sys_grouping.lua')}",
         "DEMO_SQLGLOT_TRANSPILE_V1": _read_source(_DEMO_UDF_PATH, "demo_sqlglot_transpile_v1.sql"),
+        "MODULE_RESOLVER_V1": _read_source(_MODULE_RESOLVER_UDF_PATH, "module_resolver_v1.sql"),
+        "MODULE_INSTALL": "CREATE OR REPLACE LUA SCRIPT "
+        "PREPROC.MODULE_INSTALL(source, module_name, scope) RETURNS TABLE AS\n"
+        f"{_read_source(_MODULE_INSTALL_LUA_PATH, 'module_install.lua')}",
+        "MODULE_CATALOG": "CREATE OR REPLACE LUA SCRIPT PREPROC.MODULE_CATALOG(source) "
+        f"RETURNS TABLE AS\n{_read_source(_MODULE_CATALOG_LUA_PATH, 'module_catalog.lua')}",
     }
 
 
@@ -176,9 +185,15 @@ _FULL_SCRIPT_ORDER = [
     "SET_SELF_DISABLE",
     "SET_SYS_GROUPING",
     "DEMO_SQLGLOT_TRANSPILE_V1",
+    "MODULE_RESOLVER_V1",
+    "MODULE_INSTALL",
+    "MODULE_CATALOG",
 ]
 
-# Release bundle: framework + control surface only — no demo modules, no UDF.
+# Release bundle: framework + control surface only — no demo modules, no demo
+# UDF. The in-database module installer (resolver UDF + MODULE_INSTALL +
+# MODULE_CATALOG) IS a product feature, not a demo, so — unlike
+# DEMO_SQLGLOT_TRANSPILE_V1 — all three ship here too.
 _RELEASE_SCRIPT_ORDER = [
     "MASTER",
     "CONTROL_SUGAR_V1",
@@ -197,6 +212,9 @@ _RELEASE_SCRIPT_ORDER = [
     "SET_MODE",
     "SET_SELF_DISABLE",
     "SET_SYS_GROUPING",
+    "MODULE_RESOLVER_V1",
+    "MODULE_INSTALL",
+    "MODULE_CATALOG",
 ]
 
 _RELEASE_HEADER = """\

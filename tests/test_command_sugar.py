@@ -392,6 +392,83 @@ def test_malformed_add_rule_declined(sugar_env):
     assert _expand(sugar_env, "PREPROC ADD RULE FOR ROLE X PHASE Y SCRIPT Z") is None
 
 
+@pytest.mark.integration
+def test_install_module_expands_to_module_install(sugar_env):
+    """INSTALL MODULE … FROM '<source>' FOR ROLE … expands to a single MODULE_INSTALL call.
+
+    The FROM source must be carried single-quoted exactly as written (a
+    ``bucketfs:`` source survives intact), and the FOR clause folds into a single
+    ``TYPE:value`` scope string with TYPE upper-cased.
+    """
+    result = _expand(
+        sugar_env,
+        "PREPROC INSTALL MODULE cast-shorthand FROM "
+        "'bucketfs:PREPROC_BFS/preproc-lib-0.1.0.tar.gz' FOR ROLE PREPROC_ADMIN",
+    )
+    assert result == (
+        "EXECUTE SCRIPT PREPROC.MODULE_INSTALL("
+        "'bucketfs:PREPROC_BFS/preproc-lib-0.1.0.tar.gz', 'cast-shorthand', "
+        "'ROLE:PREPROC_ADMIN')"
+    )
+
+
+@pytest.mark.integration
+def test_install_module_for_user_threads_user_scope(sugar_env):
+    """FOR USER BOB threads a 'USER:BOB' scope argument, TYPE matched case-insensitively."""
+    result = _expand(
+        sugar_env,
+        "PREPROC INSTALL MODULE cast-shorthand FROM "
+        "'bucketfs:PREPROC_BFS/preproc-lib-0.1.0.tar.gz' FOR USER BOB",
+    )
+    assert result == (
+        "EXECUTE SCRIPT PREPROC.MODULE_INSTALL("
+        "'bucketfs:PREPROC_BFS/preproc-lib-0.1.0.tar.gz', 'cast-shorthand', "
+        "'USER:BOB')"
+    )
+    result_lower = _expand(
+        sugar_env,
+        "preproc install module cast-shorthand from "
+        "'bucketfs:PREPROC_BFS/preproc-lib-0.1.0.tar.gz' for user BOB",
+    )
+    assert result_lower == result
+
+
+@pytest.mark.integration
+def test_catalog_modules_expands_to_module_catalog(sugar_env):
+    """CATALOG MODULES FROM '<source>' expands to a single MODULE_CATALOG call."""
+    result = _expand(
+        sugar_env,
+        "PREPROC CATALOG MODULES FROM 'bucketfs:PREPROC_BFS/preproc-lib-0.1.0.tar.gz'",
+    )
+    assert result == (
+        "EXECUTE SCRIPT PREPROC.MODULE_CATALOG('bucketfs:PREPROC_BFS/preproc-lib-0.1.0.tar.gz')"
+    )
+
+
+@pytest.mark.integration
+def test_malformed_install_module_declined(sugar_env):
+    """An INSTALL MODULE command missing FROM or FOR is declined (nil), failing open.
+
+    A malformed shape must never produce a truncated/incorrect EXECUTE SCRIPT
+    string; the module must return nil so the original text reaches the engine.
+    """
+    assert (
+        _expand(
+            sugar_env,
+            "PREPROC INSTALL MODULE cast-shorthand FOR ROLE PREPROC_ADMIN",
+        )
+        is None
+    )
+    assert (
+        _expand(
+            sugar_env,
+            "PREPROC INSTALL MODULE cast-shorthand FROM "
+            "'bucketfs:PREPROC_BFS/preproc-lib-0.1.0.tar.gz'",
+        )
+        is None
+    )
+
+
 def test_sugar_passes_luacheck():
     """The convenience module passes luacheck with zero warnings and zero errors."""
     if shutil.which("luacheck") is None:

@@ -39,6 +39,9 @@ _LUA_PATH_ATTRS = (
     "_MODULE_REGISTER_LUA_PATH",
     "_MODULE_RETIRE_LUA_PATH",
     "_MODULE_RECLAIM_LUA_PATH",
+    # In-database module installer (added with add-in-db-module-install plan)
+    "_MODULE_INSTALL_LUA_PATH",
+    "_MODULE_CATALOG_LUA_PATH",
 )
 
 
@@ -83,6 +86,15 @@ def _install_synthetic_sources(monkeypatch, tmp_path):
         encoding="utf-8",
     )
     monkeypatch.setattr(bundle, "_DEMO_UDF_PATH", udf_path)
+
+    resolver_udf_path = tmp_path / "udf" / "module_resolver_v1.sql"
+    resolver_udf_path.write_text(
+        "CREATE OR REPLACE PYTHON3 SET SCRIPT PREPROC.MODULE_RESOLVER_V1"
+        "(src VARCHAR(2000), module_name VARCHAR(256)) EMITS (status VARCHAR(16)) AS\n"
+        "import hashlib;\ndef run(ctx):\n    ctx.emit('OK')\n/\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(bundle, "_MODULE_RESOLVER_UDF_PATH", resolver_udf_path)
 
     return tmp_path
 
@@ -145,10 +157,15 @@ def test_bundle_wraps_control_layer(monkeypatch, tmp_path):
         "PREPROC.SET_MODE",
         "PREPROC.SET_SELF_DISABLE",
         "PREPROC.SET_SYS_GROUPING",
+        "PREPROC.MODULE_INSTALL",
+        "PREPROC.MODULE_CATALOG",
     ):
         assert f"CREATE OR REPLACE LUA SCRIPT {script}" in text, f"{script} not in bundle"
     # Convenience module
     assert "CREATE OR REPLACE LUA SCRIPT PREPROC_RT.CONTROL_SUGAR_V1" in text
+    # In-database module installer's Python3 resolver UDF (full bundle only path
+    # shared with the demo UDF's wrapper convention).
+    assert "CREATE OR REPLACE PYTHON3 SET SCRIPT PREPROC.MODULE_RESOLVER_V1" in text
 
 
 def test_bundle_uses_slash_delimiters(monkeypatch, tmp_path):
@@ -213,8 +230,10 @@ def test_bundle_count_matches_statements(monkeypatch, tmp_path):
 
     count = bundle.run_bundle(out)
 
-    # 3 DDL statements (2 schemas + 1 grant) + 20 Lua wrappers + 1 UDF = 24.
-    assert count == 24
+    # 3 DDL statements (2 schemas + 1 grant) + 22 Lua wrappers (20 control-layer/
+    # module-lifecycle + MODULE_INSTALL + MODULE_CATALOG) + 2 UDFs (the demo UDF
+    # + the in-database module installer's resolver UDF) = 27.
+    assert count == 27
 
 
 def test_bundle_missing_lua_source_raises(monkeypatch, tmp_path):
@@ -288,6 +307,12 @@ def test_release_bundle_is_framework_only(tmp_path):
         "CREATE OR REPLACE LUA SCRIPT PREPROC.MODULE_RECLAIM(",
         "CREATE OR REPLACE LUA SCRIPT PREPROC.SET_MODE(",
         "CREATE OR REPLACE LUA SCRIPT PREPROC.SET_SYS_GROUPING(",
+        # In-database module installer (resolver UDF + orchestrator + catalog):
+        # a product feature, not a demo, so it ships in the release bundle too
+        # (unlike DEMO_SQLGLOT_TRANSPILE_V1, which is full-bundle only).
+        "CREATE OR REPLACE PYTHON3 SET SCRIPT PREPROC.MODULE_RESOLVER_V1(",
+        "CREATE OR REPLACE LUA SCRIPT PREPROC.MODULE_INSTALL(",
+        "CREATE OR REPLACE LUA SCRIPT PREPROC.MODULE_CATALOG(",
     ):
         assert present in text, f"release bundle missing {present!r}"
 

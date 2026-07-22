@@ -62,6 +62,9 @@ _RULE_ENSURE_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "rule_ensure.lua"
 _MODULE_REGISTER_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "module_register.lua"
 _MODULE_RETIRE_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "module_retire.lua"
 _MODULE_RECLAIM_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "module_reclaim.lua"
+_MODULE_RESOLVER_UDF_PATH = _REPO_ROOT / "sql" / "udf" / "module_resolver_v1.sql"
+_MODULE_INSTALL_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "module_install.lua"
+_MODULE_CATALOG_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "module_catalog.lua"
 
 _TOLERATE_MARKER = "--@tolerate-exists"
 _ALREADY_EXISTS_MSG = "already exists"
@@ -256,6 +259,9 @@ def _deploy_admin_scripts(connection: Any, verbose: bool) -> None:
      13. PREPROC.SET_MODE      — RETURNS TABLE
      14. PREPROC.SET_SELF_DISABLE — RETURNS TABLE
      15. PREPROC.SET_SYS_GROUPING  — RETURNS TABLE
+     16. PREPROC.MODULE_RESOLVER_V1 — PYTHON3 SET SCRIPT EMITS (in-DB module install)
+     17. PREPROC.MODULE_INSTALL  — RETURNS TABLE (drives the resolver, ADR-052/053)
+     18. PREPROC.MODULE_CATALOG  — RETURNS TABLE (read-only, drives the resolver)
 
     pyexasol sends the bare CREATE statement without a trailing '/' delimiter
     (that delimiter is only needed for interactive SQL clients).
@@ -266,6 +272,13 @@ def _deploy_admin_scripts(connection: Any, verbose: bool) -> None:
     Note on bare-name parameters: Exasol Lua script parameters are declared as
     bare names with no SQL type annotations. Type-annotated syntax is rejected
     by the engine.
+
+    MODULE_RESOLVER_V1 is a PYTHON3 SET SCRIPT (not Lua): its .sql source
+    already contains the full CREATE OR REPLACE statement, terminated with the
+    interactive-client lone '/' line, which is stripped before execution
+    (mirroring the demo UDF handling in ``_deploy_master``). Like the other
+    objects in this function it lands in the locked PREPROC schema, owned by
+    PREPROC_ADMIN, and is never granted to PUBLIC.
     """
     required = [
         (_REFRESH_CORE_LUA_PATH, "refresh_core.lua"),
@@ -283,6 +296,9 @@ def _deploy_admin_scripts(connection: Any, verbose: bool) -> None:
         (_SET_MODE_LUA_PATH, "set_mode.lua"),
         (_SET_SELF_DISABLE_LUA_PATH, "set_self_disable.lua"),
         (_SET_SYS_GROUPING_LUA_PATH, "set_sys_grouping.lua"),
+        (_MODULE_RESOLVER_UDF_PATH, "module_resolver_v1.sql"),
+        (_MODULE_INSTALL_LUA_PATH, "module_install.lua"),
+        (_MODULE_CATALOG_LUA_PATH, "module_catalog.lua"),
     ]
     for path, label in required:
         if not path.exists():
@@ -306,13 +322,24 @@ def _deploy_admin_scripts(connection: Any, verbose: bool) -> None:
     set_mode_body = _SET_MODE_LUA_PATH.read_text(encoding="utf-8")
     set_self_disable_body = _SET_SELF_DISABLE_LUA_PATH.read_text(encoding="utf-8")
     set_sys_grouping_body = _SET_SYS_GROUPING_LUA_PATH.read_text(encoding="utf-8")
+    module_install_body = _MODULE_INSTALL_LUA_PATH.read_text(encoding="utf-8")
+    module_catalog_body = _MODULE_CATALOG_LUA_PATH.read_text(encoding="utf-8")
+
+    # The resolver UDF's .sql file is a complete CREATE OR REPLACE statement
+    # terminated by an interactive-client lone '/' line; strip it before
+    # sending to pyexasol (mirrors the demo UDF handling in _deploy_master).
+    resolver_udf_raw = _MODULE_RESOLVER_UDF_PATH.read_text(encoding="utf-8")
+    resolver_udf_sql = "\n".join(
+        line for line in resolver_udf_raw.splitlines() if line.strip() != "/"
+    ).strip()
 
     if verbose:
         print(
             "Deploying REFRESH_CORE, REFRESH, STATUS, RULE_ADD, RULE_DROP, "
             "RULE_ENABLE, RULE_DISABLE, RULE_LIST, RULE_ENSURE, MODULE_REGISTER, "
             "MODULE_RETIRE, MODULE_RECLAIM, SET_MODE, SET_SELF_DISABLE, "
-            "SET_SYS_GROUPING Lua scripts into PREPROC ...",
+            "SET_SYS_GROUPING, MODULE_RESOLVER_V1, MODULE_INSTALL, MODULE_CATALOG "
+            "Lua scripts and UDF into PREPROC ...",
             file=sys.stdout,
         )
 
@@ -376,6 +403,20 @@ def _deploy_admin_scripts(connection: Any, verbose: bool) -> None:
     connection.execute(
         f"CREATE OR REPLACE LUA SCRIPT PREPROC.SET_SYS_GROUPING(value, norefresh) "
         f"RETURNS TABLE AS\n{set_sys_grouping_body}"
+    )
+    # In-database module installer (ADR-052/053): a Python3 SET SCRIPT resolver
+    # that reads + verifies a module artifact from BucketFS or HTTPS, and two
+    # Lua orchestrators that drive it. All three land in the locked PREPROC
+    # schema, owned by PREPROC_ADMIN, and are never granted to PUBLIC (PREPROC
+    # carries no PUBLIC EXECUTE grant, unlike PREPROC_RT).
+    connection.execute(resolver_udf_sql)
+    connection.execute(
+        "CREATE OR REPLACE LUA SCRIPT PREPROC.MODULE_INSTALL(source, module_name, scope) "
+        f"RETURNS TABLE AS\n{module_install_body}"
+    )
+    connection.execute(
+        f"CREATE OR REPLACE LUA SCRIPT PREPROC.MODULE_CATALOG(source) "
+        f"RETURNS TABLE AS\n{module_catalog_body}"
     )
 
 

@@ -567,6 +567,131 @@ Two items from this plan are deliberately deferred, not forgotten:
   would let module authors outside this repo test against the framework
   without a framework checkout.
 
+## In-database module install
+
+Everything in [Module management](#module-management) above runs from an
+operator machine with a `uv`/Python toolchain and network reach to the DB. For
+a DBA who works purely through a SQL client, the framework also owns an
+ALTERNATIVE, entirely SQL-side install path: `PREPROC.MODULE_INSTALL` and
+`PREPROC.MODULE_CATALOG`. Both paths converge on the same end-state — a
+`PREPROC_RT.<NAME>_V<N>` script, a `PREPROC.CONFIG` rule, and a
+`PREPROC.MODULES` provenance row — so `MASTER` dispatch is identical
+regardless of which one deployed a module. The `preproc module` CLI is
+unchanged and remains the default, fully-supported air-gap path; this section
+covers the SQL-only alternative for a DBA who would rather never touch a
+Python toolchain. See [How it works § In-database install
+path](how-it-works.md#in-database-install-path) for the architecture behind
+this section.
+
+### Prerequisites: the BucketFS CONNECTION
+
+The framework never creates a BucketFS CONNECTION object — that is an operator
+responsibility, done once per cluster. Create it and grant the
+`PREPROC_ADMIN` role ACCESS so `MODULE_INSTALL` / `MODULE_CATALOG` can read
+it:
+
+```sql
+CREATE OR REPLACE CONNECTION PREPROC_BFS TO 'https://<bucketfs-host>:2581/<bucket>';
+GRANT ACCESS ON CONNECTION PREPROC_BFS TO PREPROC_ADMIN;
+```
+
+The connection name (`PREPROC_BFS` above) is never hardcoded by the
+framework — it is whatever the operator named it, referenced by the
+`bucketfs:<CONNECTION_NAME>/<path>` source string described below.
+
+### Staging a release tarball
+
+Upload the library's release tarball (`preproc-lib-<ver>.tar.gz`) into the
+bucket the CONNECTION points at, using your usual BucketFS upload path (e.g.
+a `curl PUT` to the BucketFS write service, or any BucketFS client). Building
+that tarball — the preprocessor-library repo's release-tarball build and CI
+packaging — is a separate, later plan (Phase 2); this section only covers
+consuming an already-built one.
+
+Note on how BucketFS stores it: BucketFS auto-extracts an uploaded archive
+into a directory on the UDF mount as soon as it lands, rather than leaving the
+compressed file sitting there untouched. You still write the source string
+naming the archive exactly as uploaded —
+`bucketfs:PREPROC_BFS/preproc-lib-0.1.0.tar.gz` — and the resolver
+transparently locates and reads the auto-extracted content behind that name;
+this BucketFS-side extraction detail requires no different source syntax and
+no extra operator step.
+
+### Installing a module from SQL
+
+Two equivalent forms — a direct script call, or the `PREPROC` sugar
+(requires an active preprocessor and the caller holding `PREPROC_ADMIN`):
+
+```sql
+-- Direct script call:
+EXECUTE SCRIPT PREPROC.MODULE_INSTALL('bucketfs:PREPROC_BFS/preproc-lib-0.1.0.tar.gz', 'cast-shorthand', 'ROLE:ANALYSTS');
+
+-- Sugar:
+PREPROC INSTALL MODULE cast-shorthand FROM 'bucketfs:PREPROC_BFS/preproc-lib-0.1.0.tar.gz' FOR ROLE ANALYSTS;
+```
+
+The third argument is a `TYPE:value` scope (`TYPE` ∈ `ROLE` | `USER`), the
+same shape the sugar's `FOR ROLE|USER` clause folds into. Scope targets rule
+**activation** — which users or roles receive the transform once installed —
+not install permission; install permission is the `PREPROC_ADMIN` boundary
+described below, independent of scope.
+
+`MODULE_INSTALL` returns a result row reporting the outcome:
+
+| `module` | `version` | `phase` | `status` |
+|---|---|---|---|
+
+`status` is one of:
+
+| Status | Meaning |
+|---|---|
+| `installed` | Fresh library-deployed install: script created, rule registered, provenance written |
+| `already-current` | Re-running install for an identical version already installed — idempotent no-op |
+| `registered-only` | A self-deployed module: rule + provenance registered, no script CREATE (the module's own installer already deployed the backing script) |
+
+### Discovering modules before installing
+
+Before installing, list what a source advertises and which of those modules
+are already installed:
+
+```sql
+-- Direct script call:
+EXECUTE SCRIPT PREPROC.MODULE_CATALOG('bucketfs:PREPROC_BFS/preproc-lib-0.1.0.tar.gz');
+
+-- Sugar:
+PREPROC CATALOG MODULES FROM 'bucketfs:PREPROC_BFS/preproc-lib-0.1.0.tar.gz';
+```
+
+Returns one row per module the source's registry index advertises, carrying
+`name`, `version`, `phase`, `deploy_mode`, and an `installed` BOOLEAN column
+(the "installed?" flag — `TRUE` only for a currently `deployed` version; a
+`retired` provenance row does not count). `MODULE_CATALOG` is read-only: it
+never touches `PREPROC.CONFIG`,
+`PREPROC.SETTINGS`, `PREPROC.RESOLUTION`, or `PREPROC.MODULES`.
+
+### HTTPS sources
+
+Both `MODULE_INSTALL` and `MODULE_CATALOG` accept an `https://` source in
+place of a `bucketfs:` one — a pinned GitHub raw URL, for instance. There is
+no settings toggle to turn this on: supplying an `https:` source IS the
+opt-in, and it is fetched directly whenever the cluster has outbound network
+access. On a no-egress cluster, an `https:` source fails with a network error
+and installs (or catalogs) nothing — no partial deploy is left behind.
+BucketFS staging, described above, is the recommended path for a no-egress
+cluster.
+
+### Admin boundary
+
+`PREPROC.MODULE_INSTALL`, `PREPROC.MODULE_CATALOG`, and the resolver UDF(s)
+they drive live in the locked `PREPROC` schema and are never granted to
+PUBLIC — exactly like the rest of the [control surface](#control-surface).
+The caller must hold `PREPROC_ADMIN` (or, like the rest of the control
+surface, be a DBA / superuser with `EXECUTE ANY SCRIPT`); a caller lacking
+that is rejected with an insufficient-privileges error before anything is
+read or written. This keeps
+the resolver's BucketFS/network access reachable only through the admin
+surface, never by an ordinary user.
+
 ## Deploying a module by hand (no registry)
 
 For a one-off module that will never go through the registry — e.g. a private,

@@ -138,6 +138,8 @@ local CONTROL = {
     set_mode = "PREPROC.SET_MODE",
     set_self_disable = "PREPROC.SET_SELF_DISABLE",
     set_sys_grouping = "PREPROC.SET_SYS_GROUPING",
+    module_install = "PREPROC.MODULE_INSTALL",
+    module_catalog = "PREPROC.MODULE_CATALOG",
 }
 
 -- Split a string into whitespace-delimited tokens, preserving original case.
@@ -360,6 +362,50 @@ function expand(sqltext)
         -- fail. NOREFRESH -> true; otherwise NULL (the script then auto-refreshes).
         args[#args + 1] = norefresh and "true" or "NULL"
         return execute_script(CONTROL.set_sys_grouping, args)
+    end
+
+    if verb == "INSTALL" and upper_word(2) == "MODULE" then
+        -- PREPROC INSTALL MODULE <name> FROM '<source>' FOR (ROLE|USER) <value>
+        if subcommand_count ~= 8 then
+            return nil
+        end
+        if upper_word(4) ~= "FROM" or upper_word(6) ~= "FOR" then
+            return nil
+        end
+        local scope_type = upper_word(7)
+        if scope_type ~= "ROLE" and scope_type ~= "USER" then
+            return nil
+        end
+        -- The FROM source is single-quoted verbatim in the command text; carry
+        -- that token through unchanged so a bucketfs:/https: source survives
+        -- intact. Require the well-formed quoted shape or fail open.
+        local source_literal = word(5)
+        if not source_literal:match("^'.*'$") then
+            return nil
+        end
+        local module_name = word(3)
+        local scope_value = word(8)
+        local args = {
+            source_literal,
+            quote(module_name),
+            quote(scope_type .. ":" .. scope_value),
+        }
+        return execute_script(CONTROL.module_install, args)
+    end
+
+    if verb == "CATALOG" and upper_word(2) == "MODULES" then
+        -- PREPROC CATALOG MODULES FROM '<source>'
+        if subcommand_count ~= 4 then
+            return nil
+        end
+        if upper_word(3) ~= "FROM" then
+            return nil
+        end
+        local source_literal = word(4)
+        if not source_literal:match("^'.*'$") then
+            return nil
+        end
+        return execute_script(CONTROL.module_catalog, { source_literal })
     end
 
     return nil

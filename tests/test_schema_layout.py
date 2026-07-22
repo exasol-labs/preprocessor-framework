@@ -6,9 +6,14 @@ read-only except for ``test_my_pipeline_filters_current_user`` and
 ``test_layout_idempotent``, which clean up after themselves in ``finally``.
 """
 
+from pathlib import Path
+
 import pytest
 
 from preproc.install import run_install
+
+_REPO_ROOT = Path(__file__).parent.parent
+_SQL_INSTALL_DIR = _REPO_ROOT / "sql" / "install"
 
 
 @pytest.mark.integration
@@ -339,3 +344,75 @@ def test_group_sys_with_dba_upgrade_idempotent(installed):
         assert grouped is True, "NULL group_sys_with_dba must be treated as grouped (TRUE)"
     finally:
         installed.execute("UPDATE PREPROC.SETTINGS SET group_sys_with_dba = TRUE")
+
+
+@pytest.mark.integration
+def test_indb_objects_admin_only(installed):
+    """The resolver UDF, MODULE_INSTALL, and MODULE_CATALOG are PREPROC-admin-only.
+
+    Covers the ``install/schema-layout`` DELTA:NEW scenario "The resolver UDF and
+    install/catalog scripts are created admin-only in PREPROC": after
+    ``run_install``, all three exist in ``EXA_ALL_SCRIPTS`` under schema PREPROC,
+    are owned by PREPROC_ADMIN, and carry no PUBLIC EXECUTE grant. Re-deploying
+    (a second ``run_install``) must succeed without error, proving the
+    ``CREATE OR REPLACE`` shape is truly idempotent.
+    """
+    names = ("MODULE_RESOLVER_V1", "MODULE_INSTALL", "MODULE_CATALOG")
+
+    rows = installed.execute(
+        "SELECT SCRIPT_NAME, SCRIPT_OWNER FROM EXA_ALL_SCRIPTS "
+        "WHERE SCRIPT_SCHEMA = 'PREPROC' "
+        f"AND SCRIPT_NAME IN {names} "
+        "ORDER BY SCRIPT_NAME"
+    ).fetchall()
+    found = {name: owner for name, owner in rows}
+    assert set(found) == set(names), f"expected {set(names)}, found {set(found)}"
+    wrong_owner = {name: owner for name, owner in found.items() if owner != "PREPROC_ADMIN"}
+    assert wrong_owner == {}, f"expected PREPROC_ADMIN ownership, got: {wrong_owner}"
+
+    public_rows = installed.execute(
+        "SELECT OBJECT_NAME FROM EXA_DBA_OBJ_PRIVS "
+        "WHERE OBJECT_SCHEMA = 'PREPROC' "
+        f"AND OBJECT_NAME IN {names} "
+        "AND GRANTEE = 'PUBLIC' "
+        "AND PRIVILEGE = 'EXECUTE'"
+    ).fetchall()
+    assert public_rows == [], f"admin-only objects are PUBLIC-executable: {public_rows}"
+
+    # Re-deploying (CREATE OR REPLACE) must succeed without error.
+    run_install(installed)
+    rows_again = installed.execute(
+        "SELECT SCRIPT_NAME FROM EXA_ALL_SCRIPTS "
+        "WHERE SCRIPT_SCHEMA = 'PREPROC' "
+        f"AND SCRIPT_NAME IN {names}"
+    ).fetchall()
+    assert {r[0] for r in rows_again} == set(names), "objects missing after re-deploy"
+
+
+@pytest.mark.integration
+def test_install_ddl_creates_no_connection(installed):
+    """The install DDL never creates a BucketFS (or any) CONNECTION object.
+
+    Covers the ``install/schema-layout`` DELTA:NEW scenario "The BucketFS source
+    is an operator-created CONNECTION, not a framework object": the framework's
+    own DDL sources under ``sql/install/`` must contain no ``CREATE CONNECTION``
+    statement, and running the idempotent installer again must not add any new
+    CONNECTION object to the database — the operator alone creates the BucketFS
+    CONNECTION the in-database installer resolves by name.
+    """
+    for sql_file in sorted(_SQL_INSTALL_DIR.glob("*.sql")):
+        text = sql_file.read_text(encoding="utf-8").upper()
+        assert "CREATE CONNECTION" not in text, (
+            f"{sql_file.name} must not create a CONNECTION object"
+        )
+
+    before = {
+        r[0]
+        for r in installed.execute("SELECT CONNECTION_NAME FROM EXA_DBA_CONNECTIONS").fetchall()
+    }
+    run_install(installed)
+    after = {
+        r[0]
+        for r in installed.execute("SELECT CONNECTION_NAME FROM EXA_DBA_CONNECTIONS").fetchall()
+    }
+    assert after == before, f"run_install created/removed a CONNECTION: {after - before}"
