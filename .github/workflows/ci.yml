@@ -7,7 +7,7 @@
 #   release        — build release.sql and upload it as a per-run artifact
 #   github-release — on a v* tag, publish a GitHub Release with release.sql
 #
-# The docker-db image (exasol/docker-db:latest-8) can take 5-10 min to start,
+# The docker-db image (exasol/docker-db:latest) can take 5-10 min to start,
 # so the integration job is marked continue-on-error to avoid blocking PRs while
 # the database bootstraps.  The unit job is the mandatory gate; the integration
 # job is informational until the image is warmed in the environment.
@@ -119,9 +119,9 @@ jobs:
       # Start the Exasol database container.
       # --privileged is required by docker-db (uses cgroups internally).
       # --shm-size=2g gives the DB shared memory headroom during boot.
-      # Port 8563 is the default Exasol client port. The image tag is pinned to a
-      # concrete version rather than the floating latest-8 so a silent upstream
-      # bump can't change boot behaviour underneath us.
+      # Port 8563 is the default Exasol client port. The image tag tracks the
+      # floating latest tag so the integration suite always runs against the
+      # newest docker-db release rather than a stale pinned version.
       - name: Start Exasol docker-db
         run: |
           docker run -d \
@@ -129,7 +129,7 @@ jobs:
             --privileged \
             --shm-size=2g \
             -p 8563:8563 \
-            exasol/docker-db:8.29.13
+            exasol/docker-db:latest
 
       # Poll until the database is ready to accept connections.
       # docker-db can take 5-10 minutes on a cold runner; use a generous timeout.
