@@ -26,6 +26,7 @@ discipline):
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import tarfile
 import tempfile
@@ -541,6 +542,8 @@ def test_install_missing_module_rejected(module_install_deployed, bucketfs_libra
 
 def test_module_install_passes_luacheck():
     """luacheck reports zero warnings and zero errors for sql/lua/."""
+    if shutil.which("luacheck") is None:
+        pytest.skip("luacheck binary is not installed")
     completed = subprocess.run(
         ["luacheck", "sql/lua/"],
         cwd=str(_REPO),
