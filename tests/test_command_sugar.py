@@ -417,18 +417,18 @@ def test_install_module_expands_to_module_install(sugar_env):
 
     The FROM source is carried single-quoted exactly as written (a ``bucketfs:``
     source survives intact). The module name is an object-name identifier, so the
-    lowercase registry key ``cast-shorthand`` is DOUBLE-QUOTED to keep its case;
+    lowercase registry key ``cast_shorthand`` is DOUBLE-QUOTED to keep its case;
     the FOR clause folds into a ``TYPE:value`` scope with TYPE and the role name
     both upper-cased.
     """
     result = _expand(
         sugar_env,
-        'PREPROC INSTALL MODULE "cast-shorthand" FROM '
+        'PREPROC INSTALL MODULE "cast_shorthand" FROM '
         "'bucketfs:PREPROC_BFS/preproc-lib-0.1.0.tar.gz' FOR ROLE PREPROC_ADMIN",
     )
     assert result == (
         "EXECUTE SCRIPT PREPROC.MODULE_INSTALL("
-        "'bucketfs:PREPROC_BFS/preproc-lib-0.1.0.tar.gz', 'cast-shorthand', "
+        "'bucketfs:PREPROC_BFS/preproc-lib-0.1.0.tar.gz', 'cast_shorthand', "
         "'ROLE:PREPROC_ADMIN')"
     )
 
@@ -444,12 +444,12 @@ def test_install_module_folds_identifiers_exasol_style(sugar_env):
     src = "'https://h/registry/index.json'"
     # Unquoted role folds to upper; quoted module preserves its lowercase case.
     assert _expand(
-        sugar_env, f'PREPROC INSTALL MODULE "cast-shorthand" FROM {src} FOR ROLE dba'
-    ) == (f"EXECUTE SCRIPT PREPROC.MODULE_INSTALL({src}, 'cast-shorthand', 'ROLE:DBA')")
+        sugar_env, f'PREPROC INSTALL MODULE "cast_shorthand" FROM {src} FOR ROLE dba'
+    ) == (f"EXECUTE SCRIPT PREPROC.MODULE_INSTALL({src}, 'cast_shorthand', 'ROLE:DBA')")
     # A double-quoted role is STILL upper-cased (Exasol upper-cases users/roles).
     assert _expand(
-        sugar_env, f'PREPROC INSTALL MODULE "cast-shorthand" FROM {src} FOR ROLE "dba"'
-    ) == (f"EXECUTE SCRIPT PREPROC.MODULE_INSTALL({src}, 'cast-shorthand', 'ROLE:DBA')")
+        sugar_env, f'PREPROC INSTALL MODULE "cast_shorthand" FROM {src} FOR ROLE "dba"'
+    ) == (f"EXECUTE SCRIPT PREPROC.MODULE_INSTALL({src}, 'cast_shorthand', 'ROLE:DBA')")
     # An UNQUOTED module name folds to UPPER CASE (regular-identifier rule).
     assert _expand(sugar_env, f"PREPROC INSTALL MODULE cast_mod FROM {src} FOR USER bob") == (
         f"EXECUTE SCRIPT PREPROC.MODULE_INSTALL({src}, 'CAST_MOD', 'USER:BOB')"
@@ -461,17 +461,17 @@ def test_install_module_for_user_threads_user_scope(sugar_env):
     """FOR USER BOB threads a 'USER:BOB' scope argument, TYPE matched case-insensitively."""
     result = _expand(
         sugar_env,
-        'PREPROC INSTALL MODULE "cast-shorthand" FROM '
+        'PREPROC INSTALL MODULE "cast_shorthand" FROM '
         "'bucketfs:PREPROC_BFS/preproc-lib-0.1.0.tar.gz' FOR USER BOB",
     )
     assert result == (
         "EXECUTE SCRIPT PREPROC.MODULE_INSTALL("
-        "'bucketfs:PREPROC_BFS/preproc-lib-0.1.0.tar.gz', 'cast-shorthand', "
+        "'bucketfs:PREPROC_BFS/preproc-lib-0.1.0.tar.gz', 'cast_shorthand', "
         "'USER:BOB')"
     )
     result_lower = _expand(
         sugar_env,
-        'preproc install module "cast-shorthand" from '
+        'preproc install module "cast_shorthand" from '
         "'bucketfs:PREPROC_BFS/preproc-lib-0.1.0.tar.gz' for user BOB",
     )
     assert result_lower == result
@@ -499,14 +499,14 @@ def test_malformed_install_module_declined(sugar_env):
     assert (
         _expand(
             sugar_env,
-            "PREPROC INSTALL MODULE cast-shorthand FOR ROLE PREPROC_ADMIN",
+            "PREPROC INSTALL MODULE cast_shorthand FOR ROLE PREPROC_ADMIN",
         )
         is None
     )
     assert (
         _expand(
             sugar_env,
-            "PREPROC INSTALL MODULE cast-shorthand FROM "
+            "PREPROC INSTALL MODULE cast_shorthand FROM "
             "'bucketfs:PREPROC_BFS/preproc-lib-0.1.0.tar.gz'",
         )
         is None

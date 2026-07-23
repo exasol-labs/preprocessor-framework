@@ -92,15 +92,17 @@ modules/<name>/
 └── tests/              # module-level tests
 ```
 
-`<name>` is kebab-case (e.g. `cast-shorthand`). The deployed script name is
-`PREPROC_RT.<NAME>_V<N>`, where `<NAME>` is the upper-snake-case form of
-`<name>` (e.g. `PREPROC_RT.CAST_SHORTHAND_V1`).
+`<name>` is `snake_case` and must be identifier-safe (a letter, then
+letters/digits/underscores — no hyphens) so it can be used unquoted in
+`PREPROC INSTALL MODULE <name>`; e.g. `cast_shorthand`. The deployed script name
+is `PREPROC_RT.<NAME>_V<N>`, where `<NAME>` is the upper-case form of `<name>`
+(e.g. `PREPROC_RT.CAST_SHORTHAND_V1`).
 
 ## `module.toml` schema
 
 | Field | Required | Type | Notes |
 |---|---|---|---|
-| `name` | Yes | string | kebab-case module name, matches the `modules/<name>/` directory |
+| `name` | Yes | string | `snake_case` module name — must be identifier-safe (a letter, then letters/digits/underscores; NO hyphens) so it works unquoted in `PREPROC INSTALL MODULE <name>`; matched case-insensitively; matches the `modules/<name>/` directory |
 | `description` | Yes | string | one-line human summary |
 | `phase` | Yes | string | one of `TRANSLATE`, `EXPAND`, `REWRITE` |
 | `script_name` | Yes | string | fully qualified, e.g. `PREPROC_RT.CAST_SHORTHAND_V1`; must end in `_V<N>` |
@@ -119,7 +121,7 @@ are all validated by `src/preproc/module/manifest.py` — see
 ### Example: a library-deployed TRANSLATE module
 
 ```toml
-name = "cast-shorthand"
+name = "cast_shorthand"
 description = "Rewrites PostgreSQL-style expr::type cast shorthand to CAST(expr AS type)."
 phase = "TRANSLATE"
 script_name = "PREPROC_RT.CAST_SHORTHAND_V1"
@@ -137,8 +139,8 @@ value = "PREPROC_ADMIN"
 ### Example: a self-deployed module (front door to another subsystem)
 
 ```toml
-name = "semantic-views"
-description = "Registers the semantic-views EXPAND rule; the subsystem installs its own script."
+name = "semantic_views"
+description = "Registers the semantic_views EXPAND rule; the subsystem installs its own script."
 phase = "EXPAND"
 script_name = "SEMANTIC_VIEWS_RT.ENTRY_V3"
 function = "expand"

@@ -14,7 +14,7 @@ Index schema (``registry/index.json``)
       "schema_version": 1,
       "modules": [
         {
-          "name": "cast-shorthand",
+          "name": "cast_shorthand",
           "version": 1,
           "phase": "TRANSLATE",
           "script_name": "PREPROC_RT.CAST_SHORTHAND_V1",
@@ -24,7 +24,7 @@ Index schema (``registry/index.json``)
           "suggested_scope": {"type": "ROLE", "value": "PREPROC_ADMIN"},
           "deploy_mode": "library-deployed",
           "sha256": "<64 hex chars>",
-          "artifact_path": "modules/cast-shorthand/cast-shorthand_v1.sql",
+          "artifact_path": "modules/cast_shorthand/cast_shorthand_v1.sql",
           "source": {"repo": "exasol-labs/preprocessor-library", "ref": "main"}
         }
       ]

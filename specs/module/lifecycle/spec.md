@@ -58,15 +58,15 @@ re-application never stacks duplicates (BUG-008).
 ### Scenario: Registering a module writes a provenance row
 
 * *GIVEN* an installed framework with an empty `PREPROC.MODULES`
-* *WHEN* `PREPROC.MODULE_REGISTER` is called for `cast-shorthand` version 1 with its source, ref, sha256, script, function, phase, and deploy mode
-* *THEN* `PREPROC.MODULES` MUST contain one row for `('cast-shorthand', 1)` with `status = 'deployed'` and a non-null `installed_at`
+* *WHEN* `PREPROC.MODULE_REGISTER` is called for `cast_shorthand` version 1 with its source, ref, sha256, script, function, phase, and deploy mode
+* *THEN* `PREPROC.MODULES` MUST contain one row for `('cast_shorthand', 1)` with `status = 'deployed'` and a non-null `installed_at`
 * *AND* `PREPROC_RT.INSTALLED_MODULES` MUST expose that row to a non-admin user
 
 ### Scenario: Re-registering an identical module version is idempotent
 
-* *GIVEN* `PREPROC.MODULES` already holds `('cast-shorthand', 1)` with `status = 'deployed'`
+* *GIVEN* `PREPROC.MODULES` already holds `('cast_shorthand', 1)` with `status = 'deployed'`
 * *WHEN* `PREPROC.MODULE_REGISTER` is called again with the same `(name, version)` and identical metadata
-* *THEN* `PREPROC.MODULES` MUST still contain exactly one row for `('cast-shorthand', 1)`
+* *THEN* `PREPROC.MODULES` MUST still contain exactly one row for `('cast_shorthand', 1)`
 
 ### Scenario: RULE_ENSURE does not create a duplicate for an identical rule
 
@@ -84,7 +84,7 @@ re-application never stacks duplicates (BUG-008).
 
 ### Scenario: Update deploys V+1, repoints the rule, and marks V retired
 
-* *GIVEN* `cast-shorthand` version 1 is deployed and its rule dispatches at a role scope
+* *GIVEN* `cast_shorthand` version 1 is deployed and its rule dispatches at a role scope
 * *WHEN* the update flow deploys version 2, repoints the rule to `PREPROC_RT.CAST_SHORTHAND_V2`, and retires version 1
 * *THEN* `PREPROC.CONFIG` MUST name `PREPROC_RT.CAST_SHORTHAND_V2` for that rule
 * *AND* `PREPROC.MODULES` MUST show version 2 `deployed` and version 1 `retired` with a `retired_at`
@@ -106,7 +106,7 @@ re-application never stacks duplicates (BUG-008).
 
 ### Scenario: Updating a version with no provenance row is rejected before any write
 
-* *GIVEN* `PREPROC.MODULES` has no row for `cast-shorthand` version 1
+* *GIVEN* `PREPROC.MODULES` has no row for `cast_shorthand` version 1
 * *WHEN* an update from version 1 to version 2 is attempted
 * *THEN* the update MUST fail
 * *AND* `PREPROC.CONFIG` and `PREPROC.MODULES` MUST be unchanged

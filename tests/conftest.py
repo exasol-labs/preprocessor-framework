@@ -105,7 +105,7 @@ def bucketfs_library_source(resolver_deployed):
     connection.execute(f"GRANT ACCESS ON CONNECTION {_TEST_CONNECTION} TO PREPROC_ADMIN")
     source = f"bucketfs:{_TEST_CONNECTION}/{_RELEASE_BUCKET_PATH}"
 
-    if not wait_until_ok(connection, source, "cast-shorthand"):
+    if not wait_until_ok(connection, source, "cast_shorthand"):
         _drop_bucketfs_source(connection, config)
         pytest.skip("BucketFS did not extract/replicate the release to the UDF mount in time")
 

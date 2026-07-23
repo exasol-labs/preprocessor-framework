@@ -131,10 +131,10 @@ def self_deployed_module(
 
 
 def standard_library_specs() -> list[ModuleSpec]:
-    """The canonical staged modules Groups A/B/C share: cast-shorthand + trailing-comma."""
+    """The canonical staged modules Groups A/B/C share: cast_shorthand + trailing_comma."""
     return [
-        library_module("cast-shorthand", version=1, phase="TRANSLATE", function="cast_shorthand"),
-        library_module("trailing-comma", version=1, phase="TRANSLATE", function="trailing_comma"),
+        library_module("cast_shorthand", version=1, phase="TRANSLATE", function="cast_shorthand"),
+        library_module("trailing_comma", version=1, phase="TRANSLATE", function="trailing_comma"),
     ]
 
 

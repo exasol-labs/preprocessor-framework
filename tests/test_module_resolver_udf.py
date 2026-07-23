@@ -69,11 +69,11 @@ def test_bucketfs_library_deployed_resolves(tmp_path):
     """A library-deployed module reads its artifact + metadata from the auto-extracted release."""
     source, exa, _ = _stage_local(tmp_path, standard_library_specs())
 
-    rows = _ok_rows(run_resolver_body(source, "cast-shorthand", exa=exa))
+    rows = _ok_rows(run_resolver_body(source, "cast_shorthand", exa=exa))
 
     assert len(rows) == 1
     row = rows[0]
-    assert row["name"] == "cast-shorthand"
+    assert row["name"] == "cast_shorthand"
     assert row["version"] == 1
     assert row["phase"] == "TRANSLATE"
     assert row["script_name"] == "PREPROC_RT.CAST_SHORTHAND_V1"
@@ -83,30 +83,30 @@ def test_bucketfs_library_deployed_resolves(tmp_path):
     assert row["suggested_scope_value"] == "PREPROC_ADMIN"
     assert row["chunk_count"] == 1
     assert row["chunk_index"] == 0
-    assert row["artifact_chunk"] == default_artifact_text("cast-shorthand", 1, "cast_shorthand")
+    assert row["artifact_chunk"] == default_artifact_text("cast_shorthand", 1, "cast_shorthand")
 
 
 def test_bucketfs_raw_tarball_file_resolves(tmp_path):
     """A bucket that does NOT auto-extract keeps the raw .tar.gz; tarfile reads it."""
     source, exa, _ = _stage_local(tmp_path, standard_library_specs(), mode="tarball")
 
-    rows = _ok_rows(run_resolver_body(source, "cast-shorthand", exa=exa))
+    rows = _ok_rows(run_resolver_body(source, "cast_shorthand", exa=exa))
 
     assert rows[0]["script_name"] == "PREPROC_RT.CAST_SHORTHAND_V1"
-    assert rows[0]["artifact_chunk"] == default_artifact_text("cast-shorthand", 1, "cast_shorthand")
+    assert rows[0]["artifact_chunk"] == default_artifact_text("cast_shorthand", 1, "cast_shorthand")
 
 
 def test_sha256_mismatch_is_hard_failure(tmp_path):
     """A tampered artifact hashes to a different digest — no usable artifact is returned."""
     source, exa, _ = _stage_local(
-        tmp_path, standard_library_specs(), tamper={"cast-shorthand": b"\n-- tampered\n"}
+        tmp_path, standard_library_specs(), tamper={"cast_shorthand": b"\n-- tampered\n"}
     )
 
-    row = _error_row(run_resolver_body(source, "cast-shorthand", exa=exa))
+    row = _error_row(run_resolver_body(source, "cast_shorthand", exa=exa))
 
     assert row["error_kind"] == "sha256_mismatch"
     assert row["artifact_chunk"] is None
-    assert "cast-shorthand" in row["error_message"]
+    assert "cast_shorthand" in row["error_message"]
 
 
 def test_script_name_mismatch_is_hard_failure(tmp_path):
@@ -125,12 +125,12 @@ def test_script_name_mismatch_is_hard_failure(tmp_path):
     )
     specs = [
         library_module(
-            "cast-shorthand", version=1, function="cast_shorthand", artifact_text=impostor
+            "cast_shorthand", version=1, function="cast_shorthand", artifact_text=impostor
         )
     ]
     source, exa, _ = _stage_local(tmp_path, specs)
 
-    row = _error_row(run_resolver_body(source, "cast-shorthand", exa=exa))
+    row = _error_row(run_resolver_body(source, "cast_shorthand", exa=exa))
 
     assert row["error_kind"] == "artifact_invalid"
     assert row["artifact_chunk"] is None
@@ -142,7 +142,7 @@ def test_artifact_without_create_is_hard_failure(tmp_path):
     """An artifact carrying zero CREATE OR REPLACE LUA SCRIPT statements fails structurally."""
     specs = [
         library_module(
-            "cast-shorthand",
+            "cast_shorthand",
             version=1,
             function="cast_shorthand",
             artifact_text="-- not a script at all\n",
@@ -150,7 +150,7 @@ def test_artifact_without_create_is_hard_failure(tmp_path):
     ]
     source, exa, _ = _stage_local(tmp_path, specs)
 
-    row = _error_row(run_resolver_body(source, "cast-shorthand", exa=exa))
+    row = _error_row(run_resolver_body(source, "cast_shorthand", exa=exa))
 
     assert row["error_kind"] == "artifact_invalid"
     assert row["artifact_chunk"] is None
@@ -161,12 +161,12 @@ def test_self_deployed_returns_metadata_only(tmp_path):
     """A self-deployed entry carries no artifact: metadata only, no fetch/verify."""
     specs = [
         self_deployed_module(
-            "semantic-views", version=3, phase="EXPAND", source=("exasol/semantic-views", "v3.0.0")
+            "semantic_views", version=3, phase="EXPAND", source=("exasol/semantic_views", "v3.0.0")
         )
     ]
     source, exa, _ = _stage_local(tmp_path, specs)
 
-    rows = _ok_rows(run_resolver_body(source, "semantic-views", exa=exa))
+    rows = _ok_rows(run_resolver_body(source, "semantic_views", exa=exa))
 
     assert len(rows) == 1
     row = rows[0]
@@ -192,15 +192,26 @@ def test_module_not_found_is_signalled(tmp_path):
     assert row["artifact_chunk"] is None
 
 
+def test_module_name_matched_case_insensitively(tmp_path):
+    """A module name resolves regardless of case — the sugar folds an unquoted name
+    to UPPER while registry keys are lower_snake_case, so matching ignores case."""
+    source, exa, _ = _stage_local(tmp_path, standard_library_specs())
+
+    for queried in ("cast_shorthand", "CAST_SHORTHAND", "Cast_Shorthand"):
+        rows = _ok_rows(run_resolver_body(source, queried, exa=exa))
+        assert rows[0]["name"] == "cast_shorthand"
+        assert rows[0]["script_name"] == "PREPROC_RT.CAST_SHORTHAND_V1"
+
+
 def test_latest_version_is_selected(tmp_path):
     """With versions 1 and 2 listed, the highest version wins and carries the _V2 suffix."""
     specs = [
-        library_module("cast-shorthand", version=1, function="cast_shorthand"),
-        library_module("cast-shorthand", version=2, function="cast_shorthand"),
+        library_module("cast_shorthand", version=1, function="cast_shorthand"),
+        library_module("cast_shorthand", version=2, function="cast_shorthand"),
     ]
     source, exa, _ = _stage_local(tmp_path, specs)
 
-    rows = _ok_rows(run_resolver_body(source, "cast-shorthand", exa=exa))
+    rows = _ok_rows(run_resolver_body(source, "cast_shorthand", exa=exa))
 
     assert rows[0]["version"] == 2
     assert rows[0]["script_name"] == "PREPROC_RT.CAST_SHORTHAND_V2"
@@ -208,13 +219,13 @@ def test_latest_version_is_selected(tmp_path):
 
 def test_large_artifact_is_chunked_in_order(tmp_path):
     """An artifact exceeding one EMITS value is emitted as ordered, reassemblable chunks."""
-    big_text = default_artifact_text("big-module", 1, "big_module") + (
+    big_text = default_artifact_text("big_module", 1, "big_module") + (
         "-- " + "x" * (EMITS_CHUNK_CHARS + 500)
     )
-    specs = [library_module("big-module", version=1, function="big_module", artifact_text=big_text)]
+    specs = [library_module("big_module", version=1, function="big_module", artifact_text=big_text)]
     source, exa, _ = _stage_local(tmp_path, specs)
 
-    rows = _ok_rows(run_resolver_body(source, "big-module", exa=exa))
+    rows = _ok_rows(run_resolver_body(source, "big_module", exa=exa))
 
     assert len(rows) >= 2
     assert {row["chunk_count"] for row in rows} == {len(rows)}
@@ -228,11 +239,11 @@ def test_https_fetches_and_verifies(tmp_path):
     """An https source GETs the index + artifact and returns them on a sha match."""
     built = build_library_tarball(tmp_path / _TARBALL_NAME, standard_library_specs())
     index_url = "https://example.test/registry/index.json"
-    artifact_url = "https://example.test/modules/cast-shorthand/cast-shorthand_v1.sql"
-    artifact_bytes = default_artifact_text("cast-shorthand", 1, "cast_shorthand").encode("utf-8")
+    artifact_url = "https://example.test/modules/cast_shorthand/cast_shorthand_v1.sql"
+    artifact_bytes = default_artifact_text("cast_shorthand", 1, "cast_shorthand").encode("utf-8")
     urlopen = fake_http_directory({index_url: built.index_bytes, artifact_url: artifact_bytes})
 
-    rows = _ok_rows(run_resolver_body(index_url, "cast-shorthand", urlopen=urlopen))
+    rows = _ok_rows(run_resolver_body(index_url, "cast_shorthand", urlopen=urlopen))
 
     assert rows[0]["script_name"] == "PREPROC_RT.CAST_SHORTHAND_V1"
     assert rows[0]["artifact_chunk"] == artifact_bytes.decode("utf-8")
@@ -246,7 +257,7 @@ def test_https_network_error_is_signalled(tmp_path):
 
     row = _error_row(
         run_resolver_body(
-            "https://unreachable.invalid/registry/index.json", "cast-shorthand", urlopen=_boom
+            "https://unreachable.invalid/registry/index.json", "cast_shorthand", urlopen=_boom
         )
     )
 
@@ -257,14 +268,14 @@ def test_https_network_error_is_signalled(tmp_path):
 
 def test_unsupported_scheme_is_rejected(tmp_path):
     """A source with no recognised scheme is rejected without raising."""
-    row = _error_row(run_resolver_body("ftp://host/lib.tar.gz", "cast-shorthand"))
+    row = _error_row(run_resolver_body("ftp://host/lib.tar.gz", "cast_shorthand"))
     assert row["error_kind"] == "bad_source"
 
 
 def test_missing_connection_is_signalled(tmp_path):
     """A bucketfs source naming an inaccessible connection is signalled, not raised."""
     row = _error_row(
-        run_resolver_body("bucketfs:NOPE/lib.tar.gz", "cast-shorthand", exa=make_fake_exa({}))
+        run_resolver_body("bucketfs:NOPE/lib.tar.gz", "cast_shorthand", exa=make_fake_exa({}))
     )
     assert row["error_kind"] == "source_unreadable"
     assert row["artifact_chunk"] is None
@@ -286,14 +297,14 @@ def test_list_all_sentinel_emits_one_metadata_row_per_module(tmp_path):
 
     assert len(rows) == 2
     by_name = {row["name"]: row for row in rows}
-    assert set(by_name) == {"cast-shorthand", "trailing-comma"}
+    assert set(by_name) == {"cast_shorthand", "trailing_comma"}
     for row in rows:
         assert row["artifact_chunk"] is None
         assert row["chunk_count"] == 0
         assert row["chunk_index"] == 0
-    assert by_name["cast-shorthand"]["phase"] == "TRANSLATE"
-    assert by_name["cast-shorthand"]["deploy_mode"] == "library-deployed"
-    assert by_name["cast-shorthand"]["script_name"] == "PREPROC_RT.CAST_SHORTHAND_V1"
+    assert by_name["cast_shorthand"]["phase"] == "TRANSLATE"
+    assert by_name["cast_shorthand"]["deploy_mode"] == "library-deployed"
+    assert by_name["cast_shorthand"]["script_name"] == "PREPROC_RT.CAST_SHORTHAND_V1"
 
 
 def test_list_all_sentinel_propagates_index_read_errors(tmp_path):

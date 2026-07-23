@@ -41,7 +41,7 @@ def _artifact_text(
 
 def _manifest_data(**overrides) -> dict:
     data = {
-        "name": "cast-shorthand",
+        "name": "cast_shorthand",
         "description": "Rewrites expr::type cast shorthand to CAST(expr AS type).",
         "phase": "TRANSLATE",
         "script_name": "PREPROC_RT.CAST_SHORTHAND_V1",
@@ -64,7 +64,7 @@ def _manifest_data(**overrides) -> dict:
 def test_manifest_minimal_library_valid():
     """A minimal library-deployed manifest with a valid sha256 is accepted."""
     manifest = parse_manifest(_manifest_data())
-    assert manifest.name == "cast-shorthand"
+    assert manifest.name == "cast_shorthand"
     assert manifest.phase == "TRANSLATE"
     assert manifest.deploy_mode == "library-deployed"
     assert manifest.version == 1
@@ -77,12 +77,12 @@ def test_manifest_self_deployed_no_sha_valid():
     data = _manifest_data(
         deploy_mode="self-deployed",
         sha256=None,
-        source={"repo": "exasol/semantic-views", "ref": "v3.0.0"},
+        source={"repo": "exasol/semantic_views", "ref": "v3.0.0"},
     )
     manifest = parse_manifest(data)
     assert manifest.deploy_mode == "self-deployed"
     assert manifest.sha256 is None
-    assert manifest.source.repo == "exasol/semantic-views"
+    assert manifest.source.repo == "exasol/semantic_views"
     assert manifest.source.ref == "v3.0.0"
 
 
@@ -113,11 +113,24 @@ def test_manifest_unknown_phase_rejected():
     )
 
 
+def test_manifest_hyphenated_name_rejected():
+    """A module name with a hyphen is rejected: names must be unquoted-identifier safe.
+
+    An unquoted Exasol identifier cannot contain a hyphen, so a hyphenated name
+    could not be used in the `PREPROC INSTALL MODULE <name>` sugar; the contract
+    requires underscores instead (e.g. cast_shorthand, not cast-shorthand).
+    """
+    data = _manifest_data(name="cast-shorthand")
+    with pytest.raises(ManifestError) as exc_info:
+        parse_manifest(data)
+    assert any("hyphen" in message or "identifier" in message for message in exc_info.value.errors)
+
+
 def test_manifest_load_from_file(tmp_path):
     """load_manifest reads and validates a module.toml file from disk."""
     sha256 = _manifest_data()["sha256"]
     toml_text = (
-        'name = "cast-shorthand"\n'
+        'name = "cast_shorthand"\n'
         'description = "desc"\n'
         'phase = "TRANSLATE"\n'
         'script_name = "PREPROC_RT.CAST_SHORTHAND_V1"\n'
@@ -134,7 +147,7 @@ def test_manifest_load_from_file(tmp_path):
     manifest_path = tmp_path / "module.toml"
     manifest_path.write_text(toml_text, encoding="utf-8")
     manifest = load_manifest(manifest_path)
-    assert manifest.name == "cast-shorthand"
+    assert manifest.name == "cast_shorthand"
     assert manifest.sha256 == sha256
 
 
@@ -193,7 +206,7 @@ def test_artifact_sha_verification_noop_for_self_deployed():
     data = _manifest_data(
         deploy_mode="self-deployed",
         sha256=None,
-        source={"repo": "exasol/semantic-views", "ref": "v3.0.0"},
+        source={"repo": "exasol/semantic_views", "ref": "v3.0.0"},
     )
     manifest = parse_manifest(data)
     verify_artifact_sha256(manifest, b"anything at all")  # does not raise

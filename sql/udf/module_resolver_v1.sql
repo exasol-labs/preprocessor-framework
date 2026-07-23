@@ -83,6 +83,9 @@
 --     emits an 'artifact_invalid' error row and no usable artifact text.
 --   * A self-deployed entry (null artifact_path/sha256) is metadata-only: no
 --     artifact member is read and no sha256 is verified.
+--   * The module name is matched CASE-INSENSITIVELY (the sugar upper-cases an
+--     unquoted name; registry keys are lower_snake_case), so a library must not
+--     carry two names differing only by case.
 --   * The latest version is selected when several are listed.
 --   * The resolver NEVER raises: every failure path returns a structured error
 --     row so a failure cannot fail the caller mid-write.
@@ -336,7 +339,12 @@ def _parse_index(raw):
 
 
 def _select_entry(modules, module_name):
-    matches = [module for module in modules if module.get('name') == module_name]
+    # Module names are matched CASE-INSENSITIVELY: the caller's sugar folds an
+    # unquoted name to upper case (Exasol identifier semantics), while registry
+    # keys are conventionally lower_snake_case, so an exact match would miss. A
+    # module library is expected to hold no two names that differ only by case.
+    wanted = module_name.upper()
+    matches = [module for module in modules if (module.get('name') or '').upper() == wanted]
     if not matches:
         raise _NotFound('module %r is not listed in the source index' % module_name)
     return max(matches, key=lambda module: module.get('version', 0))

@@ -137,22 +137,22 @@ def _stage(connection, conn_name, bucket_path, specs, *, probe, tamper=None):
 
 @pytest.fixture(scope="session")
 def install_tamper_source(module_install_deployed):
-    """Stage a release whose ``broken-module`` artifact is tampered (sha mismatch).
+    """Stage a release whose ``broken_module`` artifact is tampered (sha mismatch).
 
-    Carries a clean ``cast-shorthand`` too, used only to poll BucketFS readiness
+    Carries a clean ``cast_shorthand`` too, used only to poll BucketFS readiness
     (a tampered module never resolves OK, so it cannot be the readiness probe).
     """
     specs = [
-        library_module("cast-shorthand", version=1, function="cast_shorthand"),
-        library_module("broken-module", version=1, function="broken_module"),
+        library_module("cast_shorthand", version=1, function="cast_shorthand"),
+        library_module("broken_module", version=1, function="broken_module"),
     ]
     yield from _stage(
         module_install_deployed,
         _TAMPER_CONNECTION,
         _TAMPER_BUCKET_PATH,
         specs,
-        probe="cast-shorthand",
-        tamper={"broken-module": b"\n-- tampered\n"},
+        probe="cast_shorthand",
+        tamper={"broken_module": b"\n-- tampered\n"},
     )
 
 
@@ -161,7 +161,7 @@ def install_self_source(module_install_deployed):
     """Stage a release listing a ``self-deployed`` module (metadata only)."""
     specs = [
         self_deployed_module(
-            "semantic-views", version=3, phase="EXPAND", source=("exasol/semantic-views", "v3.0.0")
+            "semantic_views", version=3, phase="EXPAND", source=("exasol/semantic_views", "v3.0.0")
         )
     ]
     yield from _stage(
@@ -169,7 +169,7 @@ def install_self_source(module_install_deployed):
         _SELF_CONNECTION,
         _SELF_BUCKET_PATH,
         specs,
-        probe="semantic-views",
+        probe="semantic_views",
     )
 
 
@@ -270,27 +270,27 @@ def test_install_bucketfs_parity_with_cli(
     source = bucketfs_library_source.source
     scope_value = "PREPROC_TEST_PARITY_ROLE"
     try:
-        result = _install(connection, source, "cast-shorthand", f"ROLE:{scope_value}")
+        result = _install(connection, source, "cast_shorthand", f"ROLE:{scope_value}")
         assert result[0][3] == "installed"
 
-        before = _capture_state(connection, _CAST_SCRIPT, "ROLE", scope_value, "cast-shorthand", 1)
+        before = _capture_state(connection, _CAST_SCRIPT, "ROLE", scope_value, "cast_shorthand", 1)
         assert before.script_text is not None
         assert len(before.config_rows) == 1
         assert before.modules_row is not None
 
         registry = _local_registry(tmp_path)
         index = read_registry(registry)
-        entry = next(entry for entry in index.entries if entry.name == "cast-shorthand")
+        entry = next(entry for entry in index.entries if entry.name == "cast_shorthand")
         deploy_module(connection, entry, registry, scope=("ROLE", scope_value))
 
-        after = _capture_state(connection, _CAST_SCRIPT, "ROLE", scope_value, "cast-shorthand", 1)
+        after = _capture_state(connection, _CAST_SCRIPT, "ROLE", scope_value, "cast_shorthand", 1)
         assert after == before
 
         # EXA_ALL_SCRIPTS stores the normalised CREATE (a RETURNS ROWCOUNT header)
         # around the verbatim artifact body, so parity is proven by `after ==
         # before` above; here assert the deployed body carries the module function.
         expected_body = strip_script_terminator(
-            default_artifact_text("cast-shorthand", 1, "cast_shorthand")
+            default_artifact_text("cast_shorthand", 1, "cast_shorthand")
         )
         assert "function cast_shorthand(sqltext)" in before.script_text
         assert expected_body.splitlines()[-1] in before.script_text
@@ -298,7 +298,7 @@ def test_install_bucketfs_parity_with_cli(
         assert before.modules_row[4] == entry.sha256
         assert before.config_rows[0][2] == "TRANSLATE"
     finally:
-        _purge(connection, module_name="cast-shorthand", version=1, script_name=_CAST_SCRIPT)
+        _purge(connection, module_name="cast_shorthand", version=1, script_name=_CAST_SCRIPT)
 
 
 def test_install_sha_mismatch_aborts_before_write(module_install_deployed, install_tamper_source):
@@ -306,7 +306,7 @@ def test_install_sha_mismatch_aborts_before_write(module_install_deployed, insta
     connection = module_install_deployed
     try:
         with pytest.raises(Exception):
-            _install(connection, install_tamper_source, "broken-module", "ROLE:PREPROC_ADMIN")
+            _install(connection, install_tamper_source, "broken_module", "ROLE:PREPROC_ADMIN")
 
         assert _script_text(connection, _BROKEN_SCRIPT) is None
         rule_count = connection.execute(
@@ -314,11 +314,11 @@ def test_install_sha_mismatch_aborts_before_write(module_install_deployed, insta
         ).fetchall()[0][0]
         assert rule_count == 0
         provenance = connection.execute(
-            "SELECT COUNT(*) FROM PREPROC.MODULES WHERE name = 'broken-module'"
+            "SELECT COUNT(*) FROM PREPROC.MODULES WHERE name = 'broken_module'"
         ).fetchall()[0][0]
         assert provenance == 0
     finally:
-        _purge(connection, module_name="broken-module", version=1, script_name=_BROKEN_SCRIPT)
+        _purge(connection, module_name="broken_module", version=1, script_name=_BROKEN_SCRIPT)
 
 
 def test_install_self_deployed_register_only(module_install_deployed, install_self_source):
@@ -329,12 +329,12 @@ def test_install_self_deployed_register_only(module_install_deployed, install_se
     marker_before = _script_text(connection, _SELF_SCRIPT)
     try:
         result = _install(
-            connection, install_self_source, "semantic-views", "USER:PREPROC_TEST_SELF"
+            connection, install_self_source, "semantic_views", "USER:PREPROC_TEST_SELF"
         )
         assert result[0][3] == "registered-only"
 
         modules = connection.execute(
-            "SELECT deploy_mode, sha256 FROM PREPROC.MODULES WHERE name = 'semantic-views'"
+            "SELECT deploy_mode, sha256 FROM PREPROC.MODULES WHERE name = 'semantic_views'"
         ).fetchall()
         assert modules[0][0] == "self-deployed"
         assert modules[0][1] is None
@@ -348,7 +348,7 @@ def test_install_self_deployed_register_only(module_install_deployed, install_se
 
         assert _script_text(connection, _SELF_SCRIPT) == marker_before
     finally:
-        _purge(connection, module_name="semantic-views", version=3, script_name=_SELF_SCRIPT)
+        _purge(connection, module_name="semantic_views", version=3, script_name=_SELF_SCRIPT)
 
 
 def test_install_scope_activates_rule(module_install_deployed, bucketfs_library_source):
@@ -358,7 +358,7 @@ def test_install_scope_activates_rule(module_install_deployed, bucketfs_library_
     in_scope = "PREPROC_TEST_BOB"
     out_of_scope = "PREPROC_TEST_CAROL"
     try:
-        _install(connection, source, "cast-shorthand", f"USER:{in_scope}")
+        _install(connection, source, "cast_shorthand", f"USER:{in_scope}")
 
         in_rows = connection.execute(
             "SELECT script_name FROM PREPROC.RESOLUTION "
@@ -372,7 +372,7 @@ def test_install_scope_activates_rule(module_install_deployed, bucketfs_library_
         ).fetchall()
         assert not out_rows, "a user outside the scope must not receive the module"
     finally:
-        _purge(connection, module_name="cast-shorthand", version=1, script_name=_CAST_SCRIPT)
+        _purge(connection, module_name="cast_shorthand", version=1, script_name=_CAST_SCRIPT)
 
 
 def test_install_idempotent_reinstall(module_install_deployed, bucketfs_library_source):
@@ -381,10 +381,10 @@ def test_install_idempotent_reinstall(module_install_deployed, bucketfs_library_
     source = bucketfs_library_source.source
     scope = "ROLE:PREPROC_TEST_IDEMPOTENT"
     try:
-        first = _install(connection, source, "cast-shorthand", scope)
+        first = _install(connection, source, "cast_shorthand", scope)
         assert first[0][3] == "installed"
 
-        second = _install(connection, source, "cast-shorthand", scope)
+        second = _install(connection, source, "cast_shorthand", scope)
         assert second[0][3] == "already-current"
 
         rule_count = connection.execute(
@@ -394,11 +394,11 @@ def test_install_idempotent_reinstall(module_install_deployed, bucketfs_library_
         assert rule_count == 1
 
         provenance = connection.execute(
-            "SELECT COUNT(*) FROM PREPROC.MODULES WHERE name = 'cast-shorthand' AND version = 1"
+            "SELECT COUNT(*) FROM PREPROC.MODULES WHERE name = 'cast_shorthand' AND version = 1"
         ).fetchall()[0][0]
         assert provenance == 1
     finally:
-        _purge(connection, module_name="cast-shorthand", version=1, script_name=_CAST_SCRIPT)
+        _purge(connection, module_name="cast_shorthand", version=1, script_name=_CAST_SCRIPT)
 
 
 def test_install_non_admin_rejected(module_install_deployed):
@@ -442,11 +442,11 @@ def test_install_non_admin_rejected(module_install_deployed):
             other.execute(
                 "EXECUTE SCRIPT PREPROC.MODULE_INSTALL("
                 "'bucketfs:PREPROC_TEST_BFS/preproc-lib-0.1.0.tar.gz', "
-                "'cast-shorthand', 'ROLE:PREPROC_ADMIN')"
+                "'cast_shorthand', 'ROLE:PREPROC_ADMIN')"
             )
 
         provenance = admin.execute(
-            "SELECT COUNT(*) FROM PREPROC.MODULES WHERE name = 'cast-shorthand'"
+            "SELECT COUNT(*) FROM PREPROC.MODULES WHERE name = 'cast_shorthand'"
         ).fetchall()[0][0]
         assert provenance == 0
     finally:
@@ -462,7 +462,7 @@ def test_install_https_when_reachable(module_install_deployed):
     """An https source installs when the cluster can reach the host (no toggle).
 
     Needs a reachable base URL serving ``registry/index.json`` (listing
-    ``cast-shorthand`` v1 with a matching sha256) and the artifact; supply it via
+    ``cast_shorthand`` v1 with a matching sha256) and the artifact; supply it via
     ``PREPROC_TEST_HTTPS_BASE``. The end-state matches the BucketFS-path install.
     """
     base = os.environ.get("PREPROC_TEST_HTTPS_BASE")
@@ -472,15 +472,15 @@ def test_install_https_when_reachable(module_install_deployed):
     index_url = base.rstrip("/") + "/registry/index.json"
     scope_value = "PREPROC_TEST_HTTPS_ROLE"
     try:
-        result = _install(connection, index_url, "cast-shorthand", f"ROLE:{scope_value}")
+        result = _install(connection, index_url, "cast_shorthand", f"ROLE:{scope_value}")
         assert result[0][3] == "installed"
         assert _script_text(connection, _CAST_SCRIPT) is not None
         provenance = connection.execute(
-            "SELECT deploy_mode FROM PREPROC.MODULES WHERE name = 'cast-shorthand' AND version = 1"
+            "SELECT deploy_mode FROM PREPROC.MODULES WHERE name = 'cast_shorthand' AND version = 1"
         ).fetchall()
         assert provenance[0][0] == "library-deployed"
     finally:
-        _purge(connection, module_name="cast-shorthand", version=1, script_name=_CAST_SCRIPT)
+        _purge(connection, module_name="cast_shorthand", version=1, script_name=_CAST_SCRIPT)
 
 
 def test_install_https_no_egress_no_partial_deploy(module_install_deployed):
@@ -489,7 +489,7 @@ def test_install_https_no_egress_no_partial_deploy(module_install_deployed):
     source = "https://unreachable-preproc.invalid/registry/index.json"
 
     with pytest.raises(Exception) as excinfo:
-        _install(connection, source, "cast-shorthand", "ROLE:PREPROC_ADMIN")
+        _install(connection, source, "cast_shorthand", "ROLE:PREPROC_ADMIN")
     assert "unreachable-preproc.invalid" in str(excinfo.value)
 
     assert _script_text(connection, _CAST_SCRIPT) is None
@@ -498,7 +498,7 @@ def test_install_https_no_egress_no_partial_deploy(module_install_deployed):
     ).fetchall()[0][0]
     assert rule_count == 0
     provenance = connection.execute(
-        "SELECT COUNT(*) FROM PREPROC.MODULES WHERE name = 'cast-shorthand'"
+        "SELECT COUNT(*) FROM PREPROC.MODULES WHERE name = 'cast_shorthand'"
     ).fetchall()[0][0]
     assert provenance == 0
 
@@ -510,19 +510,19 @@ def test_install_result_set_reports_outcome(module_install_deployed, bucketfs_li
     scope_value = "PREPROC_TEST_RESULT_ROLE"
     try:
         statement = connection.execute(
-            f"EXECUTE SCRIPT PREPROC.MODULE_INSTALL('{source}', 'cast-shorthand', "
+            f"EXECUTE SCRIPT PREPROC.MODULE_INSTALL('{source}', 'cast_shorthand', "
             f"'ROLE:{scope_value}')"
         )
         names = [name.lower() for name in statement.column_names()]
         rows = statement.fetchall()
         assert names == ["module", "version", "phase", "status"]
         assert len(rows) == 1
-        assert rows[0][0] == "cast-shorthand"
+        assert rows[0][0] == "cast_shorthand"
         assert int(rows[0][1]) == 1
         assert rows[0][2] == "TRANSLATE"
         assert rows[0][3] in ("installed", "already-current")
     finally:
-        _purge(connection, module_name="cast-shorthand", version=1, script_name=_CAST_SCRIPT)
+        _purge(connection, module_name="cast_shorthand", version=1, script_name=_CAST_SCRIPT)
 
 
 def test_install_missing_module_rejected(module_install_deployed, bucketfs_library_source):

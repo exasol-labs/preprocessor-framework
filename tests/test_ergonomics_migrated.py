@@ -1,6 +1,6 @@
 """Assert ergonomics has been cleanly migrated out of the framework.
 
-cast-shorthand and trailing-comma used to live here as
+cast_shorthand and trailing_comma used to live here as
 examples/ergonomics_cast.sql / examples/ergonomics_trailing_comma.sql (plus
 their sql/lua/ canonical-source copies and tests/test_ergonomics_*.py files).
 They have moved to the community module library,
@@ -17,7 +17,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_ergonomics_cast_removed_from_framework():
-    """cast-shorthand's old framework-side files are gone, with no dangling references."""
+    """cast_shorthand's old framework-side files are gone, with no dangling references."""
     assert not (_REPO_ROOT / "examples" / "ergonomics_cast.sql").exists()
     assert not (_REPO_ROOT / "sql" / "lua" / "ergonomics_cast_v1.lua").exists()
     assert not (_REPO_ROOT / "tests" / "test_ergonomics_cast.py").exists()
@@ -45,7 +45,7 @@ def test_ergonomics_cast_removed_from_framework():
 
 
 def test_ergonomics_trailing_comma_removed_from_framework():
-    """trailing-comma's old framework-side files are gone, with no dangling references."""
+    """trailing_comma's old framework-side files are gone, with no dangling references."""
     assert not (_REPO_ROOT / "examples" / "ergonomics_trailing_comma.sql").exists()
     assert not (_REPO_ROOT / "sql" / "lua" / "ergonomics_trailing_comma_v1.lua").exists()
     assert not (_REPO_ROOT / "tests" / "test_ergonomics_trailing_comma.py").exists()

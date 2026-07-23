@@ -97,7 +97,7 @@ _DEACTIVATE = "ALTER SESSION SET sql_preprocessor_script = ''"
 _SEED = "SEED"
 _PROBE = f"SELECT '{_SEED}' AS PROBE"
 
-_MODULE_NAME = "cast-shorthand"
+_MODULE_NAME = "cast_shorthand"
 _FUNCTION = "cast_shorthand"
 _PHASE = "TRANSLATE"
 _SCRIPT_V1 = "PREPROC_RT.CAST_SHORTHAND_V1"

@@ -87,8 +87,8 @@ def _write_index(root):
 
 
 def _two_module_registry(root):
-    _make_module(root, "cast-shorthand", description="cast shorthand transform")
-    _make_module(root, "trailing-comma", description="trailing comma cleanup")
+    _make_module(root, "cast_shorthand", description="cast shorthand transform")
+    _make_module(root, "trailing_comma", description="trailing comma cleanup")
     return _write_index(root)
 
 
@@ -125,23 +125,23 @@ def test_cli_module_list(tmp_path, capsys, no_db):
 
     assert code == 0
     out = capsys.readouterr().out
-    assert "cast-shorthand" in out
-    assert "trailing-comma" in out
+    assert "cast_shorthand" in out
+    assert "trailing_comma" in out
     assert "TRANSLATE" in out
     assert "library-deployed" in out
     assert "v1" in out
 
 
 def test_cli_module_search(tmp_path, capsys, no_db):
-    """``search cast`` prints cast-shorthand but not trailing-comma."""
+    """``search cast`` prints cast_shorthand but not trailing_comma."""
     root = _two_module_registry(tmp_path)
 
     code = run_module(_parse(["module", "search", "cast", "--registry", str(root)]))
 
     assert code == 0
     out = capsys.readouterr().out
-    assert "cast-shorthand" in out
-    assert "trailing-comma" not in out
+    assert "cast_shorthand" in out
+    assert "trailing_comma" not in out
 
 
 # ---------------------------------------------------------------------------
@@ -159,8 +159,8 @@ def test_cli_module_bundle_offline(tmp_path, capsys, no_db):
             [
                 "module",
                 "bundle",
-                "cast-shorthand",
-                "trailing-comma",
+                "cast_shorthand",
+                "trailing_comma",
                 "--output",
                 str(out_file),
                 "--registry",
@@ -217,7 +217,7 @@ def test_cli_module_add_missing_env(tmp_path, capsys, monkeypatch):
         monkeypatch.delenv(var, raising=False)
     root = _two_module_registry(tmp_path)
 
-    code = run_module(_parse(["module", "add", "cast-shorthand", "--registry", str(root)]))
+    code = run_module(_parse(["module", "add", "cast_shorthand", "--registry", str(root)]))
 
     assert code == 2
     combined = capsys.readouterr()
@@ -273,7 +273,7 @@ def module_env(installed):
             conn.execute(_DEACTIVATE)
         finally:
             _wipe(conn)
-            for name in ("cast-shorthand", "trailing-comma"):
+            for name in ("cast_shorthand", "trailing_comma"):
                 upper = name.upper().replace("-", "_")
                 for version in (1, 2):
                     _drop_script_if_present(conn, f"PREPROC_RT.{upper}_V{version}")
@@ -306,7 +306,7 @@ def test_cli_module_add_library(tmp_path, module_env):
     user = _current_user(conn)
     _make_module(
         tmp_path,
-        "cast-shorthand",
+        "cast_shorthand",
         function="cast_shorthand",
         body=_TAG_BODY.format(function="cast_shorthand", seed=_SEED, tag="V1"),
     )
@@ -317,7 +317,7 @@ def test_cli_module_add_library(tmp_path, module_env):
             [
                 "module",
                 "add",
-                "cast-shorthand",
+                "cast_shorthand",
                 "--scope",
                 f"USER:{user}",
                 "--registry",
@@ -328,7 +328,7 @@ def test_cli_module_add_library(tmp_path, module_env):
 
     assert code == 0
     assert _enabled_rules_for(conn, "PREPROC_RT.CAST_SHORTHAND_V1") == 1
-    assert _provenance(conn, "cast-shorthand", 1) == "deployed"
+    assert _provenance(conn, "cast_shorthand", 1) == "deployed"
 
     from preproc.connection import connect_from_env
 
@@ -378,10 +378,10 @@ def test_cli_module_add_sha_mismatch_aborts(tmp_path, module_env):
     """A tampered artifact aborts add with no script, rule, or provenance written."""
     conn = module_env
     user = _current_user(conn)
-    _make_module(tmp_path, "cast-shorthand", function="cast_shorthand")
+    _make_module(tmp_path, "cast_shorthand", function="cast_shorthand")
     root = _write_index(tmp_path)
     # Tamper the artifact after the index (and its sha256) were written.
-    artifact = root / "modules" / "cast-shorthand" / "cast-shorthand_v1.sql"
+    artifact = root / "modules" / "cast_shorthand" / "cast_shorthand_v1.sql"
     artifact.write_text(artifact.read_text(encoding="utf-8") + "\n-- tampered\n", encoding="utf-8")
 
     code = run_module(
@@ -389,7 +389,7 @@ def test_cli_module_add_sha_mismatch_aborts(tmp_path, module_env):
             [
                 "module",
                 "add",
-                "cast-shorthand",
+                "cast_shorthand",
                 "--scope",
                 f"USER:{user}",
                 "--registry",
@@ -400,7 +400,7 @@ def test_cli_module_add_sha_mismatch_aborts(tmp_path, module_env):
 
     assert code != 0
     assert _enabled_rules_for(conn, "PREPROC_RT.CAST_SHORTHAND_V1") == 0
-    assert _provenance(conn, "cast-shorthand", 1) is None
+    assert _provenance(conn, "cast_shorthand", 1) is None
     exists = conn.execute(
         "SELECT COUNT(*) FROM EXA_ALL_SCRIPTS "
         "WHERE SCRIPT_SCHEMA = 'PREPROC_RT' AND SCRIPT_NAME = 'CAST_SHORTHAND_V1'"
@@ -411,10 +411,10 @@ def test_cli_module_add_sha_mismatch_aborts(tmp_path, module_env):
 @pytest.mark.integration
 def test_cli_module_validate_live_smoke(tmp_path, module_env):
     """``validate`` with a DB scratch-deploys, smoke-tests, and tears down."""
-    _make_module(tmp_path, "cast-shorthand", function="cast_shorthand")
+    _make_module(tmp_path, "cast_shorthand", function="cast_shorthand")
     root = _write_index(tmp_path)
 
-    code = run_module(_parse(["module", "validate", "cast-shorthand", "--registry", str(root)]))
+    code = run_module(_parse(["module", "validate", "cast_shorthand", "--registry", str(root)]))
 
     assert code == 0
     # The scratch objects must be gone afterward.
@@ -432,12 +432,12 @@ def test_cli_module_sync_idempotent(tmp_path, module_env):
     """Re-running sync with an unchanged desired file makes no changes."""
     conn = module_env
     user = _current_user(conn)
-    _make_module(tmp_path, "cast-shorthand", function="cast_shorthand")
+    _make_module(tmp_path, "cast_shorthand", function="cast_shorthand")
     root = _write_index(tmp_path)
 
     desired = tmp_path / "desired.toml"
     desired.write_text(
-        f'[[modules]]\nname = "cast-shorthand"\nversion = 1\nscope = "USER:{user}"\n',
+        f'[[modules]]\nname = "cast_shorthand"\nversion = 1\nscope = "USER:{user}"\n',
         encoding="utf-8",
     )
 
@@ -464,12 +464,12 @@ def test_cli_module_sync_retire(tmp_path, module_env):
     """A module dropped from the desired file has its rule removed and row retired."""
     conn = module_env
     user = _current_user(conn)
-    _make_module(tmp_path, "cast-shorthand", function="cast_shorthand")
+    _make_module(tmp_path, "cast_shorthand", function="cast_shorthand")
     root = _write_index(tmp_path)
 
     synced = tmp_path / "desired.toml"
     synced.write_text(
-        f'[[modules]]\nname = "cast-shorthand"\nversion = 1\nscope = "USER:{user}"\n',
+        f'[[modules]]\nname = "cast_shorthand"\nversion = 1\nscope = "USER:{user}"\n',
         encoding="utf-8",
     )
     assert run_module(_parse(["module", "sync", str(synced), "--registry", str(root)])) == 0
@@ -480,4 +480,4 @@ def test_cli_module_sync_retire(tmp_path, module_env):
     assert run_module(_parse(["module", "sync", str(empty), "--registry", str(root)])) == 0
 
     assert _enabled_rules_for(conn, "PREPROC_RT.CAST_SHORTHAND_V1") == 0
-    assert _provenance(conn, "cast-shorthand", 1) == "retired"
+    assert _provenance(conn, "cast_shorthand", 1) == "retired"

@@ -50,6 +50,11 @@ _REQUIRED_FIELDS = (
 
 _VERSION_SUFFIX_RE = re.compile(r"_V(\d+)$", re.IGNORECASE)
 _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+# A module name must be a plain SQL-style identifier: a letter followed by
+# letters, digits, or underscores. Hyphens are disallowed so the name can be
+# used unquoted in the `PREPROC INSTALL MODULE <name>` sugar (an unquoted Exasol
+# identifier cannot contain a hyphen), and it is matched case-insensitively.
+_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
 _CREATE_SCRIPT_RE = re.compile(
     r"CREATE\s+OR\s+REPLACE\s+LUA\s+SCRIPT\s+([A-Za-z_][A-Za-z0-9_.\"]*)",
     re.IGNORECASE,
@@ -115,6 +120,15 @@ def _missing_and_typed_fields(data: dict[str, Any], errors: list[str]) -> None:
     for field_name in _REQUIRED_FIELDS:
         if field_name not in data or data[field_name] in (None, ""):
             errors.append(f"missing required field '{field_name}'")
+
+
+def _validate_name(data: dict[str, Any], errors: list[str]) -> None:
+    name = data.get("name")
+    if isinstance(name, str) and name and not _NAME_RE.match(name):
+        errors.append(
+            f"name {name!r} must be an identifier: a letter followed by letters, digits, "
+            "or underscores (no hyphens), so it can be used unquoted in PREPROC INSTALL MODULE"
+        )
 
 
 def _validate_phase(data: dict[str, Any], errors: list[str]) -> None:
@@ -213,6 +227,7 @@ def parse_manifest(data: dict[str, Any]) -> ModuleManifest:
     """
     errors: list[str] = []
     _missing_and_typed_fields(data, errors)
+    _validate_name(data, errors)
     _validate_phase(data, errors)
     _validate_deploy_mode(data, errors)
     _validate_version_matches_script_name(data, errors)

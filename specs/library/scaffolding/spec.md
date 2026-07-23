@@ -18,8 +18,8 @@ the first two modules.
   relative to that repo's root. Nothing in this feature is committed to the
   framework repo; the only framework-repo change for the migration is the
   REMOVAL of the ergonomics sources (see the `ergonomics/*` features).
-* Ergonomics migrates as TWO independent modules, `cast-shorthand` and
-  `trailing-comma`, not one combined module: each is a single Lua script with
+* Ergonomics migrates as TWO independent modules, `cast_shorthand` and
+  `trailing_comma`, not one combined module: each is a single Lua script with
   its own entry function, registration rule, and `module.toml`, and each is
   independently opt-in — matching the one-script/one-function/one-rule contract.
 * The library repo MUST contain: `modules/<name>/{<name>_v<N>.sql, module.toml,
@@ -35,7 +35,7 @@ the first two modules.
 * The CI workflow MUST, for each module, run its `tests/` against a docker
   Exasol with the framework installed, and MUST regenerate `registry/index.json`
   and fail if the committed index is out of sync with the module manifests.
-* The ergonomics modules `cast-shorthand` and `trailing-comma` MUST be present as
+* The ergonomics modules `cast_shorthand` and `trailing_comma` MUST be present as
   module #1 and #2, each a complete conformant module: a single self-contained
   `_v1.sql` artifact, a `module.toml` with a matching `sha256`, a `README.md`,
   and `tests/`. Their Lua bodies are the framework's existing ergonomics module
@@ -56,16 +56,16 @@ the first two modules.
 * *THEN* it MUST contain `modules/`, `registry/index.json`, `registry/external/`, `CONTRIBUTING.md`, `README.md`, and a workflow under `.github/workflows/`
 * *AND* it MUST contain a `modules/_template/` module skeleton with a `module.toml` and a placeholder artifact
 
-### Scenario: Ergonomics cast-shorthand is present as a conformant module
+### Scenario: Ergonomics cast_shorthand is present as a conformant module
 
-* *GIVEN* the library repo's `modules/cast-shorthand/` directory
+* *GIVEN* the library repo's `modules/cast_shorthand/` directory
 * *WHEN* its contents are inspected
 * *THEN* it MUST contain `cast_shorthand_v1.sql`, `module.toml`, `README.md`, and a `tests/` directory
 * *AND* the `module.toml` `script_name` MUST be `PREPROC_RT.CAST_SHORTHAND_V1` with `phase = "TRANSLATE"` and `deploy_mode = "library-deployed"`
 
-### Scenario: Ergonomics trailing-comma is present as a conformant module
+### Scenario: Ergonomics trailing_comma is present as a conformant module
 
-* *GIVEN* the library repo's `modules/trailing-comma/` directory
+* *GIVEN* the library repo's `modules/trailing_comma/` directory
 * *WHEN* its contents are inspected
 * *THEN* it MUST contain `trailing_comma_v1.sql`, `module.toml`, `README.md`, and a `tests/` directory
 * *AND* the `module.toml` `script_name` MUST be `PREPROC_RT.ERGONOMICS_TRAILING_COMMA_V1` with `phase = "TRANSLATE"`
@@ -80,7 +80,7 @@ the first two modules.
 
 * *GIVEN* the library repo's `registry/index.json`
 * *WHEN* it is read
-* *THEN* it MUST contain an entry for `cast-shorthand` and `trailing-comma`
+* *THEN* it MUST contain an entry for `cast_shorthand` and `trailing_comma`
 * *AND* regenerating the index from the library repo's `modules/` MUST reproduce it byte-for-byte
 
 ### Scenario: The CI workflow tests modules and checks index sync

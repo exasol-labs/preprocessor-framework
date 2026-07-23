@@ -4,10 +4,10 @@ One test per Scenario in the ``module/db-catalog`` spec. ``catalog_deployed``
 deploys ``PREPROC.MODULE_CATALOG`` directly (Group C's ``install.py`` wiring is a
 separate task), reusing the shared ``resolver_deployed`` / ``bucketfs_library_source``
 fixtures from ``tests/conftest.py`` so the resolver and a staged BucketFS release
-(``cast-shorthand`` v1 + ``trailing-comma`` v1) need not be re-authored here.
+(``cast_shorthand`` v1 + ``trailing_comma`` v1) need not be re-authored here.
 
 ``PREPROC.MODULES`` is a shared, session-wide provenance table; every test that
-writes a provenance row for ``cast-shorthand``/``trailing-comma`` removes it in a
+writes a provenance row for ``cast_shorthand``/``trailing_comma`` removes it in a
 ``finally`` block so no state leaks into other suites (matching the DB-isolation
 discipline already used by ``tests/test_module_lifecycle.py``).
 """
@@ -124,7 +124,7 @@ def test_catalog_lists_with_installed_state(bucketfs_library_source, catalog_dep
     conn = catalog_deployed
     _register(
         conn,
-        name="cast-shorthand",
+        name="cast_shorthand",
         version=1,
         script_name="PREPROC_RT.CAST_SHORTHAND_V1",
         function_name="cast_shorthand",
@@ -132,15 +132,15 @@ def test_catalog_lists_with_installed_state(bucketfs_library_source, catalog_dep
     try:
         rows = _catalog_rows(conn, bucketfs_library_source.source)
     finally:
-        _forget(conn, "cast-shorthand", 1)
+        _forget(conn, "cast_shorthand", 1)
 
     by_name = {row["name"]: row for row in rows}
-    assert set(by_name) == {"cast-shorthand", "trailing-comma"}
+    assert set(by_name) == {"cast_shorthand", "trailing_comma"}
     for row in rows:
         assert row["phase"] is not None
         assert row["deploy_mode"] is not None
-    assert by_name["cast-shorthand"]["installed"] is True
-    assert by_name["trailing-comma"]["installed"] is False
+    assert by_name["cast_shorthand"]["installed"] is True
+    assert by_name["trailing_comma"]["installed"] is False
 
 
 def test_catalog_read_only(bucketfs_library_source, catalog_deployed):
@@ -171,19 +171,19 @@ def test_catalog_installed_excludes_retired(bucketfs_library_source, catalog_dep
     conn = catalog_deployed
     _register(
         conn,
-        name="cast-shorthand",
+        name="cast_shorthand",
         version=1,
         script_name="PREPROC_RT.CAST_SHORTHAND_V1",
         function_name="cast_shorthand",
     )
-    _retire(conn, "cast-shorthand", 1)
+    _retire(conn, "cast_shorthand", 1)
     try:
         rows = _catalog_rows(conn, bucketfs_library_source.source)
     finally:
-        _forget(conn, "cast-shorthand", 1)
+        _forget(conn, "cast_shorthand", 1)
 
     by_name = {row["name"]: row for row in rows}
-    assert by_name["cast-shorthand"]["installed"] is False
+    assert by_name["cast_shorthand"]["installed"] is False
 
 
 def test_catalog_non_admin_rejected(catalog_deployed):

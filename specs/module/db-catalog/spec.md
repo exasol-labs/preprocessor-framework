@@ -30,12 +30,12 @@ provenance view. It is the DB-side analogue of `preproc module list --registry`.
 
 ### Scenario: Catalogs a BucketFS source's modules with installed state
 
-* *GIVEN* a staged tarball advertising `cast-shorthand` version 1 and `trailing-comma` version 1
-* *AND* `cast-shorthand` version 1 already installed
+* *GIVEN* a staged tarball advertising `cast_shorthand` version 1 and `trailing_comma` version 1
+* *AND* `cast_shorthand` version 1 already installed
 * *WHEN* a caller holding `PREPROC_ADMIN` runs `EXECUTE SCRIPT PREPROC.MODULE_CATALOG('bucketfs:PREPROC_BFS/preproc-lib-0.1.0.tar.gz')`
 * *THEN* the script MUST return one row per advertised module carrying `name`, `version`, `phase`, and `deploy_mode`
-* *AND* the `cast-shorthand` row MUST show `installed?` TRUE
-* *AND* the `trailing-comma` row MUST show `installed?` FALSE
+* *AND* the `cast_shorthand` row MUST show `installed?` TRUE
+* *AND* the `trailing_comma` row MUST show `installed?` FALSE
 
 ### Scenario: The catalog is read-only
 
@@ -52,9 +52,9 @@ provenance view. It is the DB-side analogue of `preproc module list --registry`.
 
 ### Scenario: The installed flag reflects deployed, not retired, provenance
 
-* *GIVEN* a source advertising `cast-shorthand` version 1 whose only `PREPROC.MODULES` row is `retired`
+* *GIVEN* a source advertising `cast_shorthand` version 1 whose only `PREPROC.MODULES` row is `retired`
 * *WHEN* `MODULE_CATALOG` is called for that source
-* *THEN* the `cast-shorthand` version 1 row MUST show `installed?` FALSE
+* *THEN* the `cast_shorthand` version 1 row MUST show `installed?` FALSE
 
 ### Scenario: A non-admin caller cannot run the catalog
 

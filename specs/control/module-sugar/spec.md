@@ -35,10 +35,14 @@ rather than by deployment unit.
 * Captured values follow Exasol identifier quoting semantics (the same rules
   `control/command-sugar` documents): the module name is an object-name
   identifier — an UNQUOTED token folds to UPPER CASE, a `"..."`-delimited token
-  is taken verbatim (embedded `""` unescaped) — so the lowercase registry key
-  `cast-shorthand` MUST be double-quoted to resolve. The `FOR (ROLE|USER)` value
-  is a role/user name, which Exasol always upper-cases regardless of quoting, so
-  it is ALWAYS upper-cased (`FOR ROLE dba`, `DBA`, and `"dba"` all yield `DBA`).
+  is taken verbatim (embedded `""` unescaped). Because module names are
+  identifier-safe (letters/digits/underscore, no hyphens — enforced by the module
+  contract) AND the resolver matches names CASE-INSENSITIVELY, a lower_snake_case
+  key like `cast_shorthand` resolves whether written unquoted (`cast_shorthand` →
+  emitted `'CAST_SHORTHAND'`), upper, or `"..."`-quoted — quoting is not required.
+  The `FOR (ROLE|USER)` value is a role/user name, which Exasol always upper-cases
+  regardless of quoting, so it is ALWAYS upper-cased (`FOR ROLE dba`, `DBA`, and
+  `"dba"` all yield `DBA`).
 * `gsub` results are captured to a single variable (never passed inline) to avoid
   the two-value return trap; keyword matching is case-insensitive with surrounding
   whitespace tolerated. The verbs add no privilege — the target admin script still
@@ -49,16 +53,16 @@ rather than by deployment unit.
 ### Scenario: INSTALL MODULE command expands to a MODULE_INSTALL execute-script call
 
 * *GIVEN* the convenience module is deployed and the caller holds the convenience EXPAND rule under an active preprocessor
-* *WHEN* the caller submits `PREPROC INSTALL MODULE "cast-shorthand" FROM 'bucketfs:PREPROC_BFS/preproc-lib-0.1.0.tar.gz' FOR ROLE PREPROC_ADMIN`
-* *THEN* the module MUST return exactly one `EXECUTE SCRIPT PREPROC.MODULE_INSTALL('bucketfs:PREPROC_BFS/preproc-lib-0.1.0.tar.gz', 'cast-shorthand', 'ROLE:PREPROC_ADMIN')` statement
+* *WHEN* the caller submits `PREPROC INSTALL MODULE "cast_shorthand" FROM 'bucketfs:PREPROC_BFS/preproc-lib-0.1.0.tar.gz' FOR ROLE PREPROC_ADMIN`
+* *THEN* the module MUST return exactly one `EXECUTE SCRIPT PREPROC.MODULE_INSTALL('bucketfs:PREPROC_BFS/preproc-lib-0.1.0.tar.gz', 'cast_shorthand', 'ROLE:PREPROC_ADMIN')` statement
 * *AND* the `FROM` source MUST be carried single-quoted exactly as written
-* *AND* the `"..."`-delimited module name MUST be carried verbatim (its lowercase case preserved)
+* *AND* the `"..."`-delimited module name MUST be carried verbatim
 * *AND* the returned text MUST be a single statement
 
 ### Scenario: A FOR USER scope threads a USER-typed scope argument
 
 * *GIVEN* the convenience module is deployed and active for the caller
-* *WHEN* the caller submits `PREPROC INSTALL MODULE "cast-shorthand" FROM 'bucketfs:PREPROC_BFS/preproc-lib-0.1.0.tar.gz' FOR USER BOB`
+* *WHEN* the caller submits `PREPROC INSTALL MODULE "cast_shorthand" FROM 'bucketfs:PREPROC_BFS/preproc-lib-0.1.0.tar.gz' FOR USER BOB`
 * *THEN* the module MUST return exactly one `EXECUTE SCRIPT PREPROC.MODULE_INSTALL(...)` statement whose scope argument is `'USER:BOB'`
 * *AND* the scope `TYPE` MUST be matched case-insensitively against `ROLE` and `USER`
 
@@ -66,7 +70,7 @@ rather than by deployment unit.
 
 * *GIVEN* the convenience module is deployed and active for the caller
 * *WHEN* the caller submits an `INSTALL MODULE` command with an UNQUOTED module name and a `FOR ROLE`/`FOR USER` value in any case (for example `PREPROC INSTALL MODULE cast_mod FROM 'https://h/registry/index.json' FOR ROLE dba`)
-* *THEN* the unquoted module name MUST be folded to UPPER CASE (`'CAST_MOD'`) — the regular-identifier rule that requires a lowercase registry key to be `"..."`-quoted
+* *THEN* the unquoted module name MUST be folded to UPPER CASE (`'CAST_MOD'`) — the regular-identifier rule (the resolver then matches it case-insensitively against the registry key)
 * *AND* the role/user value MUST be folded to UPPER CASE (`'ROLE:DBA'`) whether it was written unquoted or `"..."`-delimited, matching how Exasol upper-cases users and roles
 
 ### Scenario: CATALOG MODULES command expands to a MODULE_CATALOG execute-script call

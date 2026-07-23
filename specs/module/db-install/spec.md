@@ -82,17 +82,17 @@ path remains the default, fully-supported air-gap path.
 
 ### Scenario: Installs a library-deployed module from a BucketFS source, end-state byte-identical to a CLI install
 
-* *GIVEN* an installed framework and an operator-created BucketFS CONNECTION staging `preproc-lib-0.1.0.tar.gz` with `cast-shorthand` version 1
+* *GIVEN* an installed framework and an operator-created BucketFS CONNECTION staging `preproc-lib-0.1.0.tar.gz` with `cast_shorthand` version 1
 * *AND* a caller holding `PREPROC_ADMIN` with ACCESS on the CONNECTION
-* *WHEN* the caller runs `EXECUTE SCRIPT PREPROC.MODULE_INSTALL('bucketfs:PREPROC_BFS/preproc-lib-0.1.0.tar.gz', 'cast-shorthand', 'ROLE:ANALYSTS')`
+* *WHEN* the caller runs `EXECUTE SCRIPT PREPROC.MODULE_INSTALL('bucketfs:PREPROC_BFS/preproc-lib-0.1.0.tar.gz', 'cast_shorthand', 'ROLE:ANALYSTS')`
 * *THEN* the script MUST create `PREPROC_RT.CAST_SHORTHAND_V1`, register the TRANSLATE rule at `ROLE ANALYSTS` via `PREPROC.RULE_ENSURE`, and write a `PREPROC.MODULES` provenance row for the deployed version
 * *AND* a subsequent in-scope statement MUST be transformed by the module
-* *AND* the resulting script, rule, and provenance row MUST match the end-state of a CLI `preproc module add cast-shorthand`
+* *AND* the resulting script, rule, and provenance row MUST match the end-state of a CLI `preproc module add cast_shorthand`
 
 ### Scenario: A sha256 mismatch aborts before any database write
 
-* *GIVEN* a staged tarball whose `cast-shorthand` artifact hashes to a digest other than the index `sha256`
-* *WHEN* the caller runs `MODULE_INSTALL` for `cast-shorthand`
+* *GIVEN* a staged tarball whose `cast_shorthand` artifact hashes to a digest other than the index `sha256`
+* *WHEN* the caller runs `MODULE_INSTALL` for `cast_shorthand`
 * *THEN* the script MUST fail
 * *AND* `PREPROC_RT` MUST NOT contain the module script
 * *AND* `PREPROC.CONFIG` and `PREPROC.MODULES` MUST be unchanged
@@ -107,18 +107,18 @@ path remains the default, fully-supported air-gap path.
 
 ### Scenario: The scope argument targets rule activation
 
-* *GIVEN* an installed framework and a staged `cast-shorthand`
-* *WHEN* the caller runs `MODULE_INSTALL('bucketfs:...', 'cast-shorthand', 'USER:BOB')`
+* *GIVEN* an installed framework and a staged `cast_shorthand`
+* *WHEN* the caller runs `MODULE_INSTALL('bucketfs:...', 'cast_shorthand', 'USER:BOB')`
 * *THEN* the registered rule MUST be scoped to `USER` `BOB`
 * *AND* after the refresh `BOB`'s `PREPROC_RT.MY_PIPELINE` MUST include the module
 * *AND* a user outside the scope MUST NOT receive the module in their pipeline
 
 ### Scenario: Re-installing an identical version is idempotent
 
-* *GIVEN* `cast-shorthand` version 1 already installed at `ROLE ANALYSTS` via `MODULE_INSTALL`
+* *GIVEN* `cast_shorthand` version 1 already installed at `ROLE ANALYSTS` via `MODULE_INSTALL`
 * *WHEN* the caller runs `MODULE_INSTALL` again with the same source, module, and scope
 * *THEN* `PREPROC.CONFIG` MUST still contain exactly one matching rule
-* *AND* `PREPROC.MODULES` MUST still contain exactly one row for `('cast-shorthand', 1)`
+* *AND* `PREPROC.MODULES` MUST still contain exactly one row for `('cast_shorthand', 1)`
 * *AND* the result set status SHOULD report `already-current`
 
 ### Scenario: A non-admin caller cannot install a module
@@ -130,7 +130,7 @@ path remains the default, fully-supported air-gap path.
 
 ### Scenario: An HTTPS source installs when the cluster can reach the host
 
-* *GIVEN* an egress-permitted database and a pinned GitHub raw source, reachable from the cluster, listing `cast-shorthand` version 1 with a matching `sha256`
+* *GIVEN* an egress-permitted database and a pinned GitHub raw source, reachable from the cluster, listing `cast_shorthand` version 1 with a matching `sha256`
 * *WHEN* the caller runs `MODULE_INSTALL` with the `https://` source
 * *THEN* the script MUST resolve and verify the artifact over HTTPS with no settings toggle consulted
 * *AND* the resulting script, rule, and provenance row MUST match the BucketFS-path end-state for the same module

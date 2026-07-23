@@ -52,14 +52,14 @@ checkout.
 
 ### Scenario: A central-library module is auto-indexed from its manifest
 
-* *GIVEN* a `modules/cast-shorthand/module.toml` with `deploy_mode = "library-deployed"` and a `sha256`
+* *GIVEN* a `modules/cast_shorthand/module.toml` with `deploy_mode = "library-deployed"` and a `sha256`
 * *WHEN* the index generator runs
 * *THEN* the resulting entry MUST carry the manifest's `name`, `version`, `phase`, `script_name`, `function`, `sha256`, and `source`
 * *AND* the entry MUST record the artifact path relative to its source repo
 
 ### Scenario: An external-repo entry is merged from a curated block
 
-* *GIVEN* a `registry/external/semantic-views.toml` block declaring `deploy_mode = "self-deployed"`, a `source` repo and tag `ref`, and manifest metadata
+* *GIVEN* a `registry/external/semantic_views.toml` block declaring `deploy_mode = "self-deployed"`, a `source` repo and tag `ref`, and manifest metadata
 * *WHEN* the index generator runs
 * *THEN* the resulting index MUST contain the external entry alongside the library entries
 * *AND* the external entry MUST retain its pinned `ref`

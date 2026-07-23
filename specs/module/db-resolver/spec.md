@@ -69,24 +69,24 @@ package.
 
 ### Scenario: Resolves a library-deployed module from a BucketFS-staged tarball
 
-* *GIVEN* an operator-created CONNECTION naming a BucketFS location that holds `preproc-lib-0.1.0.tar.gz` whose index lists `cast-shorthand` version 1
+* *GIVEN* an operator-created CONNECTION naming a BucketFS location that holds `preproc-lib-0.1.0.tar.gz` whose index lists `cast_shorthand` version 1
 * *AND* a caller holding `PREPROC_ADMIN` with ACCESS on that CONNECTION
-* *WHEN* the resolver is invoked with source `bucketfs:PREPROC_BFS/preproc-lib-0.1.0.tar.gz` and module `cast-shorthand`
+* *WHEN* the resolver is invoked with source `bucketfs:PREPROC_BFS/preproc-lib-0.1.0.tar.gz` and module `cast_shorthand`
 * *THEN* the resolver MUST return the artifact text of the `PREPROC_RT.CAST_SHORTHAND_V1` CREATE statement
 * *AND* the resolver MUST return the entry metadata (`phase`, `script_name`, `function`, `deploy_mode`, `sha256`, suggested scope, source)
 * *AND* the resolver MUST perform no network egress
 
 ### Scenario: A sha256 mismatch is a hard failure with no usable artifact
 
-* *GIVEN* a staged tarball whose `cast-shorthand` artifact bytes hash to a digest other than the index entry's `sha256`
-* *WHEN* the resolver is invoked for `cast-shorthand`
+* *GIVEN* a staged tarball whose `cast_shorthand` artifact bytes hash to a digest other than the index entry's `sha256`
+* *WHEN* the resolver is invoked for `cast_shorthand`
 * *THEN* the resolver MUST signal a `sha256`-mismatch failure
 * *AND* the resolver MUST NOT return usable artifact text
 
 ### Scenario: An artifact whose CREATE target differs from the declared script_name is a hard failure
 
-* *GIVEN* a staged tarball whose `cast-shorthand` artifact hashes to the index entry's `sha256` but whose `CREATE OR REPLACE LUA SCRIPT` targets a name other than the declared `script_name`
-* *WHEN* the resolver is invoked for `cast-shorthand`
+* *GIVEN* a staged tarball whose `cast_shorthand` artifact hashes to the index entry's `sha256` but whose `CREATE OR REPLACE LUA SCRIPT` targets a name other than the declared `script_name`
+* *WHEN* the resolver is invoked for `cast_shorthand`
 * *THEN* the resolver MUST signal an artifact-invalid failure naming both the found and the declared script name
 * *AND* the resolver MUST NOT return usable artifact text
 
@@ -99,8 +99,8 @@ package.
 
 ### Scenario: An HTTPS source is fetched and verified when the scheme is https
 
-* *GIVEN* a pinned GitHub raw source, reachable from the cluster, whose index lists `cast-shorthand` version 1 with a matching `sha256`
-* *WHEN* the resolver is invoked with the `https://` source and module `cast-shorthand`
+* *GIVEN* a pinned GitHub raw source, reachable from the cluster, whose index lists `cast_shorthand` version 1 with a matching `sha256`
+* *WHEN* the resolver is invoked with the `https://` source and module `cast_shorthand`
 * *THEN* the resolver MUST fetch `registry/index.json` and the artifact over HTTPS with no settings toggle consulted
 * *AND* the resolver MUST verify the artifact `sha256` and, on a match, return the artifact text and metadata
 
@@ -120,10 +120,17 @@ package.
 
 ### Scenario: The latest version is selected when the index lists several
 
-* *GIVEN* a source whose index lists `cast-shorthand` versions 1 and 2
-* *WHEN* the resolver is invoked for `cast-shorthand` with no version pin
+* *GIVEN* a source whose index lists `cast_shorthand` versions 1 and 2
+* *WHEN* the resolver is invoked for `cast_shorthand` with no version pin
 * *THEN* the resolver MUST select the highest version (version 2)
 * *AND* the returned `script_name` MUST carry the `_V2` suffix
+
+### Scenario: A module name is matched case-insensitively
+
+* *GIVEN* a source whose index lists `cast_shorthand`
+* *WHEN* the resolver is invoked with the name in any case (for example `CAST_SHORTHAND`, as the sugar emits after folding an unquoted name)
+* *THEN* the resolver MUST resolve the same entry — module-name matching is case-insensitive
+* *AND* a library is expected to carry no two names differing only by case
 
 ### Scenario: An artifact larger than a single EMITS value is chunked in order
 

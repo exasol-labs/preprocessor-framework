@@ -624,10 +624,10 @@ Two equivalent forms — a direct script call, or the `PREPROC` sugar
 
 ```sql
 -- Direct script call:
-EXECUTE SCRIPT PREPROC.MODULE_INSTALL('bucketfs:PREPROC_BFS/preproc-lib-0.1.0.tar.gz', 'cast-shorthand', 'ROLE:ANALYSTS');
+EXECUTE SCRIPT PREPROC.MODULE_INSTALL('bucketfs:PREPROC_BFS/preproc-lib-0.1.0.tar.gz', 'cast_shorthand', 'ROLE:ANALYSTS');
 
 -- Sugar:
-PREPROC INSTALL MODULE "cast-shorthand" FROM 'bucketfs:PREPROC_BFS/preproc-lib-0.1.0.tar.gz' FOR ROLE ANALYSTS;
+PREPROC INSTALL MODULE cast_shorthand FROM 'bucketfs:PREPROC_BFS/preproc-lib-0.1.0.tar.gz' FOR ROLE ANALYSTS;
 ```
 
 The third argument is a `TYPE:value` scope (`TYPE` ∈ `ROLE` | `USER`), the
@@ -636,14 +636,15 @@ same shape the sugar's `FOR ROLE|USER` clause folds into. Scope targets rule
 not install permission; install permission is the `PREPROC_ADMIN` boundary
 described below, independent of scope.
 
-**Quoting in the sugar form follows Exasol identifier rules.** The module name
-is an object-name identifier, so an unquoted name folds to UPPER CASE; a
-lowercase registry key such as `cast-shorthand` must therefore be
-double-quoted (`"cast-shorthand"`) to be read verbatim. The `FOR ROLE|USER`
-value is a role/user name, which Exasol always upper-cases regardless of
-quoting — `FOR ROLE dba`, `FOR ROLE DBA`, and `FOR ROLE "dba"` all target the
-`DBA` role. (The direct `EXECUTE SCRIPT` form takes plain string literals and
-does no folding — pass the exact registry key and scope you mean.)
+**The sugar form follows Exasol identifier rules.** Module names are
+identifier-safe (letters, digits, underscores — no hyphens, enforced by the
+module contract) and matched case-insensitively, so you write them **unquoted**
+in any case — `cast_shorthand`, `CAST_SHORTHAND`, or `"cast_shorthand"` all
+resolve the same module. The `FOR ROLE|USER` value is a role/user name, which
+Exasol always upper-cases regardless of quoting — `FOR ROLE dba`,
+`FOR ROLE DBA`, and `FOR ROLE "dba"` all target the `DBA` role. (The direct
+`EXECUTE SCRIPT` form takes plain string literals and does no folding — pass
+the exact registry key and scope you mean.)
 
 `MODULE_INSTALL` returns a result row reporting the outcome:
 

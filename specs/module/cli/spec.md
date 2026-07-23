@@ -57,15 +57,15 @@ the CLI, never in the database (ADR-006/007).
 
 ### Scenario: `search` filters registry entries by term
 
-* *GIVEN* a registry checkout containing `cast-shorthand` and `trailing-comma`
+* *GIVEN* a registry checkout containing `cast_shorthand` and `trailing_comma`
 * *WHEN* the operator runs `preproc module search cast --registry <path>`
-* *THEN* the command MUST print `cast-shorthand`
-* *AND* the command MUST NOT print `trailing-comma`
+* *THEN* the command MUST print `cast_shorthand`
+* *AND* the command MUST NOT print `trailing_comma`
 
 ### Scenario: `add` deploys a library-deployed module and registers its rule
 
-* *GIVEN* an installed framework and a registry entry `cast-shorthand` with `deploy_mode = "library-deployed"` and a valid `sha256`
-* *WHEN* the operator runs `preproc module add cast-shorthand`
+* *GIVEN* an installed framework and a registry entry `cast_shorthand` with `deploy_mode = "library-deployed"` and a valid `sha256`
+* *WHEN* the operator runs `preproc module add cast_shorthand`
 * *THEN* the CLI MUST deploy `PREPROC_RT.CAST_SHORTHAND_V1`
 * *AND* the CLI MUST register the TRANSLATE rule at the module's suggested scope
 * *AND* the CLI MUST write a `PREPROC.MODULES` provenance row for the deployed version
@@ -87,8 +87,8 @@ the CLI, never in the database (ADR-006/007).
 
 ### Scenario: `bundle` emits a self-contained offline artifact with no database connection
 
-* *GIVEN* a registry checkout with `cast-shorthand` and `trailing-comma`
-* *WHEN* the operator runs `preproc module bundle cast-shorthand trailing-comma --output offline_modules.sql --registry <path>`
+* *GIVEN* a registry checkout with `cast_shorthand` and `trailing_comma`
+* *WHEN* the operator runs `preproc module bundle cast_shorthand trailing_comma --output offline_modules.sql --registry <path>`
 * *THEN* the command MUST write one `.sql` file containing both modules' `CREATE OR REPLACE` artifacts and their rule registrations
 * *AND* the command MUST exit 0 without attempting a database connection
 * *AND* the file MUST use the `--/` … `/` script-block delimiters so the Lua bodies' semicolons are not treated as terminators
@@ -102,22 +102,22 @@ the CLI, never in the database (ADR-006/007).
 
 ### Scenario: `validate` smoke-tests a conformant module against a scratch deploy
 
-* *GIVEN* an installed framework and a conformant `cast-shorthand` module
-* *WHEN* the operator runs `preproc module validate cast-shorthand` with a database configured
+* *GIVEN* an installed framework and a conformant `cast_shorthand` module
+* *WHEN* the operator runs `preproc module validate cast_shorthand` with a database configured
 * *THEN* the CLI MUST deploy the artifact to a scratch script, import it, and invoke the entry function
 * *AND* the CLI MUST assert the return honours the phase contract
 * *AND* the CLI MUST drop the scratch script afterward
 
 ### Scenario: `sync` is idempotent — re-running an unchanged desired file changes nothing
 
-* *GIVEN* a desired-state file listing `cast-shorthand@1` at a ROLE scope, already synced once
+* *GIVEN* a desired-state file listing `cast_shorthand@1` at a ROLE scope, already synced once
 * *WHEN* the operator runs `preproc module sync <file>` a second time
 * *THEN* the command MUST report no changes
 * *AND* `PREPROC.CONFIG` MUST contain exactly one rule for that module and scope
 
 ### Scenario: `sync` retires a module dropped from the desired file
 
-* *GIVEN* a database synced with `cast-shorthand@1` and a new desired file that omits it
+* *GIVEN* a database synced with `cast_shorthand@1` and a new desired file that omits it
 * *WHEN* the operator runs `preproc module sync <file>`
 * *THEN* the CLI MUST remove the module's rule and mark its provenance row retired
 * *AND* the CLI MUST perform a single refresh for the whole convergence
@@ -125,6 +125,6 @@ the CLI, never in the database (ADR-006/007).
 ### Scenario: A mutating subcommand exits with the missing-environment code when unconfigured
 
 * *GIVEN* no Exasol connection environment variables are set
-* *WHEN* the operator runs `preproc module add cast-shorthand`
+* *WHEN* the operator runs `preproc module add cast_shorthand`
 * *THEN* the command MUST exit with the missing-environment exit code
 * *AND* the command MUST name the missing variables

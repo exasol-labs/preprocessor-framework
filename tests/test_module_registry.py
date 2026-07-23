@@ -93,7 +93,7 @@ def _write_external_entry(
     version: int = 3,
     phase: str = "EXPAND",
     deploy_mode: str = "self-deployed",
-    repo: str = "exasol/semantic-views",
+    repo: str = "exasol/semantic_views",
     ref: str = "v3.0.0",
 ) -> None:
     external_dir = tmp_path / "registry" / "external"
@@ -127,9 +127,9 @@ def _write_external_entry(
 
 def test_index_deterministic(tmp_path):
     """Re-running the generator on the same inputs produces byte-identical JSON."""
-    _write_library_module(tmp_path, "trailing-comma", version=1)
-    _write_library_module(tmp_path, "cast-shorthand", version=1)
-    _write_external_entry(tmp_path, "semantic-views")
+    _write_library_module(tmp_path, "trailing_comma", version=1)
+    _write_library_module(tmp_path, "cast_shorthand", version=1)
+    _write_external_entry(tmp_path, "semantic_views")
 
     first = render_index(generate_index(tmp_path, repo="exasol-labs/preprocessor-library"))
     second = render_index(generate_index(tmp_path, repo="exasol-labs/preprocessor-library"))
@@ -139,56 +139,56 @@ def test_index_deterministic(tmp_path):
     index = generate_index(tmp_path, repo="exasol-labs/preprocessor-library")
     assert len(index.entries) == 3
     assert [entry.name for entry in index.entries] == [
-        "cast-shorthand",
-        "semantic-views",
-        "trailing-comma",
+        "cast_shorthand",
+        "semantic_views",
+        "trailing_comma",
     ]
 
 
 def test_index_autoindex_library_module(tmp_path):
-    """A modules/cast-shorthand/module.toml is auto-indexed with the manifest's fields."""
-    _write_library_module(tmp_path, "cast-shorthand", version=1)
+    """A modules/cast_shorthand/module.toml is auto-indexed with the manifest's fields."""
+    _write_library_module(tmp_path, "cast_shorthand", version=1)
 
     index = generate_index(
-        tmp_path, repo="exasol-labs/preprocessor-library", ref="cast-shorthand-v1"
+        tmp_path, repo="exasol-labs/preprocessor-library", ref="cast_shorthand-v1"
     )
 
     assert len(index.entries) == 1
     entry = index.entries[0]
-    assert entry.name == "cast-shorthand"
+    assert entry.name == "cast_shorthand"
     assert entry.version == 1
     assert entry.phase == "TRANSLATE"
     assert entry.script_name == "PREPROC_RT.CAST_SHORTHAND_V1"
     assert entry.function == "cast_shorthand"
     assert entry.deploy_mode == "library-deployed"
     assert entry.sha256 is not None
-    assert entry.artifact_path == "modules/cast-shorthand/cast-shorthand_v1.sql"
+    assert entry.artifact_path == "modules/cast_shorthand/cast_shorthand_v1.sql"
     assert entry.source == {
         "repo": "exasol-labs/preprocessor-library",
-        "ref": "cast-shorthand-v1",
+        "ref": "cast_shorthand-v1",
     }
 
 
 def test_index_merge_external_entry(tmp_path):
     """A curated registry/external/<name>.toml block is merged alongside library entries."""
-    _write_library_module(tmp_path, "cast-shorthand", version=1)
-    _write_external_entry(tmp_path, "semantic-views", repo="exasol/semantic-views", ref="v3.0.0")
+    _write_library_module(tmp_path, "cast_shorthand", version=1)
+    _write_external_entry(tmp_path, "semantic_views", repo="exasol/semantic_views", ref="v3.0.0")
 
     index = generate_index(tmp_path, repo="exasol-labs/preprocessor-library")
 
     names = {entry.name for entry in index.entries}
-    assert names == {"cast-shorthand", "semantic-views"}
+    assert names == {"cast_shorthand", "semantic_views"}
 
-    external = next(entry for entry in index.entries if entry.name == "semantic-views")
+    external = next(entry for entry in index.entries if entry.name == "semantic_views")
     assert external.deploy_mode == "self-deployed"
-    assert external.source == {"repo": "exasol/semantic-views", "ref": "v3.0.0"}
+    assert external.source == {"repo": "exasol/semantic_views", "ref": "v3.0.0"}
     assert external.artifact_path is None
 
 
 def test_index_generate_rejects_sha_mismatch(tmp_path):
     """Index generation fails loudly when a manifest's sha256 disagrees with its artifact."""
-    _write_library_module(tmp_path, "cast-shorthand", version=1)
-    artifact_path = tmp_path / "modules" / "cast-shorthand" / "cast-shorthand_v1.sql"
+    _write_library_module(tmp_path, "cast_shorthand", version=1)
+    artifact_path = tmp_path / "modules" / "cast_shorthand" / "cast_shorthand_v1.sql"
     artifact_path.write_text(artifact_path.read_text(encoding="utf-8") + "\n-- tampered\n")
 
     with pytest.raises(RegistryError):
@@ -202,8 +202,8 @@ def test_index_generate_rejects_sha_mismatch(tmp_path):
 
 def test_registry_read_local_offline(tmp_path, monkeypatch):
     """--registry <path> loads every entry from the local index.json, with no network fetch."""
-    _write_library_module(tmp_path, "cast-shorthand", version=1)
-    _write_library_module(tmp_path, "trailing-comma", version=1)
+    _write_library_module(tmp_path, "cast_shorthand", version=1)
+    _write_library_module(tmp_path, "trailing_comma", version=1)
     index = generate_index(tmp_path, repo="exasol-labs/preprocessor-library")
     registry_dir = tmp_path / "registry"
     registry_dir.mkdir(exist_ok=True)
@@ -216,12 +216,12 @@ def test_registry_read_local_offline(tmp_path, monkeypatch):
 
     loaded = read_registry(str(tmp_path))
 
-    assert {entry.name for entry in loaded.entries} == {"cast-shorthand", "trailing-comma"}
+    assert {entry.name for entry in loaded.entries} == {"cast_shorthand", "trailing_comma"}
 
 
 def test_registry_read_online_injected_reader(tmp_path):
     """An https:// registry source is read through the injected reader (no real fetch)."""
-    _write_library_module(tmp_path, "cast-shorthand", version=1)
+    _write_library_module(tmp_path, "cast_shorthand", version=1)
     index = generate_index(tmp_path, repo="exasol-labs/preprocessor-library")
     payload = render_index(index).encode("utf-8")
 
@@ -239,7 +239,7 @@ def test_registry_read_online_injected_reader(tmp_path):
     assert calls == [
         "https://raw.githubusercontent.com/exasol-labs/preprocessor-library/main/registry/index.json"
     ]
-    assert [entry.name for entry in loaded.entries] == ["cast-shorthand"]
+    assert [entry.name for entry in loaded.entries] == ["cast_shorthand"]
 
 
 def test_registry_read_online_rejects_plain_http():
@@ -254,11 +254,11 @@ def test_registry_read_online_rejects_plain_http():
 
 
 def _cast_shorthand_entry(tmp_path) -> tuple[RegistryEntry, bytes]:
-    _write_library_module(tmp_path, "cast-shorthand", version=1)
+    _write_library_module(tmp_path, "cast_shorthand", version=1)
     index = generate_index(tmp_path, repo="exasol-labs/preprocessor-library")
     entry = index.entries[0]
     artifact_bytes = (
-        tmp_path / "modules" / "cast-shorthand" / "cast-shorthand_v1.sql"
+        tmp_path / "modules" / "cast_shorthand" / "cast_shorthand_v1.sql"
     ).read_bytes()
     return entry, artifact_bytes
 
@@ -284,7 +284,7 @@ def test_registry_sha_mismatch_aborts(tmp_path):
 
 def test_index_sync_check_detects_drift(tmp_path):
     """A committed index.json that predates a module.toml edit is reported as drifted."""
-    _write_library_module(tmp_path, "cast-shorthand", version=1)
+    _write_library_module(tmp_path, "cast_shorthand", version=1)
     index = generate_index(tmp_path, repo="exasol-labs/preprocessor-library")
     registry_dir = tmp_path / "registry"
     registry_dir.mkdir(exist_ok=True)
@@ -292,7 +292,7 @@ def test_index_sync_check_detects_drift(tmp_path):
 
     assert index_drift(tmp_path, repo="exasol-labs/preprocessor-library") == []
 
-    _write_library_module(tmp_path, "trailing-comma", version=1)
+    _write_library_module(tmp_path, "trailing_comma", version=1)
 
     drift = index_drift(tmp_path, repo="exasol-labs/preprocessor-library")
     assert drift != []
@@ -300,6 +300,6 @@ def test_index_sync_check_detects_drift(tmp_path):
 
 def test_index_sync_check_missing_committed_index(tmp_path):
     """A missing registry/index.json is reported as drift rather than raising."""
-    _write_library_module(tmp_path, "cast-shorthand", version=1)
+    _write_library_module(tmp_path, "cast_shorthand", version=1)
     drift = index_drift(tmp_path, repo="exasol-labs/preprocessor-library")
     assert drift != []

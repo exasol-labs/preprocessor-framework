@@ -43,7 +43,7 @@ pytestmark = pytest.mark.integration
 
 _RICH_CONNECTION = "PREPROC_TEST_BFS_RICH"
 _RICH_BUCKET_PATH = "preproc-lib-rich-0.1.0.tar.gz"
-_BIG_ARTIFACT_TEXT = default_artifact_text("big-module", 1, "big_module") + (
+_BIG_ARTIFACT_TEXT = default_artifact_text("big_module", 1, "big_module") + (
     "-- " + "x" * (EMITS_CHUNK_CHARS + 500)
 )
 
@@ -75,19 +75,19 @@ def bucketfs_rich_source(resolver_deployed):
         )
 
     specs = [
-        library_module("cast-shorthand", version=1, function="cast_shorthand"),
-        library_module("cast-shorthand", version=2, function="cast_shorthand"),
+        library_module("cast_shorthand", version=1, function="cast_shorthand"),
+        library_module("cast_shorthand", version=2, function="cast_shorthand"),
         library_module(
-            "big-module", version=1, function="big_module", artifact_text=_BIG_ARTIFACT_TEXT
+            "big_module", version=1, function="big_module", artifact_text=_BIG_ARTIFACT_TEXT
         ),
-        library_module("broken-module", version=1, function="broken_module"),
+        library_module("broken_module", version=1, function="broken_module"),
         self_deployed_module(
-            "semantic-views", version=3, phase="EXPAND", source=("exasol/semantic-views", "v3.0.0")
+            "semantic_views", version=3, phase="EXPAND", source=("exasol/semantic_views", "v3.0.0")
         ),
     ]
     work = Path(tempfile.mkdtemp(prefix="preproc-rich-"))
     build_library_tarball(
-        work / _RICH_BUCKET_PATH, specs, tamper={"broken-module": b"\n-- tampered\n"}
+        work / _RICH_BUCKET_PATH, specs, tamper={"broken_module": b"\n-- tampered\n"}
     )
     try:
         bucketfs_put(config, _RICH_BUCKET_PATH, (work / _RICH_BUCKET_PATH).read_bytes())
@@ -98,7 +98,7 @@ def bucketfs_rich_source(resolver_deployed):
     connection.execute(f"GRANT ACCESS ON CONNECTION {_RICH_CONNECTION} TO PREPROC_ADMIN")
     source = f"bucketfs:{_RICH_CONNECTION}/{_RICH_BUCKET_PATH}"
 
-    if not wait_until_ok(connection, source, "cast-shorthand"):
+    if not wait_until_ok(connection, source, "cast_shorthand"):
         _drop(connection, config)
         pytest.skip("BucketFS did not extract/replicate the rich release to the UDF mount in time")
 
@@ -121,7 +121,7 @@ def _drop(connection, config):
 
 def test_resolver_bucketfs_library_deployed(bucketfs_library_source, resolver_deployed):
     """A library-deployed module resolves from the BucketFS release with no egress."""
-    row = _one(resolve_rows(resolver_deployed, bucketfs_library_source.source, "cast-shorthand"))
+    row = _one(resolve_rows(resolver_deployed, bucketfs_library_source.source, "cast_shorthand"))
 
     assert row["status"] == "OK"
     assert row["script_name"] == "PREPROC_RT.CAST_SHORTHAND_V1"
@@ -129,12 +129,12 @@ def test_resolver_bucketfs_library_deployed(bucketfs_library_source, resolver_de
     assert row["deploy_mode"] == "library-deployed"
     assert row["function_name"] == "cast_shorthand"
     assert row["chunk_count"] == 1
-    assert row["artifact_chunk"] == default_artifact_text("cast-shorthand", 1, "cast_shorthand")
+    assert row["artifact_chunk"] == default_artifact_text("cast_shorthand", 1, "cast_shorthand")
 
 
 def test_resolver_sha256_mismatch_fails(bucketfs_rich_source, resolver_deployed):
     """A tampered artifact is a hard failure with no usable artifact text."""
-    row = _one(resolve_rows(resolver_deployed, bucketfs_rich_source.source, "broken-module"))
+    row = _one(resolve_rows(resolver_deployed, bucketfs_rich_source.source, "broken_module"))
 
     assert row["status"] == "ERROR"
     assert row["error_kind"] == "sha256_mismatch"
@@ -143,7 +143,7 @@ def test_resolver_sha256_mismatch_fails(bucketfs_rich_source, resolver_deployed)
 
 def test_resolver_self_deployed_metadata_only(bucketfs_rich_source, resolver_deployed):
     """A self-deployed entry returns metadata with a null artifact body."""
-    row = _one(resolve_rows(resolver_deployed, bucketfs_rich_source.source, "semantic-views"))
+    row = _one(resolve_rows(resolver_deployed, bucketfs_rich_source.source, "semantic_views"))
 
     assert row["status"] == "OK"
     assert row["deploy_mode"] == "self-deployed"
@@ -156,7 +156,7 @@ def test_resolver_https_fetches_and_verifies(resolver_deployed):
     """An https source is fetched + sha-verified when the cluster can reach the host.
 
     Needs a reachable base URL serving ``registry/index.json`` (listing
-    ``cast-shorthand`` v1 with a matching sha256) and the artifact; supply it via
+    ``cast_shorthand`` v1 with a matching sha256) and the artifact; supply it via
     ``PREPROC_TEST_HTTPS_BASE``.
     """
     base = os.environ.get("PREPROC_TEST_HTTPS_BASE")
@@ -164,7 +164,7 @@ def test_resolver_https_fetches_and_verifies(resolver_deployed):
         pytest.skip("set PREPROC_TEST_HTTPS_BASE to a reachable registry base URL to run this")
     index_url = base.rstrip("/") + "/registry/index.json"
 
-    row = _one(resolve_rows(resolver_deployed, index_url, "cast-shorthand"))
+    row = _one(resolve_rows(resolver_deployed, index_url, "cast_shorthand"))
 
     assert row["status"] == "OK"
     assert row["script_name"] == "PREPROC_RT.CAST_SHORTHAND_V1"
@@ -195,7 +195,7 @@ def test_resolver_https_no_egress_network_error(resolver_deployed):
     source = "https://unreachable-preproc.invalid/registry/index.json"
 
     try:
-        rows = resolve_rows(resolver_deployed, source, "cast-shorthand")
+        rows = resolve_rows(resolver_deployed, source, "cast_shorthand")
     except pyexasol.ExaError:
         # docker-db path: the unreachable-host fetch crashed the UDF VM. The
         # database failed the call rather than returning a usable artifact — the
@@ -222,7 +222,7 @@ def test_resolver_module_not_found(bucketfs_library_source, resolver_deployed):
 
 def test_resolver_selects_latest_version(bucketfs_rich_source, resolver_deployed):
     """With versions 1 and 2 listed, the highest version is selected (_V2 suffix)."""
-    row = _one(resolve_rows(resolver_deployed, bucketfs_rich_source.source, "cast-shorthand"))
+    row = _one(resolve_rows(resolver_deployed, bucketfs_rich_source.source, "cast_shorthand"))
 
     assert row["status"] == "OK"
     assert row["version"] == 2
@@ -231,7 +231,7 @@ def test_resolver_selects_latest_version(bucketfs_rich_source, resolver_deployed
 
 def test_resolver_chunks_large_artifact(bucketfs_rich_source, resolver_deployed):
     """An artifact exceeding one EMITS value is chunked; reassembly matches the artifact."""
-    rows = resolve_rows(resolver_deployed, bucketfs_rich_source.source, "big-module")
+    rows = resolve_rows(resolver_deployed, bucketfs_rich_source.source, "big_module")
 
     assert all(row["status"] == "OK" for row in rows)
     assert len(rows) >= 2
@@ -281,7 +281,7 @@ def test_resolver_admin_only(resolver_deployed):
         with pytest.raises(Exception):
             other.execute(
                 "SELECT PREPROC.MODULE_RESOLVER_V1("
-                "'bucketfs:PREPROC_TEST_BFS/preproc-lib-0.1.0.tar.gz', 'cast-shorthand')"
+                "'bucketfs:PREPROC_TEST_BFS/preproc-lib-0.1.0.tar.gz', 'cast_shorthand')"
             )
     finally:
         if other is not None:
