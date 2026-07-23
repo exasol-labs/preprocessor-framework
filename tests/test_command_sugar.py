@@ -179,6 +179,25 @@ def test_add_rule_for_user_expands(sugar_env):
 
 
 @pytest.mark.integration
+def test_add_rule_folds_identifiers_but_keeps_function_literal(sugar_env):
+    """ADD RULE folds SQL-identifier values to Exasol case rules but keeps FUNCTION literal.
+
+    Unquoted role/phase/script fold to UPPER (role/user always upper), while the
+    FUNCTION name is a case-sensitive Lua symbol carried through verbatim — so a
+    mixed-case function like ``tagRows`` is preserved, not upper-cased.
+    """
+    result = _expand(
+        sugar_env,
+        "PREPROC ADD RULE FOR ROLE analysts PHASE expand "
+        "SCRIPT preproc_rt.demo_audit_v1 FUNCTION tagRows",
+    )
+    assert result == (
+        "EXECUTE SCRIPT PREPROC.RULE_ADD("
+        "'ROLE', 'ANALYSTS', 'EXPAND', 'PREPROC_RT.DEMO_AUDIT_V1', 'tagRows', NULL)"
+    )
+
+
+@pytest.mark.integration
 def test_add_rule_sugar_output_is_executable(sugar_env):
     """The ADD RULE expansion is a RUNNABLE EXECUTE SCRIPT call, not just a string.
 
@@ -396,13 +415,15 @@ def test_malformed_add_rule_declined(sugar_env):
 def test_install_module_expands_to_module_install(sugar_env):
     """INSTALL MODULE … FROM '<source>' FOR ROLE … expands to a single MODULE_INSTALL call.
 
-    The FROM source must be carried single-quoted exactly as written (a
-    ``bucketfs:`` source survives intact), and the FOR clause folds into a single
-    ``TYPE:value`` scope string with TYPE upper-cased.
+    The FROM source is carried single-quoted exactly as written (a ``bucketfs:``
+    source survives intact). The module name is an object-name identifier, so the
+    lowercase registry key ``cast-shorthand`` is DOUBLE-QUOTED to keep its case;
+    the FOR clause folds into a ``TYPE:value`` scope with TYPE and the role name
+    both upper-cased.
     """
     result = _expand(
         sugar_env,
-        "PREPROC INSTALL MODULE cast-shorthand FROM "
+        'PREPROC INSTALL MODULE "cast-shorthand" FROM '
         "'bucketfs:PREPROC_BFS/preproc-lib-0.1.0.tar.gz' FOR ROLE PREPROC_ADMIN",
     )
     assert result == (
@@ -412,12 +433,35 @@ def test_install_module_expands_to_module_install(sugar_env):
     )
 
 
+def test_install_module_folds_identifiers_exasol_style(sugar_env):
+    """Quoting follows Exasol rules: unquoted module name folds UPPER; a "..."-quoted
+    name is verbatim; the role/user value is ALWAYS upper-cased (even quoted).
+
+    So `FOR ROLE dba`, `FOR ROLE DBA`, and `FOR ROLE "dba"` all target `DBA`, and
+    an unquoted module name folds to upper (which is why a lowercase registry key
+    must be quoted to resolve).
+    """
+    src = "'https://h/registry/index.json'"
+    # Unquoted role folds to upper; quoted module preserves its lowercase case.
+    assert _expand(
+        sugar_env, f'PREPROC INSTALL MODULE "cast-shorthand" FROM {src} FOR ROLE dba'
+    ) == (f"EXECUTE SCRIPT PREPROC.MODULE_INSTALL({src}, 'cast-shorthand', 'ROLE:DBA')")
+    # A double-quoted role is STILL upper-cased (Exasol upper-cases users/roles).
+    assert _expand(
+        sugar_env, f'PREPROC INSTALL MODULE "cast-shorthand" FROM {src} FOR ROLE "dba"'
+    ) == (f"EXECUTE SCRIPT PREPROC.MODULE_INSTALL({src}, 'cast-shorthand', 'ROLE:DBA')")
+    # An UNQUOTED module name folds to UPPER CASE (regular-identifier rule).
+    assert _expand(sugar_env, f"PREPROC INSTALL MODULE cast_mod FROM {src} FOR USER bob") == (
+        f"EXECUTE SCRIPT PREPROC.MODULE_INSTALL({src}, 'CAST_MOD', 'USER:BOB')"
+    )
+
+
 @pytest.mark.integration
 def test_install_module_for_user_threads_user_scope(sugar_env):
     """FOR USER BOB threads a 'USER:BOB' scope argument, TYPE matched case-insensitively."""
     result = _expand(
         sugar_env,
-        "PREPROC INSTALL MODULE cast-shorthand FROM "
+        'PREPROC INSTALL MODULE "cast-shorthand" FROM '
         "'bucketfs:PREPROC_BFS/preproc-lib-0.1.0.tar.gz' FOR USER BOB",
     )
     assert result == (
@@ -427,7 +471,7 @@ def test_install_module_for_user_threads_user_scope(sugar_env):
     )
     result_lower = _expand(
         sugar_env,
-        "preproc install module cast-shorthand from "
+        'preproc install module "cast-shorthand" from '
         "'bucketfs:PREPROC_BFS/preproc-lib-0.1.0.tar.gz' for user BOB",
     )
     assert result_lower == result

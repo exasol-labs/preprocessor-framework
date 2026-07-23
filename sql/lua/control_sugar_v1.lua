@@ -118,11 +118,27 @@
 --   EXECUTE SCRIPT call. Non-mutating commands (LIST RULES, REFRESH, STATUS,
 --   SET SELF_DISABLE) do not take the suffix and never receive the extra arg.
 --
---   Keyword case-insensitivity vs value case-preservation: PREPROC keywords are
---   matched case-insensitively, but captured VALUES (role/user names, script
---   names, function names, modes) are data destined for the emitted SQL and MUST
---   preserve their original case. This module therefore upper-cases only the
---   keyword tokens it dispatches on and copies value tokens through verbatim.
+-- -----------------------------------------------------------------------------
+-- 10. Quoting semantics  —  captured values follow Exasol identifier rules
+-- -----------------------------------------------------------------------------
+--   PREPROC keywords (PREPROC, ADD, RULE, FOR, PHASE, NOREFRESH, …) are always
+--   matched case-insensitively. Captured VALUES are folded to match how Exasol
+--   itself resolves the names they stand for, so the sugar behaves like the SQL
+--   it resembles:
+--     * Object-name identifiers (module name, script name, phase) follow regular
+--       vs delimited identifier rules: an UNQUOTED token folds to UPPER CASE
+--       (Exasol stores regular identifiers upper-cased), while a "..."-delimited
+--       token is taken verbatim (embedded "" unescaped to "). A lowercase
+--       registry key must therefore be quoted: INSTALL MODULE "cast-shorthand".
+--     * Role/user names (the FOR ROLE|USER value) are ALWAYS upper-cased, even
+--       when delimited — Exasol upper-cases users and roles regardless of
+--       quoting — so FOR ROLE dba, DBA, and "dba" all target DBA.
+--     * The FUNCTION name is a case-SENSITIVE Lua symbol, not a SQL identifier,
+--       so it is taken literally (quotes stripped if present, case never
+--       changed). The SET MODE value and boolean/rule-id operands are likewise
+--       passed through verbatim — they are not identifiers.
+--   The tokenizer keeps a "..." or '...' span (including doubled-quote escapes)
+--   as a single token, so a quoted identifier or source survives whitespace.
 -- =============================================================================
 
 -- luacheck: globals expand
@@ -142,13 +158,92 @@ local CONTROL = {
     module_catalog = "PREPROC.MODULE_CATALOG",
 }
 
--- Split a string into whitespace-delimited tokens, preserving original case.
+-- Split a string into tokens on whitespace, preserving original case, but keep a
+-- "double-quoted" or 'single-quoted' span as ONE token even when it contains
+-- spaces. A doubled quote inside a span ("" or '') is an escaped quote and does
+-- NOT close it (SQL delimited-identifier / string-literal escaping). The
+-- surrounding quotes are kept in the token so the folding helpers below can tell
+-- a delimited identifier from a regular one. Value case is preserved here;
+-- Exasol identifier folding happens per position at capture time.
 local function tokenize(text)
     local tokens = {}
-    for word in string.gmatch(text, "%S+") do
-        tokens[#tokens + 1] = word
+    local i = 1
+    local n = #text
+    while i <= n do
+        local c = string.sub(text, i, i)
+        if string.match(c, "%s") then
+            i = i + 1
+        elseif c == '"' or c == "'" then
+            local j = i + 1
+            while j <= n do
+                if string.sub(text, j, j) == c then
+                    if string.sub(text, j + 1, j + 1) == c then
+                        j = j + 2 -- escaped quote: stay inside the span
+                    else
+                        break -- closing quote
+                    end
+                else
+                    j = j + 1
+                end
+            end
+            local last = (j <= n) and j or n -- include the closing quote, or run to end if unterminated
+            tokens[#tokens + 1] = string.sub(text, i, last)
+            i = last + 1
+        else
+            local j = i
+            while j <= n do
+                local cj = string.sub(text, j, j)
+                if string.match(cj, "%s") or cj == '"' or cj == "'" then
+                    break
+                end
+                j = j + 1
+            end
+            tokens[#tokens + 1] = string.sub(text, i, j - 1)
+            i = j
+        end
     end
     return tokens
+end
+
+-- Return (inner, was_delimited) for a token: if it is a "..."-delimited
+-- identifier, strip the surrounding double quotes and unescape any doubled quote
+-- ("" -> "); otherwise return the token unchanged with false.
+local function undelimit(token)
+    if #token >= 2 and string.sub(token, 1, 1) == '"' and string.sub(token, -1) == '"' then
+        local inner = string.gsub(string.sub(token, 2, -2), '""', '"')
+        return inner, true
+    end
+    return token, false
+end
+
+-- Exasol identifier folding for object-name positions (module name, script name,
+-- phase): a regular (unquoted) identifier is stored upper-cased, while a
+-- delimited "..." identifier keeps its exact case. So an unquoted token folds to
+-- UPPER CASE and a quoted one is taken verbatim.
+local function fold_identifier(token)
+    local inner, delimited = undelimit(token)
+    if delimited then
+        return inner
+    end
+    return string.upper(inner)
+end
+
+-- Role/user name folding: Exasol upper-cases role and user names even when they
+-- are delimited ("... case-sensitive ... except in users and roles"), so a scope
+-- value is ALWAYS upper-cased whether written dba, DBA, or "dba". This is what
+-- makes FOR ROLE dba target the DBA role rather than a non-existent "dba".
+local function fold_principal(token)
+    local inner = undelimit(token)
+    return string.upper(inner)
+end
+
+-- A Lua function symbol is code, not a SQL identifier: it is case-SENSITIVE and
+-- must be taken literally. Strip surrounding double quotes if the caller
+-- delimited it (to allow characters a regular identifier disallows) but NEVER
+-- change its case.
+local function literal_symbol(token)
+    local inner = undelimit(token)
+    return inner
 end
 
 -- Single-quote a value for use as a string literal in the emitted EXECUTE SCRIPT
@@ -246,10 +341,14 @@ function expand(sqltext)
             or upper_word(10) ~= "FUNCTION" then
             return nil
         end
-        local scope_value = word(5)
-        local phase = word(7)
-        local script_name = word(9)
-        local function_name = word(11)
+        -- Exasol identifier folding: role/user name and the schema-qualified
+        -- script name follow SQL identifier rules (unquoted -> UPPER, "..." ->
+        -- verbatim; role/user always UPPER); phase is an enum folded the same
+        -- way; the FUNCTION is a case-sensitive Lua symbol taken literally.
+        local scope_value = fold_principal(word(5))
+        local phase = fold_identifier(word(7))
+        local script_name = fold_identifier(word(9))
+        local function_name = literal_symbol(word(11))
         local args = {
             quote(scope_type),
             quote(scope_value),
@@ -383,8 +482,12 @@ function expand(sqltext)
         if not source_literal:match("^'.*'$") then
             return nil
         end
-        local module_name = word(3)
-        local scope_value = word(8)
+        -- The module name is an object-name identifier (unquoted -> UPPER,
+        -- "..." -> verbatim), so a lowercase registry key like cast-shorthand
+        -- must be quoted: INSTALL MODULE "cast-shorthand". The scope value is a
+        -- role/user name, always upper-cased.
+        local module_name = fold_identifier(word(3))
+        local scope_value = fold_principal(word(8))
         local args = {
             source_literal,
             quote(module_name),
