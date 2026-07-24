@@ -12,6 +12,7 @@ Index schema (``registry/index.json``)
 
     {
       "schema_version": 1,
+      "library_version": "0.2.0",
       "modules": [
         {
           "name": "cast_shorthand",
@@ -30,8 +31,11 @@ Index schema (``registry/index.json``)
       ]
     }
 
-``modules`` is sorted by ``(name, version)`` so the file is byte-stable across
-regenerations of the same inputs. ``sha256`` and ``artifact_path`` are ``null``
+``library_version`` is optional (omitted entirely when the generator is not
+given one) and records the library release the index was built from, so an
+install resolved through a mutable ``latest`` source can be audited back to a
+concrete version. ``modules`` is sorted by ``(name, version)`` so the file is
+byte-stable across regenerations of the same inputs. ``sha256`` and ``artifact_path`` are ``null``
 for ``self-deployed`` entries (no artifact is fetched through the registry for
 those — the module's own installer deploys it; the CLI only registers the
 rule). ``artifact_path`` is the artifact's path relative to its own
@@ -165,16 +169,27 @@ class RegistryEntry:
 
 @dataclass(frozen=True)
 class RegistryIndex:
-    """The full federated index: a schema version plus every module entry."""
+    """The full federated index: a schema version plus every module entry.
+
+    ``library_version`` is the optional release version of the library this
+    index was generated from (e.g. ``"0.2.0"``, read from the library's
+    ``VERSION``). When present it lets an install performed against a mutable
+    ``latest`` source record which concrete release it actually resolved,
+    independent of the (mutable) tag in the URL. It is omitted from the
+    serialized JSON when ``None`` so indexes that predate the field stay
+    byte-identical.
+    """
 
     schema_version: int
     entries: tuple[RegistryEntry, ...]
+    library_version: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
-            "schema_version": self.schema_version,
-            "modules": [entry.to_dict() for entry in self.entries],
-        }
+        result: dict[str, Any] = {"schema_version": self.schema_version}
+        if self.library_version is not None:
+            result["library_version"] = self.library_version
+        result["modules"] = [entry.to_dict() for entry in self.entries]
+        return result
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> RegistryIndex:
@@ -186,6 +201,7 @@ class RegistryIndex:
         return cls(
             schema_version=schema_version,
             entries=tuple(RegistryEntry.from_dict(entry) for entry in modules),
+            library_version=data.get("library_version"),
         )
 
 
@@ -317,6 +333,7 @@ def generate_index(
     *,
     repo: str = DEFAULT_LIBRARY_REPO,
     ref: str = DEFAULT_LIBRARY_REF,
+    library_version: str | None = None,
 ) -> RegistryIndex:
     """Deterministically build the federated index from a library checkout.
 
@@ -325,10 +342,19 @@ def generate_index(
     keeping its own pinned source), sorted by ``(name, version)``. Running
     this twice against the same checkout produces the same ``RegistryIndex``
     (and, via ``render_index``, byte-identical JSON).
+
+    ``library_version`` (e.g. the library's ``VERSION``) is stamped as the
+    index's top-level ``library_version`` so an install resolved through a
+    mutable ``latest`` source can record the concrete release. When omitted,
+    the field is left out of the serialized index.
     """
     entries = _library_entries(library_root, repo, ref) + _external_entries(library_root)
     entries.sort(key=lambda entry: (entry.name, entry.version))
-    return RegistryIndex(schema_version=SCHEMA_VERSION, entries=tuple(entries))
+    return RegistryIndex(
+        schema_version=SCHEMA_VERSION,
+        entries=tuple(entries),
+        library_version=library_version,
+    )
 
 
 def index_drift(
@@ -336,15 +362,20 @@ def index_drift(
     *,
     repo: str = DEFAULT_LIBRARY_REPO,
     ref: str = DEFAULT_LIBRARY_REF,
+    library_version: str | None = None,
 ) -> list[str]:
     """Compare a freshly generated index against the committed ``registry/index.json``.
 
     Returns a list of human-readable drift descriptions; an empty list means
     the committed file is in sync with its sources. Intended for CI: a
-    non-empty result should fail the build.
+    non-empty result should fail the build. ``repo``/``ref``/``library_version``
+    must match what the committed index was generated with, or the comparison
+    reports (real) drift.
     """
     committed_path = library_root / "registry" / "index.json"
-    fresh_text = render_index(generate_index(library_root, repo=repo, ref=ref))
+    fresh_text = render_index(
+        generate_index(library_root, repo=repo, ref=ref, library_version=library_version)
+    )
     if not committed_path.exists():
         return ["registry/index.json is missing; run the index generator"]
     committed_text = committed_path.read_text(encoding="utf-8")

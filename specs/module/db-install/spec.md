@@ -51,7 +51,12 @@ path remains the default, fully-supported air-gap path.
      refresh suppressed; `RULE_ENSURE` validates the script exists in
      `EXA_ALL_SCRIPTS` before inserting.
   4. `EXECUTE SCRIPT PREPROC.MODULE_REGISTER(name, version, source, ref, sha256,
-     script_name, function, phase, deploy_mode)` — idempotent provenance upsert.
+     script_name, function, phase, deploy_mode, source_url, library_version)` —
+     idempotent provenance upsert. `source_url` is the effective source the
+     operator/default resolved from (revealing a mutable `latest` tag vs a pinned
+     `vX.Y.Z` vs a `bucketfs:` path) and `library_version` is the concrete library
+     release the resolved index self-declared — together the audit anchor that
+     ties a `latest` install to a fixed release.
   5. A single `EXECUTE SCRIPT PREPROC.REFRESH` — materialises `RESOLUTION` from
      `CONFIG`.
 * A self-deployed module (the resolver returns a null artifact body) SKIPS step 2
@@ -67,9 +72,11 @@ path remains the default, fully-supported air-gap path.
   version is idempotent because `RULE_ENSURE` and `MODULE_REGISTER` are both
   idempotent.
 * `MODULE_INSTALL` is `RETURNS TABLE` and reports the outcome as
-  `module | version | phase | status` (`installed` for a fresh library-deployed
-  install, `already-current` for an idempotent re-install, `registered-only` for
-  a self-deployed module).
+  `module | version | phase | status | library_version` (`installed` for a fresh
+  library-deployed install, `already-current` for an idempotent re-install,
+  `registered-only` for a self-deployed module). `library_version` echoes the
+  concrete release the resolved index declared (NULL when it carried none), so
+  the operator sees which release a `latest` install landed on.
 * An `https:` source is fetched over the network whenever the scheme is `https:`
   — there is NO settings toggle. Activation is implicit: the operator opts in by
   writing an `https://` source and by the cluster being open to the host. If the
@@ -146,7 +153,15 @@ path remains the default, fully-supported air-gap path.
 
 * *GIVEN* a successful library-deployed install
 * *WHEN* `MODULE_INSTALL` returns
-* *THEN* the script MUST return a row carrying `module`, `version`, `phase`, and `status`
+* *THEN* the script MUST return a row carrying `module`, `version`, `phase`, `status`, and `library_version`
+* *AND* `library_version` MUST echo the resolved index's release (NULL when the index declared none)
+
+### Scenario: A `latest` install records the resolved release and effective source for audit
+
+* *GIVEN* a source whose index declares a `library_version` (e.g. an index served at the mutable `latest` tag)
+* *WHEN* `MODULE_INSTALL` writes the provenance row
+* *THEN* the `PREPROC.MODULES` row MUST record `source_url` = the effective source resolved from and `library_version` = the index's declared release
+* *AND* the recorded pair MUST let a `latest` install be audited back to the concrete release even though the tag keeps moving
 
 ### Scenario: A module absent from the source is rejected before any write
 

@@ -381,7 +381,8 @@ def _deploy_admin_scripts(connection: Any, verbose: bool) -> None:
     )
     connection.execute(
         f"CREATE OR REPLACE LUA SCRIPT PREPROC.MODULE_REGISTER("
-        f"name, version, source, ref, sha256, script_name, function_name, phase, deploy_mode) "
+        f"name, version, source, ref, sha256, script_name, function_name, phase, deploy_mode, "
+        f"source_url, library_version) "
         f"RETURNS TABLE AS\n{module_register_body}"
     )
     connection.execute(

@@ -110,6 +110,7 @@ EMITS (
     suggested_scope_value VARCHAR(256),
     source_repo VARCHAR(256),
     source_ref VARCHAR(256),
+    library_version VARCHAR(64),
     chunk_index DECIMAL(9,0),
     chunk_count DECIMAL(9,0),
     artifact_chunk VARCHAR(2000000)
@@ -177,16 +178,16 @@ def _resolve(ctx, source, module_name):
     if not source or not module_name:
         raise _BadSource('source and module_name are both required')
     reader = _make_reader(source)
-    modules = _parse_index(reader(INDEX_MEMBER))
+    modules, library_version = _parse_index(reader(INDEX_MEMBER))
     if module_name == LIST_ALL_MODULES:
         for entry in modules:
-            _emit_entry(ctx, entry, 0, 0, None)
+            _emit_entry(ctx, entry, library_version, 0, 0, None)
         return
     entry = _select_entry(modules, module_name)
     artifact_path = entry.get('artifact_path')
     declared_sha = entry.get('sha256')
     if artifact_path is None and declared_sha is None:
-        _emit_entry(ctx, entry, 0, 0, None)
+        _emit_entry(ctx, entry, library_version, 0, 0, None)
         return
     artifact_bytes = reader(artifact_path)
     digest = hashlib.sha256(artifact_bytes).hexdigest()
@@ -196,7 +197,7 @@ def _resolve(ctx, source, module_name):
             % (module_name, declared_sha, digest))
     text = artifact_bytes.decode('utf-8')
     _verify_script_name(entry, text)
-    _emit_artifact(ctx, entry, text)
+    _emit_artifact(ctx, entry, library_version, text)
 
 
 def _make_reader(source):
@@ -328,6 +329,12 @@ def _artifact_url(index_url, artifact_path):
 
 
 def _parse_index(raw):
+    """Return (modules, library_version) from the index JSON.
+
+    library_version is the optional top-level release stamp (absent in older
+    indexes -> None); it is echoed in every emitted row so a caller resolving
+    through a mutable `latest` source can record the concrete release.
+    """
     try:
         data = json.loads(raw)
     except Exception as exc:
@@ -335,7 +342,7 @@ def _parse_index(raw):
     modules = data.get('modules')
     if not isinstance(modules, list):
         raise _SourceUnreadable("registry index has no 'modules' list")
-    return modules
+    return modules, data.get('library_version')
 
 
 def _select_entry(modules, module_name):
@@ -363,12 +370,14 @@ def _verify_script_name(entry, text):
             'for module %r' % (names[0], declared, entry.get('name')))
 
 
-def _entry_metadata(entry):
-    """The 11 registry-metadata EMITS columns (name..source_ref) for an entry.
+def _entry_metadata(entry, library_version):
+    """The 12 registry-metadata EMITS columns (name..library_version) for an entry.
 
     Single source of truth for the metadata column shape: _emit_entry prepends
     the OK status columns and appends the chunk columns; _emit_error emits an
-    all-null metadata block by passing an empty entry.
+    all-null metadata block by passing an empty entry and no library_version.
+    library_version is index-level (not per-entry), so it is threaded in rather
+    than read off the entry.
     """
     scope = entry.get('suggested_scope') or {}
     origin = entry.get('source') or {}
@@ -376,19 +385,21 @@ def _entry_metadata(entry):
         entry.get('name'), entry.get('version'), entry.get('phase'),
         entry.get('script_name'), entry.get('function'), entry.get('deploy_mode'),
         entry.get('sha256'), scope.get('type'), scope.get('value'),
-        origin.get('repo'), origin.get('ref'))
+        origin.get('repo'), origin.get('ref'), library_version)
 
 
-def _emit_artifact(ctx, entry, text):
+def _emit_artifact(ctx, entry, library_version, text):
     total = max(1, (len(text) + CHUNK_CHARS - 1) // CHUNK_CHARS)
     for index in range(total):
-        _emit_entry(ctx, entry, index, total, text[index * CHUNK_CHARS:(index + 1) * CHUNK_CHARS])
+        _emit_entry(ctx, entry, library_version, index, total,
+                    text[index * CHUNK_CHARS:(index + 1) * CHUNK_CHARS])
 
 
-def _emit_entry(ctx, entry, chunk_index, chunk_count, chunk):
-    ctx.emit('OK', None, None, *_entry_metadata(entry), chunk_index, chunk_count, chunk)
+def _emit_entry(ctx, entry, library_version, chunk_index, chunk_count, chunk):
+    ctx.emit('OK', None, None, *_entry_metadata(entry, library_version),
+             chunk_index, chunk_count, chunk)
 
 
 def _emit_error(ctx, kind, message):
-    ctx.emit('ERROR', kind, message[:ERROR_MESSAGE_MAX], *_entry_metadata({}), 0, 0, None)
+    ctx.emit('ERROR', kind, message[:ERROR_MESSAGE_MAX], *_entry_metadata({}, None), 0, 0, None)
 /

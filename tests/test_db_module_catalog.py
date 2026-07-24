@@ -52,7 +52,8 @@ def catalog_deployed(resolver_deployed):
     )
     conn.execute(
         "CREATE OR REPLACE LUA SCRIPT PREPROC.MODULE_REGISTER("
-        "name, version, source, ref, sha256, script_name, function_name, phase, deploy_mode) "
+        "name, version, source, ref, sha256, script_name, function_name, phase, deploy_mode, "
+        "source_url, library_version) "
         "RETURNS TABLE AS\n" + _MODULE_REGISTER_LUA_PATH.read_text(encoding="utf-8")
     )
     conn.execute(
@@ -79,7 +80,7 @@ def _register(
 ):
     conn.execute(
         "EXECUTE SCRIPT PREPROC.MODULE_REGISTER("
-        "{n}, {v}, {src}, {rf}, {sh}, {sn}, {fn}, {ph}, {dm})",
+        "{n}, {v}, {src}, {rf}, {sh}, {sn}, {fn}, {ph}, {dm}, NULL, NULL)",
         {
             "n": name,
             "v": version,

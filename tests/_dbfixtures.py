@@ -57,6 +57,7 @@ RESOLVER_COLUMNS: tuple[str, ...] = (
     "suggested_scope_value",
     "source_repo",
     "source_ref",
+    "library_version",
     "chunk_index",
     "chunk_count",
     "artifact_chunk",
@@ -186,6 +187,7 @@ def build_library_tarball(
     *,
     repo: str = _DEFAULT_REPO,
     ref: str = _DEFAULT_REF,
+    library_version: str | None = None,
     tamper: dict[str, bytes] | None = None,
 ) -> BuiltTarball:
     """Build a ``preproc-lib-<ver>.tar.gz`` from throwaway module sources.
@@ -204,7 +206,7 @@ def build_library_tarball(
         if artifact_path is not None:
             artifacts[spec.name] = artifact_path
 
-    index = generate_index(work, repo=repo, ref=ref)
+    index = generate_index(work, repo=repo, ref=ref, library_version=library_version)
     index_text = render_index(index)
     registry_dir = work / "registry"
     registry_dir.mkdir(exist_ok=True)

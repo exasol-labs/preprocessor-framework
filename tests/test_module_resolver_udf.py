@@ -181,6 +181,30 @@ def test_self_deployed_returns_metadata_only(tmp_path):
     assert row["source_ref"] == "v0.1.0"
 
 
+def test_library_version_is_surfaced_on_every_row(tmp_path):
+    """The index's top-level library_version is echoed in each emitted row.
+
+    This is what lets an install resolved through a mutable `latest` source
+    record the concrete release it actually got.
+    """
+    source, exa, _ = _stage_local(tmp_path, standard_library_specs(), library_version="0.2.0")
+
+    rows = _ok_rows(run_resolver_body(source, "cast_shorthand", exa=exa))
+
+    assert rows
+    assert all(row["library_version"] == "0.2.0" for row in rows)
+
+
+def test_library_version_absent_is_null(tmp_path):
+    """An index with no library_version surfaces NULL — older indexes still resolve."""
+    source, exa, _ = _stage_local(tmp_path, standard_library_specs())
+
+    rows = _ok_rows(run_resolver_body(source, "cast_shorthand", exa=exa))
+
+    assert rows
+    assert all(row["library_version"] is None for row in rows)
+
+
 def test_module_not_found_is_signalled(tmp_path):
     """A module absent from the index yields a not-found signal, not an artifact."""
     source, exa, _ = _stage_local(tmp_path, standard_library_specs())

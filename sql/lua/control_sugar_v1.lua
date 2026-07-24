@@ -158,6 +158,15 @@ local CONTROL = {
     module_catalog = "PREPROC.MODULE_CATALOG",
 }
 
+-- Default module source when INSTALL/CATALOG omit the FROM clause: the public
+-- Exasol Labs library, pinned to the mutable `latest` tag so an omitted source
+-- always resolves the newest release (a release moves that tag to the release
+-- commit). Supplying FROM overrides this for a fork, a pinned `vX.Y.Z` tag, or a
+-- bucketfs: source. Kept as a code constant rather than a PREPROC.SETTINGS row,
+-- in keeping with ADR-051 (no settings toggle on the fetch path).
+local DEFAULT_MODULE_SOURCE =
+    "https://raw.githubusercontent.com/exasol-labs/preprocessor-library/latest/registry/index.json"
+
 -- Split a string into tokens on whitespace, preserving original case, but keep a
 -- "double-quoted" or 'single-quoted' span as ONE token even when it contains
 -- spaces. A doubled quote inside a span ("" or '') is an escaped quote and does
@@ -464,22 +473,32 @@ function expand(sqltext)
     end
 
     if verb == "INSTALL" and upper_word(2) == "MODULE" then
-        -- PREPROC INSTALL MODULE <name> FROM '<source>' FOR (ROLE|USER) <value>
-        if subcommand_count ~= 8 then
+        -- With FROM:    PREPROC INSTALL MODULE <name> FROM '<source>' FOR (ROLE|USER) <value>  (8 words)
+        -- Without FROM: PREPROC INSTALL MODULE <name> FOR (ROLE|USER) <value>                  (6 words)
+        -- When FROM is omitted the source defaults to DEFAULT_MODULE_SOURCE; the
+        -- rest of the command (FOR ROLE|USER <value>) is unchanged. The FOR clause
+        -- sits at a different token index in each form, so resolve it first.
+        local source_literal, for_index
+        if subcommand_count == 8 and upper_word(4) == "FROM" then
+            -- The FROM source is single-quoted verbatim in the command text; carry
+            -- that token through unchanged so a bucketfs:/https: source survives
+            -- intact. Require the well-formed quoted shape or fail open.
+            source_literal = word(5)
+            if not source_literal:match("^'.*'$") then
+                return nil
+            end
+            for_index = 6
+        elseif subcommand_count == 6 then
+            source_literal = quote(DEFAULT_MODULE_SOURCE)
+            for_index = 4
+        else
             return nil
         end
-        if upper_word(4) ~= "FROM" or upper_word(6) ~= "FOR" then
+        if upper_word(for_index) ~= "FOR" then
             return nil
         end
-        local scope_type = upper_word(7)
+        local scope_type = upper_word(for_index + 1)
         if scope_type ~= "ROLE" and scope_type ~= "USER" then
-            return nil
-        end
-        -- The FROM source is single-quoted verbatim in the command text; carry
-        -- that token through unchanged so a bucketfs:/https: source survives
-        -- intact. Require the well-formed quoted shape or fail open.
-        local source_literal = word(5)
-        if not source_literal:match("^'.*'$") then
             return nil
         end
         -- The module name is an object-name identifier (unquoted -> UPPER,
@@ -487,7 +506,7 @@ function expand(sqltext)
         -- must be quoted: INSTALL MODULE "cast-shorthand". The scope value is a
         -- role/user name, always upper-cased.
         local module_name = fold_identifier(word(3))
-        local scope_value = fold_principal(word(8))
+        local scope_value = fold_principal(word(for_index + 2))
         local args = {
             source_literal,
             quote(module_name),
@@ -497,15 +516,17 @@ function expand(sqltext)
     end
 
     if verb == "CATALOG" and upper_word(2) == "MODULES" then
-        -- PREPROC CATALOG MODULES FROM '<source>'
-        if subcommand_count ~= 4 then
-            return nil
-        end
-        if upper_word(3) ~= "FROM" then
-            return nil
-        end
-        local source_literal = word(4)
-        if not source_literal:match("^'.*'$") then
+        -- With FROM:    PREPROC CATALOG MODULES FROM '<source>'  (4 words)
+        -- Without FROM: PREPROC CATALOG MODULES                 (2 words; source defaults)
+        local source_literal
+        if subcommand_count == 4 and upper_word(3) == "FROM" then
+            source_literal = word(4)
+            if not source_literal:match("^'.*'$") then
+                return nil
+            end
+        elseif subcommand_count == 2 then
+            source_literal = quote(DEFAULT_MODULE_SOURCE)
+        else
             return nil
         end
         return execute_script(CONTROL.module_catalog, { source_literal })

@@ -12,9 +12,13 @@ re-application never stacks duplicates (BUG-008).
 ## Background
 
 * `PREPROC.MODULES` lives in the locked admin schema and records one row per
-  deployed module version: `name`, `version`, `source`, `ref`, `sha256`,
-  `script_name`, `function_name`, `phase`, `deploy_mode`, `status`
-  (`deployed` | `retired`), `installed_at`, and `retired_at` (nullable). A
+  deployed module version: `name`, `version`, `source`, `ref`, `source_url`,
+  `library_version`, `sha256`, `script_name`, `function_name`, `phase`,
+  `deploy_mode`, `status` (`deployed` | `retired`), `installed_at`, and
+  `retired_at` (nullable). `source_url` (the effective source resolved from) and
+  `library_version` (the release the resolved index declared) are the audit anchor
+  that ties an install performed through a mutable `latest` source to a concrete
+  release; both are nullable (a manual/offline registration may omit them). A
   PUBLIC-readable view `PREPROC_RT.INSTALLED_MODULES` exposes provenance to
   operators through the same definer-rights bridge pattern as
   `PREPROC_RT.MY_PIPELINE`, so it is covered by the schema-level grants (ADR-002).
@@ -58,8 +62,9 @@ re-application never stacks duplicates (BUG-008).
 ### Scenario: Registering a module writes a provenance row
 
 * *GIVEN* an installed framework with an empty `PREPROC.MODULES`
-* *WHEN* `PREPROC.MODULE_REGISTER` is called for `cast_shorthand` version 1 with its source, ref, sha256, script, function, phase, and deploy mode
+* *WHEN* `PREPROC.MODULE_REGISTER` is called for `cast_shorthand` version 1 with its source, ref, sha256, script, function, phase, deploy mode, effective source URL, and library version
 * *THEN* `PREPROC.MODULES` MUST contain one row for `('cast_shorthand', 1)` with `status = 'deployed'` and a non-null `installed_at`
+* *AND* the row MUST record the supplied `source_url` and `library_version` (each NULL when not supplied)
 * *AND* `PREPROC_RT.INSTALLED_MODULES` MUST expose that row to a non-admin user
 
 ### Scenario: Re-registering an identical module version is idempotent

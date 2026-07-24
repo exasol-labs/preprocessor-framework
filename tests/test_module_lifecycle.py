@@ -71,7 +71,8 @@ _MODULE_SCRIPTS = {
     ),
     "module_register.lua": (
         "CREATE OR REPLACE LUA SCRIPT PREPROC.MODULE_REGISTER("
-        "name, version, source, ref, sha256, script_name, function_name, phase, deploy_mode"
+        "name, version, source, ref, sha256, script_name, function_name, phase, deploy_mode, "
+        "source_url, library_version"
         ") RETURNS TABLE AS\n"
     ),
     "module_retire.lua": (
@@ -198,22 +199,31 @@ def _register(
     function_name=_FUNCTION,
     phase=_PHASE,
     deploy_mode=_DEPLOY_MODE,
+    source_url=None,
+    library_version=None,
 ):
     """Run MODULE_REGISTER and return its result rows [(name, version, status, created)]."""
+    su_sql = "{su}" if source_url is not None else "NULL"
+    lv_sql = "{lv}" if library_version is not None else "NULL"
+    params = {
+        "n": name,
+        "v": version,
+        "src": source,
+        "rf": ref,
+        "sh": sha256 if sha256 is not None else "a" * 64,
+        "sn": script_name,
+        "fn": function_name,
+        "ph": phase,
+        "dm": deploy_mode,
+    }
+    if source_url is not None:
+        params["su"] = source_url
+    if library_version is not None:
+        params["lv"] = library_version
     return conn.execute(
         "EXECUTE SCRIPT PREPROC.MODULE_REGISTER("
-        "{n}, {v}, {src}, {rf}, {sh}, {sn}, {fn}, {ph}, {dm})",
-        {
-            "n": name,
-            "v": version,
-            "src": source,
-            "rf": ref,
-            "sh": sha256 if sha256 is not None else "a" * 64,
-            "sn": script_name,
-            "fn": function_name,
-            "ph": phase,
-            "dm": deploy_mode,
-        },
+        "{n}, {v}, {src}, {rf}, {sh}, {sn}, {fn}, {ph}, {dm}, " + su_sql + ", " + lv_sql + ")",
+        params,
     ).fetchall()
 
 
@@ -252,11 +262,13 @@ def _module_row(conn, name, version):
     """The full PREPROC.MODULES row for (name, version), or None.
 
     Column order: name(0) version(1) source_repo(2) source_ref(3) sha256(4) script_name(5)
-    function_name(6) phase(7) deploy_mode(8) status(9) installed_at(10) retired_at(11).
+    function_name(6) phase(7) deploy_mode(8) status(9) installed_at(10) retired_at(11)
+    source_url(12) library_version(13). The audit columns are appended last so the
+    original positional indices stay valid.
     """
     rows = conn.execute(
         "SELECT name, version, source_repo, source_ref, sha256, script_name, function_name, "
-        "phase, deploy_mode, status, installed_at, retired_at "
+        "phase, deploy_mode, status, installed_at, retired_at, source_url, library_version "
         "FROM PREPROC.MODULES WHERE name = {n} AND version = {v}",
         {"n": name, "v": version},
     ).fetchall()
@@ -348,6 +360,38 @@ def test_module_register_writes_row(lifecycle_env):
     assert view[0][0] == _MODULE_NAME
     assert int(view[0][1]) == 1
     assert view[0][2] == "deployed"
+
+
+@pytest.mark.integration
+def test_module_register_records_source_url_and_library_version(lifecycle_env):
+    """MODULE_REGISTER persists the effective source URL and resolved library release.
+
+    These are the audit anchor for an install resolved through a mutable `latest`
+    source: even though the URL's tag keeps moving, the recorded library_version
+    ties the install to a concrete release, and source_url shows what was fetched.
+    """
+    conn = lifecycle_env
+    url = "https://raw.githubusercontent.com/exasol-labs/preprocessor-library/latest/registry/index.json"
+
+    _register(
+        conn,
+        version=1,
+        ref="v1",
+        script_name=_SCRIPT_V1,
+        source_url=url,
+        library_version="0.2.0",
+    )
+
+    row = _module_row(conn, _MODULE_NAME, 1)
+    assert row is not None
+    assert row[12] == url, "source_url must record the effective fetched source"
+    assert row[13] == "0.2.0", "library_version must record the resolved release"
+
+    # A NULL library_version (older index / manual registration) is accepted.
+    _register(conn, version=2, ref="v2", script_name=_SCRIPT_V1)
+    row2 = _module_row(conn, _MODULE_NAME, 2)
+    assert row2 is not None
+    assert row2[13] is None
 
 
 @pytest.mark.integration
