@@ -489,25 +489,68 @@ def test_catalog_modules_expands_to_module_catalog(sugar_env):
     )
 
 
+# The built-in default source used when INSTALL/CATALOG omit the FROM clause —
+# the public Exasol Labs library index pinned to the mutable `latest` tag. Kept
+# in sync with DEFAULT_MODULE_SOURCE in sql/lua/control_sugar_v1.lua.
+_DEFAULT_SOURCE = (
+    "https://raw.githubusercontent.com/exasol-labs/preprocessor-library/latest/registry/index.json"
+)
+
+
+@pytest.mark.integration
+def test_install_module_without_from_defaults_to_latest_library(sugar_env):
+    """INSTALL MODULE with no FROM clause defaults the source to the Exasol Labs library@latest.
+
+    The FOR clause sits two tokens earlier without the `FROM '<source>'` pair, so
+    the parser must resolve its shifted position. The unquoted module name folds
+    to UPPER CASE per the identifier rule.
+    """
+    result = _expand(
+        sugar_env,
+        "PREPROC INSTALL MODULE cast_shorthand FOR ROLE PREPROC_ADMIN",
+    )
+    assert result == (
+        f"EXECUTE SCRIPT PREPROC.MODULE_INSTALL("
+        f"'{_DEFAULT_SOURCE}', 'CAST_SHORTHAND', 'ROLE:PREPROC_ADMIN')"
+    )
+    # An explicit FROM still overrides the default (fork / pinned version).
+    pinned = "'https://raw.githubusercontent.com/acme/fork/v1.2.3/registry/index.json'"
+    assert _expand(
+        sugar_env,
+        f'PREPROC INSTALL MODULE "cast_shorthand" FROM {pinned} FOR USER BOB',
+    ) == (f"EXECUTE SCRIPT PREPROC.MODULE_INSTALL({pinned}, 'cast_shorthand', 'USER:BOB')")
+
+
+@pytest.mark.integration
+def test_catalog_modules_without_from_defaults_to_latest_library(sugar_env):
+    """CATALOG MODULES with no FROM clause defaults the source to the Exasol Labs library@latest."""
+    assert _expand(sugar_env, "PREPROC CATALOG MODULES") == (
+        f"EXECUTE SCRIPT PREPROC.MODULE_CATALOG('{_DEFAULT_SOURCE}')"
+    )
+
+
 @pytest.mark.integration
 def test_malformed_install_module_declined(sugar_env):
-    """An INSTALL MODULE command missing FROM or FOR is declined (nil), failing open.
+    """An INSTALL MODULE command with no valid FOR clause is declined (nil), failing open.
 
     A malformed shape must never produce a truncated/incorrect EXECUTE SCRIPT
     string; the module must return nil so the original text reaches the engine.
+    (A missing FROM is NOT malformed — it is the defaulted no-source form.)
     """
-    assert (
-        _expand(
-            sugar_env,
-            "PREPROC INSTALL MODULE cast_shorthand FOR ROLE PREPROC_ADMIN",
-        )
-        is None
-    )
+    # FROM present but no FOR clause at all.
     assert (
         _expand(
             sugar_env,
             "PREPROC INSTALL MODULE cast_shorthand FROM "
             "'bucketfs:PREPROC_BFS/preproc-lib-0.1.0.tar.gz'",
+        )
+        is None
+    )
+    # No-FROM shape whose scope type is neither ROLE nor USER.
+    assert (
+        _expand(
+            sugar_env,
+            "PREPROC INSTALL MODULE cast_shorthand FOR GROUP PREPROC_ADMIN",
         )
         is None
     )

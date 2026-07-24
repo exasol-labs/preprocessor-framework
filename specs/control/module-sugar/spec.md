@@ -32,6 +32,15 @@ rather than by deployment unit.
   `bucketfs:` or `https:` source survives intact), and the `FOR (ROLE|USER) <x>`
   clause folded into a single `TYPE:value` scope string. `CATALOG MODULES FROM
   '<source>'` maps to `PREPROC.MODULE_CATALOG('<source>')`.
+* The `FROM '<source>'` clause is OPTIONAL on both verbs. When it is omitted the
+  source defaults to a built-in constant — the public Exasol Labs library index
+  pinned to the mutable `latest` tag
+  (`https://raw.githubusercontent.com/exasol-labs/preprocessor-library/latest/registry/index.json`)
+  — so a DBA can `PREPROC INSTALL MODULE <name> FOR (ROLE|USER) <x>` or `PREPROC
+  CATALOG MODULES` with no source and get the newest published release. Supplying
+  an explicit `FROM` overrides the default for a fork, a pinned `vX.Y.Z` tag, or a
+  `bucketfs:` source. The default is a code constant, not a `PREPROC.SETTINGS`
+  row, in keeping with ADR-051 (no settings toggle on the fetch path).
 * Captured values follow Exasol identifier quoting semantics (the same rules
   `control/command-sugar` documents): the module name is an object-name
   identifier — an UNQUOTED token folds to UPPER CASE, a `"..."`-delimited token
@@ -79,9 +88,25 @@ rather than by deployment unit.
 * *WHEN* the caller submits `PREPROC CATALOG MODULES FROM 'bucketfs:PREPROC_BFS/preproc-lib-0.1.0.tar.gz'`
 * *THEN* the module MUST return exactly one `EXECUTE SCRIPT PREPROC.MODULE_CATALOG('bucketfs:PREPROC_BFS/preproc-lib-0.1.0.tar.gz')` statement
 
+### Scenario: INSTALL MODULE without a FROM clause defaults to the Exasol Labs library at latest
+
+* *GIVEN* the convenience module is deployed and active for the caller
+* *WHEN* the caller submits `PREPROC INSTALL MODULE cast_shorthand FOR ROLE PREPROC_ADMIN` with no `FROM` clause
+* *THEN* the module MUST return exactly one `EXECUTE SCRIPT PREPROC.MODULE_INSTALL('https://raw.githubusercontent.com/exasol-labs/preprocessor-library/latest/registry/index.json', 'CAST_SHORTHAND', 'ROLE:PREPROC_ADMIN')` statement
+* *AND* the source MUST default to the built-in Exasol Labs library index pinned to the `latest` tag
+* *AND* the `FOR (ROLE|USER)` clause MUST be parsed at its shifted position (no `FROM '<source>'` tokens precede it)
+* *AND* supplying an explicit `FROM '<source>'` MUST override the default (a fork or a pinned `vX.Y.Z`)
+
+### Scenario: CATALOG MODULES without a FROM clause defaults to the Exasol Labs library at latest
+
+* *GIVEN* the convenience module is deployed and active for the caller
+* *WHEN* the caller submits `PREPROC CATALOG MODULES` with no `FROM` clause
+* *THEN* the module MUST return exactly one `EXECUTE SCRIPT PREPROC.MODULE_CATALOG('https://raw.githubusercontent.com/exasol-labs/preprocessor-library/latest/registry/index.json')` statement
+* *AND* the source MUST default to the built-in Exasol Labs library index pinned to the `latest` tag
+
 ### Scenario: A malformed INSTALL MODULE command is declined fail-open
 
 * *GIVEN* the convenience module is deployed and active for the caller
-* *WHEN* the caller submits a `PREPROC INSTALL …` statement whose shape the module does not recognise (for example a missing `FROM` or `FOR` clause)
+* *WHEN* the caller submits a `PREPROC INSTALL …` statement whose shape the module does not recognise (for example a missing `FOR` clause, or a `FOR` clause with a scope type that is neither `ROLE` nor `USER`)
 * *THEN* the module MUST NOT return a malformed `EXECUTE SCRIPT` string that silently misbehaves
 * *AND* the module SHOULD return `nil` so the original text reaches the engine and fails with a loud syntax error (fail-open EXPAND contract)
