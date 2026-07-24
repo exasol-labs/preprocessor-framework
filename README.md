@@ -42,7 +42,7 @@ core value is being the **sole owner of that one slot** and the
 `MASTER`. Anyone who wants to hook a syntax transform into the slot does so as
 a **module** — a stable, versioned, registry-discoverable unit — rather than
 fighting for the slot directly. See
-[Installing modules](#installing-modules) below.
+[Add a transformation](#add-a-transformation) below.
 
 ## Quick Start
 
@@ -89,8 +89,15 @@ separate DBA action. Activate it system-wide:
 ALTER SYSTEM SET sql_preprocessor_script = PREPROC_RT.MASTER;
 ```
 
-To test on a single session first, use `ALTER SESSION` instead of `ALTER SYSTEM`.
-To deactivate, set the script to `NULL`.
+To try it on just your own session first — no system-wide change — run the same
+against the session instead:
+
+```sql
+ALTER SESSION SET sql_preprocessor_script = PREPROC_RT.MASTER;
+```
+
+To deactivate, set the slot back to empty (`ALTER SYSTEM` or `ALTER SESSION SET
+sql_preprocessor_script = '';`).
 
 ### 4. Verify
 
@@ -103,30 +110,20 @@ EXECUTE SCRIPT PREPROC.RULE_LIST;  -- all configured rules
 
 You now have a live, empty pipeline. Add transformation modules next.
 
-## Adding transformations
+## Add a transformation
 
-A transformation is a Lua **module** (one phase, one job) plus a **rule** in
-`PREPROC.CONFIG` that binds it to a scope (a role, a user, optionally a client
-pattern) and a phase. After any config change you run a **refresh** to rebuild
-the per-user resolution.
+A transformation is a Lua **module** (one phase, one job) bound to a **scope** (a
+role, a user, optionally a client pattern) by a **rule** in `PREPROC.CONFIG`.
+After any rule change you run a **refresh** to rebuild the per-user resolution
+(the SQL sugar in [Administration](#administration) does it for you).
 
-The fastest way to see this end to end is the bundled `PING` example.
+### Run the bundled example
 
-### Deploy an example module
-
-Each file in [`examples/`](examples/) is one self-contained, self-registering
-module — it creates the script(s) and ends with the rule that registers it.
-Grab the file from the repo and run it after `release.sql`:
-
-| File | Phase | What it adds |
-|------|-------|--------------|
-| [`examples/demo_ping.sql`](examples/demo_ping.sql) | EXPAND | `PING` → `SELECT 'PONG'` (the canonical authoring reference) |
-| [`examples/demo_translate.sql`](examples/demo_translate.sql) | TRANSLATE | dialect transpilation via a companion `sqlglot` UDF |
-| [`examples/demo_audit.sql`](examples/demo_audit.sql) | REWRITE | appends an inert `/* PREPROC_AUDIT user=… */` comment |
-| [`examples/confd_admin.sql`](examples/confd_admin.sql) | EXPAND | real-world add-on: `CONTROL DATABASE …` / `CONTROL BUCKETFS …` via the Exasol ConfD gateway |
-
-Running `examples/demo_ping.sql` deploys `PREPROC_RT.DEMO_PING_V1` and registers
-an EXPAND rule for it. Then, as a user the rule resolves to:
+[`examples/demo_ping.sql`](examples/demo_ping.sql) is the canonical authoring
+reference — one self-contained, self-registering module that creates its script
+and ends with the rule that registers it. Grab it from the repo and run it after
+`release.sql`: it deploys `PREPROC_RT.DEMO_PING_V1` and registers an EXPAND rule.
+Then, for any user holding the rule's role:
 
 ```sql
 PING
@@ -135,75 +132,113 @@ PING
 PONG
 ```
 
-Each example's rule is scoped to a role — a user must **hold** that role for the
-rule to apply. Edit the trailing `RULE_ADD` call to change the scope. See
-[`examples/README.md`](examples/README.md) for details.
+The rule is scoped to a role — a user must **hold** that role for it to apply;
+edit the trailing `RULE_ADD` call to change the scope. More bundled examples
+(dialect transpilation, audit tagging, and the real-world Exasol ConfD gateway)
+live in [`examples/`](examples/README.md).
 
-### Installing modules
+### Install a module from the community library
 
-Beyond the bundled examples, the `preproc module` CLI installs published
-**modules** — versioned, registry-discoverable syntax providers — straight
-from the community library,
-[`exasol-labs/preprocessor-library`](https://github.com/exasol-labs/preprocessor-library):
-
-```bash
-uv run preproc module list                 # see what's available
-uv run preproc module add cast-shorthand   # deploy + register in one step
-```
-
-This is also how the two ergonomics conveniences (`expr::type` cast shorthand
-and optional trailing commas) are installed today — they used to ship inside
-this framework's `examples/`, and now live as the library's first two proving
-modules instead. `preproc module` also covers `search`, `update`, `remove`,
-an offline `bundle` for air-gapped instances, and a declarative `sync`. See
-[docs/operations.md § Module management](docs/operations.md#module-management)
-for the full CLI reference and lifecycle, and
-[docs/module-authoring.md](docs/module-authoring.md) for the module contract
-if you want to write your own.
-
-### Manage rules from SQL
-
-When the preprocessor is active and you hold `PREPROC_ADMIN`, the `PREPROC`
-command sugar lets you manage the framework inline — no `EXECUTE SCRIPT`
-boilerplate:
+Published modules live in
+[`exasol-labs/preprocessor-library`](https://github.com/exasol-labs/preprocessor-library)
+— versioned, registry-discoverable syntax providers (the `expr::type` cast
+shorthand and optional-trailing-comma ergonomics now live there, not in this
+repo's `examples/`). On an internet-connected cluster you install one straight
+from SQL — no CLI, no toolchain. Browse, then install:
 
 ```sql
-PREPROC ADD RULE FOR ROLE ANALYSTS PHASE EXPAND SCRIPT PREPROC_RT.MY_MODULE_V1 FUNCTION expand
-PREPROC LIST RULES
-PREPROC DISABLE RULE 3
-PREPROC REFRESH
-PREPROC STATUS
+PREPROC CATALOG MODULES;                                   -- list the library (newest release)
+PREPROC INSTALL MODULE cast_shorthand FOR ROLE ANALYSTS;   -- deploy + register in one step
 ```
 
-Every mutating command auto-refreshes; append `NOREFRESH` to batch changes and
-refresh once at the end. The full command surface, the equivalent script calls,
-and the `PREPROC.CONFIG` column reference are in
-[docs/operations.md](docs/operations.md#control-surface).
+With no source given, the framework resolves the public library at its `latest`
+release over HTTPS and records the concrete release it installed. Supply an
+explicit source to pin a version, use a fork, or install from BucketFS on an
+air-gapped cluster:
 
-> **Refresh is required** after adding/changing rules and after role grants
-> change — it rebuilds resolution from config and the live role-grant graph. The
-> sugar does it for you; schedule `EXECUTE SCRIPT PREPROC.REFRESH` (cron, CI, any
-> SQL scheduler) to track ongoing role changes.
+```sql
+PREPROC INSTALL MODULE cast_shorthand
+  FROM 'https://raw.githubusercontent.com/exasol-labs/preprocessor-library/v0.2.0/registry/index.json'
+  FOR ROLE ANALYSTS;
+```
 
-## Modes & overhead
+Prefer a toolchain? The `preproc module` CLI does the same from your machine
+(`uv run preproc module add cast_shorthand`) and adds `list` / `search` /
+`update` / `remove`, a declarative `sync`, and an offline `bundle` for
+air-gapped installs. Full reference:
+[docs/operations.md § Module management](docs/operations.md#module-management)
+and [§ In-database module install](docs/operations.md#in-database-module-install).
 
-The framework's posture is set with `PREPROC SET MODE` and stored in
-`PREPROC.SETTINGS`:
+### Write your own module
 
-- **convenience** (default) — sessions self-optimize after their first
-  statement: a session with no rules clears its preprocessor, and a rule-bearing
-  session repoints to a generated, hash-named profile script with its rule chain
-  baked in. The per-statement `MASTER` lookup is paid **once**, not per
-  statement. Profile scripts are created, retired, and reclaimed automatically.
-- **strict** — no swap or self-disable; every statement pays the full `MASTER`
-  lookup (~7.3 ms/stmt). Choose this when sessions must never repoint themselves.
+To hook your own syntax transform into Exasol's single preprocessor slot you
+write a **module** — you never fight for the slot directly (see
+[Positioning](#what-it-solves) above). The contract is small: a Lua
+`fn(text) -> nil | string` function, a `module.toml` manifest, and `_V<N>`
+versioning discipline.
 
-> The `DEMO_TRANSLATE_V1` module calls a Python3 UDF per translated statement
-> (~133–151 ms; no VM reuse across statements). Scope TRANSLATE rules narrowly
-> with `client_pattern` — never apply them to all traffic.
+- **[docs/module-authoring.md](docs/module-authoring.md)** — the module contract SDK: the function contract, the manifest schema, and versioning.
+- **[examples/demo_ping.sql](examples/demo_ping.sql)** — a complete, minimal, self-registering module to copy from.
+- **[Publish it to the library](https://github.com/exasol-labs/preprocessor-library/blob/main/CONTRIBUTING.md)** — the library's CONTRIBUTING guide walks through adding your module (or registering an external repo) so others can `PREPROC INSTALL MODULE` it.
 
-See [session self-optimization](docs/how-it-works.md#session-self-optimization-zero-overhead-paths)
-for the full lifecycle.
+## Administration
+
+Everything you configure at runtime is done from SQL. When the preprocessor is
+active and you hold `PREPROC_ADMIN`, the `PREPROC` command sugar manages rules,
+modules, refresh, status, and mode inline — no `EXECUTE SCRIPT` boilerplate.
+Each command maps to exactly one admin script, so the scripted form
+(`EXECUTE SCRIPT PREPROC.RULE_ADD(...)`) works identically if you prefer it.
+
+### Rules
+
+A rule binds a module (a phase plus a script and its entry function) to a
+**scope**: a `ROLE` or a `USER`, optionally narrowed by a client pattern. A user
+receives a rule when they hold that role (or are that user); the three phases
+always run in the order TRANSLATE → EXPAND → REWRITE.
+
+```sql
+PREPROC ADD RULE FOR ROLE ANALYSTS PHASE EXPAND SCRIPT PREPROC_RT.MY_MODULE_V1 FUNCTION expand;
+PREPROC ADD RULE FOR USER BOB PHASE TRANSLATE SCRIPT PREPROC_RT.MY_XLATE_V1 FUNCTION translate;
+PREPROC LIST RULES;        -- every configured rule and its scope
+PREPROC DISABLE RULE 3;    -- keep the row, stop applying it
+PREPROC ENABLE RULE 3;
+PREPROC DROP RULE 3;       -- remove it
+```
+
+### Modules
+
+Install and browse community-library modules from the same surface (see
+[Install a module from the community library](#install-a-module-from-the-community-library)):
+
+```sql
+PREPROC CATALOG MODULES;                                   -- browse the library
+PREPROC INSTALL MODULE cast_shorthand FOR ROLE ANALYSTS;   -- install + activate
+```
+
+Provenance for every installed module — version, the resolved library release,
+the source it came from, and sha256 — is queryable via the PUBLIC view
+`PREPROC_RT.INSTALLED_MODULES`.
+
+### Refresh, status, and mode
+
+```sql
+PREPROC REFRESH;                 -- rebuild resolution from config + the live role-grant graph
+PREPROC STATUS;                  -- current / stale / never-refreshed
+PREPROC SET MODE convenience;    -- performance posture: convenience (default) or strict
+```
+
+Every mutating command **auto-refreshes**; append `NOREFRESH` to batch several
+changes and refresh once at the end.
+
+> **Refresh is required** after changing rules *and* after role grants change —
+> resolution is built from config and the live grant graph. The sugar refreshes
+> for you on each change; to track ongoing role changes, schedule
+> `EXECUTE SCRIPT PREPROC.REFRESH` (cron, CI, any SQL scheduler).
+
+The full command surface, the equivalent script calls, the `convenience`/`strict`
+mode trade-offs and per-statement overhead, and the `PREPROC.CONFIG` column
+reference are in
+[docs/operations.md § Control surface](docs/operations.md#control-surface).
 
 ## Documentation
 
