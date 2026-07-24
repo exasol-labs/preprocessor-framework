@@ -28,15 +28,19 @@
 --
 -- Parameters (declared in the CREATE header added by install.py / bundle.py; bare
 -- names, no SQL types)
---   name           VARCHAR(128)  module name (e.g. 'cast-shorthand')
---   version        DECIMAL(9,0)  integer module version
---   source         VARCHAR(256)  registry/repo source, or SQL NULL
---   ref            VARCHAR(128)  pinned tag/ref, or SQL NULL
---   sha256         VARCHAR(64)   artifact sha256 (library-deployed), or SQL NULL
---   script_name    VARCHAR(128)  fully-qualified SCHEMA.NAME of the module script
---   function_name  VARCHAR(128)  entry function within that script
---   phase          VARCHAR(32)   'TRANSLATE', 'EXPAND', or 'REWRITE'
---   deploy_mode    VARCHAR(32)   deployment mode (stored verbatim)
+--   name            VARCHAR(128)  module name (e.g. 'cast-shorthand')
+--   version         DECIMAL(9,0)  integer module version
+--   source          VARCHAR(256)  registry/repo source, or SQL NULL
+--   ref             VARCHAR(128)  pinned tag/ref, or SQL NULL
+--   sha256          VARCHAR(64)   artifact sha256 (library-deployed), or SQL NULL
+--   script_name     VARCHAR(128)  fully-qualified SCHEMA.NAME of the module script
+--   function_name   VARCHAR(128)  entry function within that script
+--   phase           VARCHAR(32)   'TRANSLATE', 'EXPAND', or 'REWRITE'
+--   deploy_mode     VARCHAR(32)   deployment mode (stored verbatim)
+--   source_url      VARCHAR(2000) effective source fetched from (the mutable-tag
+--                                 or pinned URL, or bucketfs: path), or SQL NULL
+--   library_version VARCHAR(64)   concrete library release the index declared
+--                                 (audits a `latest` install), or SQL NULL
 --
 -- Validation order (rejected call is side-effect free)
 --   phase is validated first and raises via error() before any MERGE, mirroring
@@ -46,10 +50,11 @@
 --   PREPROC.MODULES is unchanged on rejection.
 --
 -- NULL binding
---   Nullable parameters (source, ref, sha256) are normalised to the Exasol `null`
---   sentinel before binding: a Lua nil would drop the key from the bind table and
---   fail the bind, whereas `null` binds SQL NULL. Every USING column is CAST to
---   its target type so a NULL bind still carries an explicit type into the MERGE.
+--   Nullable parameters (source, ref, sha256, source_url, library_version) are
+--   normalised to the Exasol `null` sentinel before binding: a Lua nil would drop
+--   the key from the bind table and fail the bind, whereas `null` binds SQL NULL.
+--   Every USING column is CAST to its target type so a NULL bind still carries an
+--   explicit type into the MERGE.
 --
 -- Result contract
 --   Created RETURNS TABLE: (name, version, status, created). created is TRUE when
@@ -60,6 +65,7 @@
 -- The CREATE header declares the typed parameters; luacheck cannot see it, so
 -- declare them (and the Exasol `null` sentinel is already a project read_global).
 -- luacheck: read globals name version source ref sha256 script_name function_name phase deploy_mode
+-- luacheck: read globals source_url library_version
 
 local VALID_PHASES = {TRANSLATE = true, EXPAND = true, REWRITE = true}
 
@@ -97,35 +103,41 @@ local mg_ok, mg_res = pquery(
     [[MERGE INTO PREPROC.MODULES m
       USING (
           SELECT
-              CAST(:name AS VARCHAR(128))          AS name,
-              CAST(:version AS DECIMAL(9,0))       AS version,
-              CAST(:source AS VARCHAR(256))        AS source_repo,
-              CAST(:ref AS VARCHAR(128))           AS source_ref,
-              CAST(:sha256 AS VARCHAR(64))         AS sha256,
-              CAST(:script_name AS VARCHAR(128))   AS script_name,
-              CAST(:function_name AS VARCHAR(128)) AS function_name,
-              CAST(:phase AS VARCHAR(32))          AS phase,
-              CAST(:deploy_mode AS VARCHAR(32))    AS deploy_mode
+              CAST(:name AS VARCHAR(128))            AS name,
+              CAST(:version AS DECIMAL(9,0))         AS version,
+              CAST(:source AS VARCHAR(256))          AS source_repo,
+              CAST(:ref AS VARCHAR(128))             AS source_ref,
+              CAST(:source_url AS VARCHAR(2000))     AS source_url,
+              CAST(:library_version AS VARCHAR(64))  AS library_version,
+              CAST(:sha256 AS VARCHAR(64))           AS sha256,
+              CAST(:script_name AS VARCHAR(128))     AS script_name,
+              CAST(:function_name AS VARCHAR(128))   AS function_name,
+              CAST(:phase AS VARCHAR(32))            AS phase,
+              CAST(:deploy_mode AS VARCHAR(32))      AS deploy_mode
       ) s
       ON m.name = s.name AND m.version = s.version
       WHEN MATCHED THEN UPDATE SET
-          source_repo   = s.source_repo,
-          source_ref    = s.source_ref,
-          sha256        = s.sha256,
-          script_name   = s.script_name,
-          function_name = s.function_name,
-          phase         = s.phase,
-          deploy_mode   = s.deploy_mode,
-          status        = 'deployed',
-          retired_at    = NULL
+          source_repo     = s.source_repo,
+          source_ref      = s.source_ref,
+          source_url      = s.source_url,
+          library_version = s.library_version,
+          sha256          = s.sha256,
+          script_name     = s.script_name,
+          function_name   = s.function_name,
+          phase           = s.phase,
+          deploy_mode     = s.deploy_mode,
+          status          = 'deployed',
+          retired_at      = NULL
       WHEN NOT MATCHED THEN INSERT
-          (name, version, source_repo, source_ref, sha256, script_name, function_name,
-           phase, deploy_mode, status, installed_at, retired_at)
+          (name, version, source_repo, source_ref, source_url, library_version, sha256,
+           script_name, function_name, phase, deploy_mode, status, installed_at, retired_at)
           VALUES
-          (s.name, s.version, s.source_repo, s.source_ref, s.sha256, s.script_name, s.function_name,
-           s.phase, s.deploy_mode, 'deployed', CURRENT_TIMESTAMP, NULL)]],
+          (s.name, s.version, s.source_repo, s.source_ref, s.source_url, s.library_version,
+           s.sha256, s.script_name, s.function_name, s.phase, s.deploy_mode, 'deployed',
+           CURRENT_TIMESTAMP, NULL)]],
     {
         name = name, version = version, source = nz(source), ref = nz(ref),
+        source_url = nz(source_url), library_version = nz(library_version),
         sha256 = nz(sha256), script_name = script_name, function_name = function_name,
         phase = phase, deploy_mode = deploy_mode,
     }

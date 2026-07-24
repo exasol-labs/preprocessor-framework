@@ -47,8 +47,10 @@ package.
   with `deploy.py`'s self-deployed skip).
 * The resolver returns, for the resolved entry: `name`, `version`, `phase`,
   `script_name`, `function`, `deploy_mode`, `sha256`, `suggested_scope_type`,
-  `suggested_scope_value`, `source_repo`, `source_ref`, and the artifact text as
-  a `VARCHAR(2000000)` value. An artifact up to 2,000,000 characters fits a single
+  `suggested_scope_value`, `source_repo`, `source_ref`, `library_version`, and the
+  artifact text as a `VARCHAR(2000000)` value. `library_version` is the index's
+  optional top-level release stamp (NULL when the index carried none), echoed on
+  every row so a `latest` install can be audited back to a concrete release. An artifact up to 2,000,000 characters fits a single
   EMITS value; a larger artifact MUST be emitted as ordered chunks the caller
   reassembles in order (chunked-EMITS fallback — verified: EMITS supports
   `VARCHAR(2000000)`).

@@ -145,14 +145,25 @@ def rule_ensure(
     return int(rule_id), bool(created)
 
 
-def module_register(connection: Any, entry: RegistryEntry) -> bool:
+def module_register(
+    connection: Any,
+    entry: RegistryEntry,
+    *,
+    source_url: str | None = None,
+    library_version: str | None = None,
+) -> bool:
     """Upsert the provenance row for ``entry`` via ``PREPROC.MODULE_REGISTER``.
 
     Returns whether the row was freshly created (True) or an existing row was
     updated (False). ``sha256`` is emitted as a SQL ``NULL`` literal for a
-    self-deployed module (which carries none).
+    self-deployed module (which carries none). ``source_url`` (the effective
+    registry the artifact was fetched from) and ``library_version`` (the release
+    the index declared) are recorded for audit and emitted as SQL ``NULL`` when
+    absent.
     """
     sha_sql = "{sh}" if entry.sha256 is not None else "NULL"
+    url_sql = "{su}" if source_url is not None else "NULL"
+    libver_sql = "{lv}" if library_version is not None else "NULL"
     params = {
         "n": entry.name,
         "v": entry.version,
@@ -165,9 +176,14 @@ def module_register(connection: Any, entry: RegistryEntry) -> bool:
     }
     if entry.sha256 is not None:
         params["sh"] = entry.sha256
+    if source_url is not None:
+        params["su"] = source_url
+    if library_version is not None:
+        params["lv"] = library_version
     rows = connection.execute(
         "EXECUTE SCRIPT PREPROC.MODULE_REGISTER("
-        "{n}, {v}, {src}, {rf}, " + sha_sql + ", {scn}, {fnn}, {ph}, {dm})",
+        "{n}, {v}, {src}, {rf}, " + sha_sql + ", {scn}, {fnn}, {ph}, {dm}, "
+        + url_sql + ", " + libver_sql + ")",
         params,
     ).fetchall()
     return bool(rows[0][3])
@@ -186,6 +202,7 @@ def deploy_module(
     scope: tuple[str, str] | None = None,
     do_refresh: bool = True,
     reader=None,
+    library_version: str | None = None,
 ) -> DeployResult:
     """Deploy one registry module version and register its rule and provenance.
 
@@ -201,6 +218,9 @@ def deploy_module(
     Args:
         do_refresh: issue the single ``PREPROC.REFRESH`` at the end. A batch
             caller (``sync``) passes False and refreshes once for the whole run.
+        library_version: the resolved library release (the index's
+            ``library_version``), recorded as provenance alongside the effective
+            ``registry`` source URL.
     """
     scope_type, scope_value = resolve_scope(entry, scope)
 
@@ -219,7 +239,9 @@ def deploy_module(
         function_name=entry.function,
         norefresh=True,
     )
-    provenance_created = module_register(connection, entry)
+    provenance_created = module_register(
+        connection, entry, source_url=registry, library_version=library_version
+    )
 
     if do_refresh and rule_created:
         refresh(connection)

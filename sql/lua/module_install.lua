@@ -46,8 +46,10 @@
 --      script_name, function_name, NULL, TRUE) — idempotent rule registration with
 --      the auto-refresh suppressed; RULE_ENSURE validates the script exists first.
 --   4. EXECUTE SCRIPT PREPROC.MODULE_REGISTER(name, version, source_repo,
---      source_ref, sha256, script_name, function_name, phase, deploy_mode) —
---      idempotent provenance upsert. sha256 is NULL for a self-deployed module.
+--      source_ref, sha256, script_name, function_name, phase, deploy_mode,
+--      source_url, library_version) — idempotent provenance upsert. sha256 is
+--      NULL for a self-deployed module; source_url is the effective source and
+--      library_version the resolved release (the `latest` audit anchor).
 --   5. A single EXECUTE SCRIPT PREPROC.REFRESH when the rule was freshly created
 --      (parity with deploy_module's `if do_refresh and rule_created`): RESOLUTION
 --      depends only on CONFIG, so an idempotent re-install that changed no rule
@@ -60,7 +62,10 @@
 --   mutates an existing live version — an update deploys a new _V<N+1>.
 --
 -- Result contract
---   Created RETURNS TABLE: (module, version, phase, status), one row.
+--   Created RETURNS TABLE: (module, version, phase, status, library_version), one
+--   row. library_version is the concrete library release the resolved index
+--   declared (NULL when the index carried none), so the operator sees which
+--   release a `latest` install landed on.
 --     status = 'installed'        a fresh library-deployed install
 --            = 'already-current'  an idempotent library-deployed re-install
 --            = 'registered-only'  a self-deployed module (rule + provenance, no
@@ -87,9 +92,10 @@ local COL_DEPLOY_MODE = 9
 local COL_SHA256 = 10
 local COL_SOURCE_REPO = 13
 local COL_SOURCE_REF = 14
-local COL_CHUNK_INDEX = 15
-local COL_CHUNK_COUNT = 16
-local COL_ARTIFACT_CHUNK = 17
+local COL_LIBRARY_VERSION = 15
+local COL_CHUNK_INDEX = 16
+local COL_CHUNK_COUNT = 17
+local COL_ARTIFACT_CHUNK = 18
 
 -- A SQL NULL parameter may arrive as Lua nil or the Exasol `null` sentinel.
 local function is_null(value)
@@ -207,6 +213,7 @@ local deploy_mode = head[COL_DEPLOY_MODE]
 local sha256 = head[COL_SHA256]
 local source_repo = head[COL_SOURCE_REPO]
 local source_ref = head[COL_SOURCE_REF]
+local library_version = head[COL_LIBRARY_VERSION]
 local chunk_count = tonumber(head[COL_CHUNK_COUNT]) or 0
 
 -- --- Step 2: library-deployed → deploy the versioned script -------------------
@@ -236,12 +243,17 @@ end
 local rule_created = (rule_res[1] ~= nil and rule_res[1][2] == true)
 
 -- --- Step 4: idempotently upsert the provenance row ---------------------------
+-- `source` is the effective source the operator/default resolved from (its
+-- audit value: reveals whether a mutable `latest` tag, a pinned vX.Y.Z, or a
+-- bucketfs: path was used); library_version is the concrete release the index
+-- self-declared, so a `latest` install is auditable back to a fixed version.
 local reg_ok, reg_res = pquery("EXECUTE SCRIPT PREPROC.MODULE_REGISTER("
     .. sql_str(name) .. ", " .. string.format("%d", version) .. ", "
     .. sql_nullable(source_repo) .. ", " .. sql_nullable(source_ref) .. ", "
     .. sql_nullable(sha256) .. ", " .. sql_str(script_name) .. ", "
     .. sql_str(function_name) .. ", " .. sql_str(phase) .. ", "
-    .. sql_str(deploy_mode) .. ")")
+    .. sql_str(deploy_mode) .. ", " .. sql_nullable(source) .. ", "
+    .. sql_nullable(library_version) .. ")")
 if not reg_ok then
     error("PREPROC.MODULE_INSTALL: MODULE_REGISTER failed: " .. tostring(reg_res.error_message))
 end
@@ -266,8 +278,13 @@ else
 end
 
 -- `module` is a reserved word in a column-description string, so the output
--- column is quoted to carry the spec's `module | version | phase | status` shape.
+-- column is quoted to carry the spec's `module | version | phase | status`
+-- shape, extended with the resolved library_version so the operator sees which
+-- concrete release a `latest` install landed on. Coerce a missing version to the
+-- `null` sentinel (a Lua nil would shorten the row and break the column count).
+local library_version_out = is_null(library_version) and null or library_version
 exit(
-    {{name, version, phase, status}},
-    '"module" VARCHAR(256), version DECIMAL(9,0), phase VARCHAR(32), status VARCHAR(32)'
+    {{name, version, phase, status, library_version_out}},
+    '"module" VARCHAR(256), version DECIMAL(9,0), phase VARCHAR(32), status VARCHAR(32), '
+        .. 'library_version VARCHAR(64)'
 )

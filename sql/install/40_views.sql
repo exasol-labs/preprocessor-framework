@@ -34,6 +34,8 @@ SELECT
     version,
     source_repo,
     source_ref,
+    source_url,
+    library_version,
     sha256,
     script_name,
     function_name,

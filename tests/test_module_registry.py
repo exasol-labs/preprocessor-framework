@@ -9,12 +9,14 @@ network or database.
 """
 
 import hashlib
+import json
 
 import pytest
 
 from preproc.module.registry import (
     RegistryEntry,
     RegistryError,
+    RegistryIndex,
     generate_index,
     index_drift,
     read_registry,
@@ -167,6 +169,30 @@ def test_index_autoindex_library_module(tmp_path):
         "repo": "exasol-labs/preprocessor-library",
         "ref": "cast_shorthand-v1",
     }
+
+
+def test_index_library_version_stamped_and_roundtrips(tmp_path):
+    """generate_index stamps a top-level library_version when given one, and it round-trips."""
+    _write_library_module(tmp_path, "cast_shorthand", version=1)
+
+    index = generate_index(
+        tmp_path, repo="exasol-labs/preprocessor-library", library_version="0.2.0"
+    )
+    assert index.library_version == "0.2.0"
+    rendered = json.loads(render_index(index))
+    assert rendered["library_version"] == "0.2.0"
+    # Round-trips through from_dict.
+    assert RegistryIndex.from_dict(rendered).library_version == "0.2.0"
+
+
+def test_index_library_version_omitted_when_absent(tmp_path):
+    """With no library_version the field is omitted entirely — indexes stay byte-identical."""
+    _write_library_module(tmp_path, "cast_shorthand", version=1)
+
+    index = generate_index(tmp_path, repo="exasol-labs/preprocessor-library")
+    assert index.library_version is None
+    assert "library_version" not in json.loads(render_index(index))
+    assert RegistryIndex.from_dict(json.loads(render_index(index))).library_version is None
 
 
 def test_index_merge_external_entry(tmp_path):

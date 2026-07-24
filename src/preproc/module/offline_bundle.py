@@ -59,8 +59,14 @@ def _rule_ensure_call(entry: RegistryEntry, scope: tuple[str, str]) -> str:
     return "EXECUTE SCRIPT PREPROC.RULE_ENSURE(" + ", ".join(_sql_literal(a) for a in args) + ")"
 
 
-def _module_register_call(entry: RegistryEntry) -> str:
-    """Build the provenance MODULE_REGISTER call for an entry."""
+def _module_register_call(
+    entry: RegistryEntry, *, source_url: str | None, library_version: str | None
+) -> str:
+    """Build the provenance MODULE_REGISTER call for an entry.
+
+    ``source_url`` (the registry the bundle was built from) and
+    ``library_version`` (the release the index declared) are recorded for audit.
+    """
     args = [
         entry.name,
         entry.version,
@@ -71,6 +77,8 @@ def _module_register_call(entry: RegistryEntry) -> str:
         entry.function,
         entry.phase,
         entry.deploy_mode,
+        source_url,
+        library_version,
     ]
     rendered = ", ".join(_sql_literal(a) for a in args)
     return f"EXECUTE SCRIPT PREPROC.MODULE_REGISTER({rendered})"
@@ -82,6 +90,7 @@ def build_offline_bundle(
     *,
     scope: tuple[str, str] | None = None,
     reader=None,
+    library_version: str | None = None,
 ) -> tuple[str, int]:
     """Return the bundle ``.sql`` text and the number of statements it contains.
 
@@ -89,6 +98,9 @@ def build_offline_bundle(
     (a tampered artifact aborts the bundle), then emitted as a ``--/`` … ``/``
     wrapped CREATE. Every entry then gets a ``;``-terminated RULE_ENSURE and
     MODULE_REGISTER. A single closing REFRESH resolves all the new rules.
+
+    ``registry`` is recorded as each row's provenance ``source_url`` and
+    ``library_version`` (the release the index declared) as its library release.
     """
     body = _HEADER
     count = 0
@@ -99,7 +111,9 @@ def build_offline_bundle(
             count += 1
         entry_scope = resolve_scope(entry, scope)
         body += _emit_sql(_rule_ensure_call(entry, entry_scope))
-        body += _emit_sql(_module_register_call(entry))
+        body += _emit_sql(
+            _module_register_call(entry, source_url=registry, library_version=library_version)
+        )
         count += 2
 
     body += _emit_sql("EXECUTE SCRIPT PREPROC.REFRESH")
@@ -114,8 +128,11 @@ def run_offline_bundle(
     *,
     scope: tuple[str, str] | None = None,
     reader=None,
+    library_version: str | None = None,
 ) -> int:
     """Write the offline bundle to ``output_path``; return the statement count."""
-    body, count = build_offline_bundle(entries, registry, scope=scope, reader=reader)
+    body, count = build_offline_bundle(
+        entries, registry, scope=scope, reader=reader, library_version=library_version
+    )
     output_path.write_text(body, encoding="utf-8")
     return count

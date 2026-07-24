@@ -111,7 +111,9 @@ def _cmd_bundle(args: argparse.Namespace) -> int:
     try:
         index = read_registry(args.registry)
         entries = [_latest_entry(index, name) for name in args.names]
-        count = run_offline_bundle(entries, args.registry, Path(args.output))
+        count = run_offline_bundle(
+            entries, args.registry, Path(args.output), library_version=index.library_version
+        )
     except Exception as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return _FAILURE_EXIT
@@ -161,7 +163,13 @@ def _cmd_add(args: argparse.Namespace) -> int:
         index = read_registry(args.registry)
         entry = _latest_entry(index, args.name)
         scope = _parse_scope_arg(args.scope)
-        result = deploy_module(connection, entry, args.registry, scope=scope)
+        result = deploy_module(
+            connection,
+            entry,
+            args.registry,
+            scope=scope,
+            library_version=index.library_version,
+        )
     except Exception as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return _FAILURE_EXIT

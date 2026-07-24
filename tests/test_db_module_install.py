@@ -504,7 +504,7 @@ def test_install_https_no_egress_no_partial_deploy(module_install_deployed):
 
 
 def test_install_result_set_reports_outcome(module_install_deployed, bucketfs_library_source):
-    """The result set reports (module, version, phase, status)."""
+    """The result set reports (module, version, phase, status, library_version)."""
     connection = module_install_deployed
     source = bucketfs_library_source.source
     scope_value = "PREPROC_TEST_RESULT_ROLE"
@@ -515,7 +515,7 @@ def test_install_result_set_reports_outcome(module_install_deployed, bucketfs_li
         )
         names = [name.lower() for name in statement.column_names()]
         rows = statement.fetchall()
-        assert names == ["module", "version", "phase", "status"]
+        assert names == ["module", "version", "phase", "status", "library_version"]
         assert len(rows) == 1
         assert rows[0][0] == "cast_shorthand"
         assert int(rows[0][1]) == 1
