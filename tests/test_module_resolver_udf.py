@@ -187,9 +187,7 @@ def test_library_version_is_surfaced_on_every_row(tmp_path):
     This is what lets an install resolved through a mutable `latest` source
     record the concrete release it actually got.
     """
-    source, exa, _ = _stage_local(
-        tmp_path, standard_library_specs(), library_version="0.2.0"
-    )
+    source, exa, _ = _stage_local(tmp_path, standard_library_specs(), library_version="0.2.0")
 
     rows = _ok_rows(run_resolver_body(source, "cast_shorthand", exa=exa))
 

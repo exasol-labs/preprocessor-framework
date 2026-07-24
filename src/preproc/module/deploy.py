@@ -182,8 +182,13 @@ def module_register(
         params["lv"] = library_version
     rows = connection.execute(
         "EXECUTE SCRIPT PREPROC.MODULE_REGISTER("
-        "{n}, {v}, {src}, {rf}, " + sha_sql + ", {scn}, {fnn}, {ph}, {dm}, "
-        + url_sql + ", " + libver_sql + ")",
+        "{n}, {v}, {src}, {rf}, "
+        + sha_sql
+        + ", {scn}, {fnn}, {ph}, {dm}, "
+        + url_sql
+        + ", "
+        + libver_sql
+        + ")",
         params,
     ).fetchall()
     return bool(rows[0][3])
