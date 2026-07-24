@@ -34,9 +34,7 @@ running a refresh — never by rewriting the global script. The framework keeps
 the resolution fresh as database roles change, and holds a **fail-open** safety
 contract: a broken module is skipped, never blocking a user's statement.
 
-**Positioning:** Exasol's single-slot constraint means two independent
-preprocessor projects normally cannot coexist — whichever sets
-`sql_preprocessor_script` last wins, clobbering the other. This framework's
+This framework's
 core value is being the **sole owner of that one slot** and the
 **multiplexer** that dispatches to every registered syntax provider through
 `MASTER`. Anyone who wants to hook a syntax transform into the slot does so as
@@ -49,10 +47,6 @@ fighting for the slot directly. See
 You deploy the framework as a **single SQL artifact** — `release.sql` — run
 once against a clean Exasol instance by a DBA. No build toolchain required.
 
-> **Prerequisites:** an Exasol instance — verified on 2025.2.x and 2026.1
-> (2025.2.1 and 2026.1.0 confirmed live) — DBA-level credentials, and a SQL
-> client that handles script bodies — EXAplus or DbVisualizer.
-
 ### 1. Get the artifact
 
 Download `release.sql` from the latest GitHub Release:
@@ -61,24 +55,15 @@ Download `release.sql` from the latest GitHub Release:
 https://github.com/exasol-labs/preprocessor-framework/releases/latest/download/release.sql
 ```
 
-`release.sql` is **generated from the `sql/` sources** and attached to every
-tagged release, so it can never drift from the framework code.
-
 ### 2. Deploy it
 
-Run `release.sql` in EXAplus or DbVisualizer against a **clean** instance. The
-`/` on its own line is the statement delimiter — required because the Lua and
-Python bodies contain semicolons.
-
-This deploys the complete control plane: the `PREPROC_ADMIN` role, the `PREPROC`
+Run `release.sql` in a SQL Client of your choice. This deploys the complete control plane: the `PREPROC_ADMIN` role, the `PREPROC`
 (admin) and `PREPROC_RT` (runtime) schemas, all tables and views, the `MASTER`
 dispatcher, the `REFRESH`/`STATUS` engine, the full rule/mode admin surface, and
 the `PREPROC …` command sugar — then runs an initial `REFRESH`. It deploys **no**
 transformation modules and does **not** activate the preprocessor.
 
-> `release.sql` is clean-install only. To re-run idempotently or upgrade an
-> existing install's columns, use the CLI installer instead (see
-> [Development](#development)).
+> `release.sql` is clean-install only. All tables will be re-created, so be careful if you only need to update the framework to update only the needed objects. The script should be executed with a DBA role.
 
 ### 3. Activate the dispatcher
 
@@ -119,31 +104,27 @@ After any rule change you run a **refresh** to rebuild the per-user resolution
 
 ### Run the bundled example
 
-[`examples/demo_ping.sql`](examples/demo_ping.sql) is the canonical authoring
-reference — one self-contained, self-registering module that creates its script
+[`examples/demo_ping.sql`](examples/demo_ping.sql) is an example module — one self-contained, self-registering module that creates its script
 and ends with the rule that registers it. Grab it from the repo and run it after
 `release.sql`: it deploys `PREPROC_RT.DEMO_PING_V1` and registers an EXPAND rule.
 Then, for any user holding the rule's role:
 
 ```sql
-PING
+PING;
 ```
+returns
 ```
 PONG
 ```
 
 The rule is scoped to a role — a user must **hold** that role for it to apply;
-edit the trailing `RULE_ADD` call to change the scope. More bundled examples
-(dialect transpilation, audit tagging, and the real-world Exasol ConfD gateway)
-live in [`examples/`](examples/README.md).
+edit the trailing `RULE_ADD` call to change the scope. 
 
 ### Install a module from the community library
 
 Published modules live in
 [`exasol-labs/preprocessor-library`](https://github.com/exasol-labs/preprocessor-library)
-— versioned, registry-discoverable syntax providers (the `expr::type` cast
-shorthand and optional-trailing-comma ergonomics now live there, not in this
-repo's `examples/`). On an internet-connected cluster you install one straight
+— an open-source library of preprocessors for you to use. On an internet-connected cluster you install one straight
 from SQL — no CLI, no toolchain. Browse, then install:
 
 ```sql
@@ -152,7 +133,7 @@ PREPROC INSTALL MODULE cast_shorthand FOR ROLE ANALYSTS;   -- deploy + register 
 ```
 
 With no source given, the framework resolves the public library at its `latest`
-release over HTTPS and records the concrete release it installed. Supply an
+release over HTTPS and records the concrete release it installed. You can also specify a different URL so you can have your own preprocessor library. Supply an
 explicit source to pin a version, use a fork, or install from BucketFS on an
 air-gapped cluster:
 
@@ -184,7 +165,7 @@ versioning discipline.
 ## Administration
 
 Everything you configure at runtime is done from SQL. When the preprocessor is
-active and you hold `PREPROC_ADMIN`, the `PREPROC` command sugar manages rules,
+active and you hold the `PREPROC_ADMIN` role, the `PREPROC` command sugar manages rules,
 modules, refresh, status, and mode inline — no `EXECUTE SCRIPT` boilerplate.
 Each command maps to exactly one admin script, so the scripted form
 (`EXECUTE SCRIPT PREPROC.RULE_ADD(...)`) works identically if you prefer it.
@@ -245,8 +226,8 @@ reference are in
 - [docs/how-it-works.md](docs/how-it-works.md) — pipeline architecture, phase semantics, dispatch rules, and module authoring
 - [docs/operations.md](docs/operations.md) — install, activate, add rules, refresh, status, modes, module management, and troubleshooting
 - [docs/module-authoring.md](docs/module-authoring.md) — the module contract SDK: the `fn(text)->nil|string` function contract, the `module.toml` manifest schema, and versioning discipline
-- [examples/](examples/) — ready-to-run preprocessor modules, one per file, each self-registering
-- [exasol-labs/preprocessor-library](https://github.com/exasol-labs/preprocessor-library) — the community module library; browse or install with `preproc module add`
+- [examples/](examples/) — example preprocessor to show how to use the framework
+- [preprocessor-library](https://github.com/exasol-labs/preprocessor-library) — the community module library; browse or install with `preproc module add`
 
 ## Development
 
