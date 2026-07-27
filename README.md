@@ -65,6 +65,17 @@ transformation modules and does **not** activate the preprocessor.
 
 > `release.sql` is clean-install only. All tables will be re-created, so be careful if you only need to update the framework to update only the needed objects. The script should be executed with a DBA role.
 
+> ⚠️ **Turn off named-parameter substitution in your SQL client.** Many GUI SQL
+> clients (DbVisualiser, DBeaver, and other JDBC tools) treat `:name` as a
+> bind-variable placeholder. `release.sql` contains Lua and Python script bodies
+> full of literal colons (`'bucketfs:'`, `if …:`, `def …:`), so a client with
+> parameterization **on** will substitute on those colons and silently corrupt
+> the deployed scripts — you'll later see errors like `object <NAME> not found`
+> or `SyntaxError: expected ':'`. Before running the file, disable parameterized
+> SQL (DbVisualiser: *SQL Commander → Parameterized SQL → off*; DBeaver:
+> *Preferences → Editors → SQL Editor → uncheck "Use named parameters"*). EXAplus
+> does not do this substitution and needs no change.
+
 ### 3. Activate the dispatcher
 
 The deploy never touches the live preprocessor slot — that stays a deliberate,

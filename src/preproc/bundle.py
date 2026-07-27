@@ -232,12 +232,23 @@ _RELEASE_HEADER = """\
 -- sugar (CONTROL_SUGAR_V1). A final REFRESH resolves the seeded control-sugar
 -- rule. Deploys NO demo/example preprocessors — those live in examples/.
 --
--- Run the whole file in EXAplus or DbVisualiser. Plain SQL statements end with
--- `;`; each Lua script body is wrapped between a `--/` line and a lone `/` line
--- (the EXAplus block delimiter) so the semicolons inside the body are not taken
--- as statement terminators. Clean-install only: CREATE ROLE/SCHEMA are unguarded
--- and the upgrade-only column ALTERs are omitted — use `preproc install` for
--- idempotent re-runs / column upgrades.
+-- Run the whole file in EXAplus (recommended). Plain SQL statements end with
+-- `;`; each Lua/Python script body is wrapped between a `--/` line and a lone
+-- `/` line (the EXAplus block delimiter) so the semicolons inside the body are
+-- not taken as statement terminators.
+--
+-- WARNING — if you run this file through a GUI SQL client that treats `:name`
+-- as a bind-variable placeholder (DbVisualiser, DBeaver, and similar JDBC
+-- tools), DISABLE parameterized SQL FIRST. With it enabled the client
+-- substitutes on the colons inside the Lua/Python script bodies (`'bucketfs:'`,
+-- `if …:`, `def …:`) and SILENTLY CORRUPTS the deployed scripts (symptoms:
+-- `object <NAME> not found`, `SyntaxError: expected ':'`). DbVisualiser:
+-- SQL Commander → Parameterized SQL → off. EXAplus does not substitute and
+-- needs no change.
+--
+-- Clean-install only: CREATE ROLE/SCHEMA are unguarded and the upgrade-only
+-- column ALTERs are omitted — use `preproc install` for idempotent re-runs /
+-- column upgrades.
 -- Does NOT activate the preprocessor (a deliberate DBA action):
 --   ALTER SYSTEM SET sql_preprocessor_script = PREPROC_RT.MASTER;
 -- =============================================================================

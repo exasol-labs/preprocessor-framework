@@ -94,7 +94,9 @@ def bucketfs_rich_source(resolver_deployed):
     except Exception as exc:  # noqa: BLE001 - environment-dependent staging; skip on failure
         pytest.skip(f"cannot stage the rich release tarball into BucketFS: {exc}")
 
-    connection.execute(f"CREATE OR REPLACE CONNECTION {_RICH_CONNECTION} TO '{config.base_url}'")
+    connection.execute(
+        f"CREATE OR REPLACE CONNECTION {_RICH_CONNECTION} TO '{config.bucketfs_address}'"
+    )
     connection.execute(f"GRANT ACCESS ON CONNECTION {_RICH_CONNECTION} TO PREPROC_ADMIN")
     source = f"bucketfs:{_RICH_CONNECTION}/{_RICH_BUCKET_PATH}"
 

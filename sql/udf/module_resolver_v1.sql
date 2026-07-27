@@ -18,14 +18,19 @@
 -- Sources
 --   bucketfs:<CONNECTION>/<path>/preproc-lib-<ver>.tar.gz
 --       An operator-created Exasol CONNECTION (the framework never creates it)
---       names a BucketFS location. Its address is resolved via
---       exa.get_connection(name) and mapped to the cluster-local mount
+--       names a BucketFS bucket. The CONNECTION's address MUST be the native
+--       Exasol BucketFS form 'bucketfs:<service>/<bucket>' (the same string the
+--       Exasol docs use, e.g. CREATE CONNECTION ... TO 'bucketfs:bfsdefault/b1'
+--       IDENTIFIED BY '<readpw>'): NO host, NO port. exa.get_connection(name)
+--       returns that address and it maps 1:1 to the cluster-local UDF mount
 --       (/buckets/<service>/<bucket>/...); the release is read NATIVELY off that
---       mount. BucketFS AUTO-EXTRACTS an uploaded archive and presents it on the
---       UDF mount as a DIRECTORY at the extension-less path (verified live), so
---       the release is normally read as extracted files; a raw tarball file is
---       also supported via tarfile for buckets that do not auto-extract. Either
---       way a BucketFS read performs NO network egress -- the release is
+--       mount. Read access is governed by Exasol's own BucketFS access rights --
+--       the granted CONNECTION and its read password -- not by this script.
+--       BucketFS AUTO-EXTRACTS an uploaded archive and presents it on the UDF
+--       mount as a DIRECTORY at the extension-less path (verified live), so the
+--       release is normally read as extracted files; a raw tarball file is also
+--       supported via tarfile for buckets that do not auto-extract. Either way a
+--       BucketFS read performs NO network egress -- the release is
 --       cluster-replicated and read locally (ADR-050).
 --   https://.../registry/index.json
 --       A pinned raw source. registry/index.json and the artifact are fetched
@@ -121,7 +126,6 @@ import os
 import re
 import tarfile
 import urllib.request
-from urllib.parse import urlparse
 
 INDEX_MEMBER = 'registry/index.json'
 CHUNK_CHARS = 2000000
@@ -276,32 +280,32 @@ def _directory_reader(extracted_dir):
 
 
 def _mount_base(address):
+    """Map a BucketFS CONNECTION address to its cluster-local UDF mount path.
+
+    The CONNECTION's address is the native Exasol BucketFS form
+    'bucketfs:<service>/<bucket>[/subpath]' (no host, no port -- the same string
+    the Exasol docs use), which maps 1:1 to the UDF mount
+    '/buckets/<service>/<bucket>[/subpath]'. An address that is already an
+    absolute '/buckets/...' mount path is accepted verbatim; anything else
+    (an https:// URL, a bare host) is rejected -- the database reaches BucketFS
+    natively and never needs a host or port.
+    """
     if not address:
         raise _SourceUnreadable('connection address is empty')
     if address.startswith('/'):
-        return address
-    parsed = urlparse(address)
-    segments = [segment for segment in parsed.path.split('/') if segment]
-    if not segments:
-        raise _SourceUnreadable('cannot derive a BucketFS bucket from connection address %r' % address)
-    bucket = segments[0]
-    subpath = '/'.join(segments[1:])
-    base = '/buckets/%s/%s' % (_find_service(bucket), bucket)
-    if subpath:
-        base = base + '/' + subpath
-    return base
-
-
-def _find_service(bucket):
-    root = '/buckets'
-    try:
-        services = sorted(os.listdir(root))
-    except OSError as exc:
-        raise _SourceUnreadable('cannot list %s: %s' % (root, exc))
-    for service in services:
-        if os.path.isdir(os.path.join(root, service, bucket)):
-            return service
-    raise _SourceUnreadable('no BucketFS service under %s mounts bucket %r' % (root, bucket))
+        return address.rstrip('/')
+    if address.startswith('bucketfs:'):
+        rest = address[len('bucketfs:'):].lstrip('/')
+        segments = [segment for segment in rest.split('/') if segment]
+        if len(segments) < 2:
+            raise _SourceUnreadable(
+                "malformed BucketFS connection address %r "
+                "(expected 'bucketfs:<service>/<bucket>')" % address)
+        return '/buckets/' + '/'.join(segments)
+    raise _SourceUnreadable(
+        "unsupported BucketFS connection address %r "
+        "(expected the native 'bucketfs:<service>/<bucket>' form, no host/port)"
+        % address)
 
 
 def _https_reader(source):

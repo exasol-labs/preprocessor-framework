@@ -24,9 +24,21 @@ package.
   it) and is read natively; a value beginning `https://` is a pinned GitHub raw
   source. The `<CONNECTION_NAME>` is resolved via `exa.get_connection(name)`; no
   connection name is hardcoded.
+* The CONNECTION's address MUST be the native Exasol BucketFS form
+  `bucketfs:<service>/<bucket>` (the string the Exasol docs prescribe, e.g.
+  `CREATE CONNECTION … TO 'bucketfs:bfsdefault/bucket1' IDENTIFIED BY '<readpw>'`) —
+  no host, no port. It maps 1:1 to the cluster-local UDF mount
+  `/buckets/<service>/<bucket>`; an address already given as an absolute
+  `/buckets/…` path is accepted verbatim. Any other address (an `https://…:2581/…`
+  URL, a bare host) is a `source_unreadable` error: the database reaches BucketFS
+  natively and never needs a host or port, and the service name is taken from the
+  address rather than guessed by scanning `/buckets`. Read access is governed by
+  Exasol's BucketFS access rights — the granted CONNECTION and its read password —
+  not by the resolver.
 * The BucketFS reader reads the whole-library release tarball natively through
-  the cluster-local BucketFS mount (`/buckets/<service>/<bucket>/...`, derived
-  from the CONNECTION) using Python `tarfile`, reads `registry/index.json` from
+  the cluster-local BucketFS mount (`/buckets/<service>/<bucket>/...`, mapped
+  directly from the CONNECTION's `bucketfs:<service>/<bucket>` address) using
+  Python `tarfile`, reads `registry/index.json` from
   within the tarball, selects the requested module's latest entry, and reads that
   module's artifact member. A BucketFS read performs NO network egress — the file
   is cluster-replicated and read locally.

@@ -117,10 +117,19 @@ or download a CI-built copy. CI produces it two ways:
   git tag v1.2.0 && git push origin v1.2.0
   ```
 
-Run the file in EXAplus or DbVisualiser against a **clean** Exasol instance. Plain
-SQL statements end with `;`; each Lua script body is wrapped between a `--/` line
-and a lone `/` line (the EXAplus block delimiter) because the bodies contain
+Run the file in EXAplus against a **clean** Exasol instance. Plain
+SQL statements end with `;`; each Lua/Python script body is wrapped between a `--/`
+line and a lone `/` line (the EXAplus block delimiter) because the bodies contain
 semicolons.
+
+> **Warning — GUI SQL clients corrupt the script bodies.** DbVisualiser, DBeaver,
+> and similar JDBC tools treat `:name` as a bind-variable placeholder and, with
+> parameterized SQL enabled, substitute on the colons *inside* the Lua/Python
+> script bodies — silently corrupting the deployed scripts (symptoms:
+> `object <NAME> not found`, `SyntaxError: expected ':'`). Before running
+> `release.sql` in such a client, disable parameterized SQL (DbVisualiser:
+> *SQL Commander → Parameterized SQL → off*). EXAplus does not do this
+> substitution and needs no change.
 
 It deploys the `PREPROC_ADMIN` role, both schemas, all tables, the `MY_PIPELINE`
 view, schema grants, the `MASTER` dispatcher, the `REFRESH`/`STATUS` engine, the
@@ -499,7 +508,9 @@ needed on that side:
 ```bash
 uv run preproc module bundle cast-shorthand trailing-comma --output offline_modules.sql
 # hand-carry offline_modules.sql to the air-gapped instance, then run it
-# with EXAplus / DbVisualizer as any other SQL file
+# with EXAplus (a GUI client like DbVisualiser/DBeaver must have parameterized
+# SQL disabled, or it corrupts the `:`-bearing script bodies — see the release.sql
+# warning above)
 ```
 
 An offline local checkout of the library repo also works as `--registry` for
@@ -591,9 +602,19 @@ responsibility, done once per cluster. Create it and grant the
 it:
 
 ```sql
-CREATE OR REPLACE CONNECTION PREPROC_BFS TO 'https://<bucketfs-host>:2581/<bucket>';
+CREATE OR REPLACE CONNECTION PREPROC_BFS
+    TO 'bucketfs:<service>/<bucket>' IDENTIFIED BY '<read-password>';
 GRANT ACCESS ON CONNECTION PREPROC_BFS TO PREPROC_ADMIN;
 ```
+
+Use the **native BucketFS address** — `bucketfs:<service>/<bucket>` (e.g.
+`bucketfs:bfsdefault/preprocessor`), the same form the [Exasol
+docs](https://docs.exasol.com/db/latest/database_concepts/bucketfs/database_access.htm)
+use — **not** an `https://…:2581/…` URL. The database reads BucketFS natively
+off the cluster-local mount (`/buckets/<service>/<bucket>/…`), so no host, no
+port, and no network egress are involved; `<service>` is the BucketFS service
+name (usually `bfsdefault`) and read access is governed entirely by this granted
+CONNECTION and its read password.
 
 The connection name (`PREPROC_BFS` above) is never hardcoded by the
 framework — it is whatever the operator named it, referenced by the
