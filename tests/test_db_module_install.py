@@ -121,7 +121,9 @@ def _stage(connection, conn_name, bucket_path, specs, *, probe, tamper=None):
     except Exception as exc:  # noqa: BLE001 - staging is environment-dependent; skip on any failure
         pytest.skip(f"cannot stage the release tarball into BucketFS: {exc}")
 
-    connection.execute(f"CREATE OR REPLACE CONNECTION {conn_name} TO '{config.base_url}'")
+    connection.execute(
+        f"CREATE OR REPLACE CONNECTION {conn_name} TO '{config.bucketfs_address}'"
+    )
     connection.execute(f"GRANT ACCESS ON CONNECTION {conn_name} TO PREPROC_ADMIN")
     source = f"bucketfs:{conn_name}/{bucket_path}"
 

@@ -383,6 +383,7 @@ class _BytesResponse(io.BytesIO):
 
 BFS_WRITE_PASSWORD_ENV = "EXASOL_BFS_WRITE_PASSWORD"
 _DEFAULT_BUCKET = "default"
+_DEFAULT_SERVICE = "bfsdefault"
 
 
 @dataclass
@@ -391,10 +392,21 @@ class BucketFsConfig:
     port: str
     bucket: str
     write_password: str
+    service: str
 
     @property
     def base_url(self) -> str:
+        """HTTPS endpoint used by the test harness to PUT/GET staging bytes."""
         return f"https://{self.host}:{self.port}/{self.bucket}"
+
+    @property
+    def bucketfs_address(self) -> str:
+        """Native BucketFS CONNECTION address the resolver reads (no host/port).
+
+        Mirrors the Exasol-documented ``bucketfs:<service>/<bucket>`` form that
+        maps 1:1 to the UDF mount ``/buckets/<service>/<bucket>``.
+        """
+        return f"bucketfs:{self.service}/{self.bucket}"
 
 
 def bucketfs_config() -> BucketFsConfig | None:
@@ -413,6 +425,7 @@ def bucketfs_config() -> BucketFsConfig | None:
         port=os.environ.get("EXASOL_BFS_PORT", "2581"),
         bucket=os.environ.get("EXASOL_BFS_BUCKET", _DEFAULT_BUCKET),
         write_password=write_password,
+        service=os.environ.get("EXASOL_BFS_SERVICE", _DEFAULT_SERVICE),
     )
 
 

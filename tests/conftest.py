@@ -101,7 +101,9 @@ def bucketfs_library_source(resolver_deployed):
     except Exception as exc:  # noqa: BLE001 - staging is environment-dependent; skip on any failure
         pytest.skip(f"cannot stage the release tarball into BucketFS: {exc}")
 
-    connection.execute(f"CREATE OR REPLACE CONNECTION {_TEST_CONNECTION} TO '{config.base_url}'")
+    connection.execute(
+        f"CREATE OR REPLACE CONNECTION {_TEST_CONNECTION} TO '{config.bucketfs_address}'"
+    )
     connection.execute(f"GRANT ACCESS ON CONNECTION {_TEST_CONNECTION} TO PREPROC_ADMIN")
     source = f"bucketfs:{_TEST_CONNECTION}/{_RELEASE_BUCKET_PATH}"
 
