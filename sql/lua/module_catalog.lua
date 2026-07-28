@@ -38,9 +38,24 @@
 --
 -- Result contract
 --   Created RETURNS TABLE: one row per advertised module with columns
---     name, version, phase, deploy_mode, installed
+--     name, version, phase, deploy_mode, installed, object_count, objects
 --   emitted via exit(result_table, column_spec). A source advertising zero
 --   modules returns an empty result set (not an error).
+--
+-- object_count / objects  (the pre-install review gate -- ADR-057)
+--   The resolver's list-all ('*') row already carries the entry's DECLARED
+--   object inventory in its `objects` column (schema_version-1 script_name
+--   fallback already applied there -- see module_resolver_v1.sql), so this
+--   script reports it VERBATIM rather than re-deriving anything: `objects` is
+--   passed through unchanged (the same newline-separated 'TYPE|NAME' wire
+--   format PREPROC.MODULES.objects and PREPROC_RT.INSTALLED_MODULES use, and
+--   the same format module_reclaim.lua parses) and `object_count` is the
+--   number of lines in it. A NULL `objects` (a self-deployed / no-artifact
+--   entry) reports object_count 0 -- there is no artifact to enumerate.
+--   Because this is the declared inventory as written in the entry, an object
+--   outside PREPROC_RT or PREPROC appears exactly as declared, schema and all
+--   -- there is nothing to hide it, and MODULE_CATALOG creates none of the
+--   objects it reports.
 -- =============================================================================
 
 -- The CREATE header declares the typed parameter; luacheck cannot see it, so
@@ -48,6 +63,19 @@
 -- luacheck: read globals source
 
 local LIST_ALL_SENTINEL = "*"
+
+-- Count the newline-separated 'TYPE|NAME' lines in a resolver `objects` value.
+-- A NULL/absent inventory (self-deployed / no-artifact entry) counts as 0.
+local function object_count(objects_raw)
+    if objects_raw == nil or objects_raw == null then
+        return 0
+    end
+    local count = 0
+    for _ in string.gmatch(tostring(objects_raw), "[^\n]+") do
+        count = count + 1
+    end
+    return count
+end
 
 -- --- Step 1: drive the resolver in index-metadata-only mode -------------------
 -- No FROM clause: a SET script over a single-row driving input forms exactly
@@ -88,16 +116,33 @@ end
 
 -- --- Step 3: marshal the catalog rows, joining the installed? flag ------------
 -- Resolver EMITS order: status(1) error_kind(2) error_message(3) name(4)
--- version(5) phase(6) script_name(7) function_name(8) deploy_mode(9) ...
+-- version(5) phase(6) script_name(7) function_name(8) deploy_mode(9) sha256(10)
+-- suggested_scope_type(11) suggested_scope_value(12) source_repo(13)
+-- source_ref(14) library_version(15) chunk_index(16) chunk_count(17)
+-- artifact_chunk(18) objects(19).
 local rows = {}
 for i = 1, #res_rows do
     local r = res_rows[i]
-    local name, version, phase, deploy_mode = r[4], r[5], r[6], r[9]
-    rows[i] = {name, version, phase, deploy_mode, installed[name .. "@" .. tostring(version)] == true}
+    local name, version, phase, deploy_mode, objects = r[4], r[5], r[6], r[9], r[19]
+    -- `objects` sits in the LAST column position: a Lua nil here (as opposed to
+    -- the `null` sentinel) would shorten this row's table constructor and break
+    -- the column count, exactly the reason module_install.lua coerces its own
+    -- trailing nullable column the same way.
+    local objects_out = objects == nil and null or objects
+    rows[i] = {
+        name,
+        version,
+        phase,
+        deploy_mode,
+        installed[name .. "@" .. tostring(version)] == true,
+        object_count(objects),
+        objects_out,
+    }
 end
 
 exit(
     rows,
     "name VARCHAR(256), version DECIMAL(9,0), phase VARCHAR(32),"
-        .. " deploy_mode VARCHAR(32), installed BOOLEAN"
+        .. " deploy_mode VARCHAR(32), installed BOOLEAN,"
+        .. " object_count DECIMAL(9,0), objects VARCHAR(200000)"
 )

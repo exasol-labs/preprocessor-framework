@@ -11,13 +11,18 @@ and with no cluster or network. The live counterparts live in
 
 from __future__ import annotations
 
+import hashlib
 import tarfile
 import urllib.error
 from pathlib import Path
 
+import pytest
 from _dbfixtures import (
     EMITS_CHUNK_CHARS,
+    RESOLVER_SQL_PATH,
     build_library_tarball,
+    composite_library_module,
+    composite_object_specs,
     default_artifact_text,
     fake_http_directory,
     library_module,
@@ -26,6 +31,15 @@ from _dbfixtures import (
     self_deployed_module,
     standard_library_specs,
 )
+
+from preproc.module.manifest import ArtifactError, parse_manifest, verify_artifact_inventory
+from preproc.module.registry import OBJECTS_MAX_CHARS, encode_objects
+
+_ARTIFACT_PY_PATH = (
+    Path(__file__).resolve().parent.parent / "src" / "preproc" / "module" / "artifact.py"
+)
+_SPLITTER_BEGIN = "# BEGIN ARTIFACT SPLITTER"
+_SPLITTER_END = "# END ARTIFACT SPLITTER"
 
 _TARBALL_NAME = "preproc-lib-0.1.0.tar.gz"
 _EXTRACTED_DIR = "preproc-lib-0.1.0"
@@ -112,9 +126,9 @@ def test_sha256_mismatch_is_hard_failure(tmp_path):
 def test_script_name_mismatch_is_hard_failure(tmp_path):
     """An artifact whose CREATE targets a name other than the declared script_name fails.
 
-    Structural parity with the CLI's ``verify_artifact_script_name``: the sha256
-    still matches (the index describes exactly these bytes), but the artifact's
-    CREATE targets ``PREPROC_RT.IMPOSTOR_V1`` rather than the declared
+    Structural parity with the CLI's ``manifest.verify_artifact_inventory``: the
+    sha256 still matches (the index describes exactly these bytes), but the
+    artifact's CREATE targets ``PREPROC_RT.IMPOSTOR_V1`` rather than the declared
     ``PREPROC_RT.CAST_SHORTHAND_V1`` -- the resolver returns no usable artifact.
     """
     impostor = (
@@ -154,7 +168,7 @@ def test_artifact_without_create_is_hard_failure(tmp_path):
 
     assert row["error_kind"] == "artifact_invalid"
     assert row["artifact_chunk"] is None
-    assert "found 0" in row["error_message"]
+    assert "carries no statements" in row["error_message"]
 
 
 def test_self_deployed_returns_metadata_only(tmp_path):
@@ -336,3 +350,540 @@ def test_list_all_sentinel_propagates_index_read_errors(tmp_path):
     row = _error_row(run_resolver_body("bucketfs:NOPE/lib.tar.gz", "*", exa=make_fake_exa({})))
     assert row["error_kind"] == "source_unreadable"
     assert row["artifact_chunk"] is None
+
+
+# ---------------------------------------------------------------------------
+# Embedded splitter: byte-identity + block-structure (ADR: canonical Python
+# splitter embedded verbatim into the resolver UDF, CI byte-identical).
+# ---------------------------------------------------------------------------
+
+
+def _resolver_sql_text() -> str:
+    return RESOLVER_SQL_PATH.read_text(encoding="utf-8")
+
+
+def _embedded_splitter_source() -> str:
+    """Extract the splitter delimited by the sentinel comments, VERBATIM."""
+    text = _resolver_sql_text()
+    assert _SPLITTER_BEGIN in text and _SPLITTER_END in text, (
+        f"{RESOLVER_SQL_PATH} carries no splitter delimited by "
+        f"{_SPLITTER_BEGIN!r} ... {_SPLITTER_END!r}"
+    )
+    return text.split(_SPLITTER_BEGIN + "\n", 1)[1].split(_SPLITTER_END, 1)[0]
+
+
+def test_embedded_splitter_is_byte_identical_to_artifact_py():
+    """The resolver's embedded splitter must never drift from artifact.py.
+
+    There is exactly ONE canonical Python splitter implementation
+    (``src/preproc/module/artifact.py``); the resolver UDF carries a verbatim
+    copy between sentinel comments, and this assertion is what makes
+    Python-vs-Python divergence structurally impossible rather than merely
+    tested (ADR: canonical Python splitter embedded verbatim into the UDF).
+    This test is the actual CI enforcement: it runs hermetically, with no
+    database, on every test run.
+    """
+    embedded = _embedded_splitter_source()
+    canonical = _ARTIFACT_PY_PATH.read_text(encoding="utf-8")
+
+    assert embedded == canonical
+
+
+def test_embedded_splitter_carries_no_lone_terminator_lines():
+    """Neither the embedded splitter nor artifact.py itself may carry a lone '/' or '--/' line.
+
+    ``install.py`` strips every line whose ``strip() == '/'`` from the resolver
+    ``.sql`` before sending it to pyexasol (the EXAplus interactive terminator
+    convention). If ``artifact.py`` ever gained such a line, the DEPLOYED
+    resolver would be silently corrupted at deploy time -- strictly AFTER the
+    byte-identity check above passes -- so byte-identity alone cannot catch
+    this failure mode; it needs this separate structural assertion. A lone
+    '--/' line is checked too, for the same reason on the block-OPEN side
+    (though a bare '--/' is invalid Python and would already fail to compile).
+    """
+    embedded = _embedded_splitter_source()
+    canonical = _ARTIFACT_PY_PATH.read_text(encoding="utf-8")
+
+    for label, text in (("embedded copy", embedded), ("src/preproc/module/artifact.py", canonical)):
+        offending = [
+            (index, line)
+            for index, line in enumerate(text.split("\n"), start=1)
+            if line.strip() in ("/", "--/")
+        ]
+        assert not offending, f"{label} carries a lone '/' or '--/' line: {offending}"
+
+
+def test_resolver_body_has_no_premature_block_terminator():
+    """The resolver's whole Python body ends its EXAplus block with exactly one lone '/'.
+
+    ``bundle.py``'s ``_strip_terminator``/``_emit_script`` (and ``install.py``'s
+    stripping) only special-case the FINAL lone-'/' line of the file -- an
+    earlier stray lone '/' anywhere in the body would prematurely close the
+    ``--/`` ... ``/`` block release.sql wraps this UDF in, silently truncating
+    the deployed script. This asserts the embed did not introduce one: across
+    the ENTIRE Python body (not just the embedded region), only the file's own
+    last line may be a lone '/', and no line at all may be a lone '--/'.
+    """
+    text = _resolver_sql_text()
+    marker = ") AS\n"
+    idx = text.find(marker)
+    assert idx != -1, "resolver CREATE statement has no ') AS' body marker"
+    body = text[idx + len(marker) :]
+
+    lines = body.split("\n")
+    # A trailing split("\n") artifact is an empty final element when the file
+    # ends in "\n"; drop it so "the last line" means the last line with content.
+    if lines and lines[-1] == "":
+        lines = lines[:-1]
+
+    assert lines[-1].strip() == "/", "the resolver body must end with a lone '/' terminator"
+    for index, line in enumerate(lines[:-1], start=1):
+        assert line.strip() != "/", f"line {index} is a premature lone '/' terminator: {line!r}"
+        assert line.strip() != "--/", f"line {index} is a stray lone '--/' block-open: {line!r}"
+
+
+# ---------------------------------------------------------------------------
+# Composite-artifact object inventory: derive + verify + emit.
+# ---------------------------------------------------------------------------
+
+
+def test_composite_module_inventory_is_verified_and_emitted(tmp_path):
+    """A composite module whose declared objects agree with the artifact resolves OK.
+
+    The artifact creates one Lua entry script + two Python UDFs; the manifest
+    declares exactly that inventory. The resolver splits the artifact, derives
+    the same three objects, confirms they agree with the entry's declared
+    ``objects``, and emits the derived inventory (file order) encoded in
+    ``registry.encode_objects``'s wire format.
+    """
+    specs = [composite_library_module("subsystem_mod", version=1)]
+    source, exa, _ = _stage_local(tmp_path, specs)
+
+    rows = _ok_rows(run_resolver_body(source, "subsystem_mod", exa=exa))
+
+    assert len(rows) == 1
+    expected = composite_object_specs("subsystem_mod", 1)
+    assert rows[0]["objects"] == encode_objects(expected)
+
+
+def test_composite_inventory_undeclared_object_is_hard_failure(tmp_path):
+    """An object the artifact creates but the entry does not declare is a hard failure."""
+    specs = [composite_library_module("subsystem_mod", version=1)]
+    declared = composite_object_specs("subsystem_mod", 1)[:-1]  # drop HELPER_B
+    source, exa, _ = _stage_local(tmp_path, specs, objects_override={"subsystem_mod": declared})
+
+    row = _error_row(run_resolver_body(source, "subsystem_mod", exa=exa))
+
+    assert row["error_kind"] == "artifact_invalid"
+    assert row["artifact_chunk"] is None
+    assert row["objects"] is None
+    assert "PREPROC_RT.SUBSYSTEM_MOD_HELPER_B_V1" in row["error_message"]
+    assert "does not declare it" in row["error_message"]
+
+
+def test_composite_inventory_missing_declared_object_is_hard_failure(tmp_path):
+    """An object the entry declares but the artifact does not create is a hard failure."""
+    specs = [composite_library_module("subsystem_mod", version=1)]
+    declared = [
+        *composite_object_specs("subsystem_mod", 1),
+        {"type": "TABLE", "name": "PREPROC_RT.SUBSYSTEM_MOD_PHANTOM_V1"},
+    ]
+    source, exa, _ = _stage_local(tmp_path, specs, objects_override={"subsystem_mod": declared})
+
+    row = _error_row(run_resolver_body(source, "subsystem_mod", exa=exa))
+
+    assert row["error_kind"] == "artifact_invalid"
+    assert row["artifact_chunk"] is None
+    assert "PREPROC_RT.SUBSYSTEM_MOD_PHANTOM_V1" in row["error_message"]
+    assert "does not create it" in row["error_message"]
+
+
+def test_schema_version_1_entry_derives_single_object_inventory(tmp_path):
+    """A schema_version-1 index (no `objects` key at all) still resolves unchanged.
+
+    Its inventory is derived as the single ENTRY_OBJECT_TYPE object named by
+    the entry's script_name -- exactly the pre-composite check -- and that
+    single-object inventory is what gets emitted.
+    """
+    source, exa, _ = _stage_local(tmp_path, standard_library_specs(), schema_version=1)
+
+    rows = _ok_rows(run_resolver_body(source, "cast_shorthand", exa=exa))
+
+    assert len(rows) == 1
+    assert rows[0]["script_name"] == "PREPROC_RT.CAST_SHORTHAND_V1"
+    assert rows[0]["objects"] == encode_objects(
+        [{"type": "LUA SCRIPT", "name": "PREPROC_RT.CAST_SHORTHAND_V1"}]
+    )
+
+
+def test_self_deployed_objects_column_is_null(tmp_path):
+    """A self-deployed entry's objects column stays NULL: no artifact travels through here."""
+    specs = [
+        self_deployed_module(
+            "semantic_views", version=3, phase="EXPAND", source=("exasol/semantic_views", "v3.0.0")
+        )
+    ]
+    source, exa, _ = _stage_local(tmp_path, specs)
+
+    rows = _ok_rows(run_resolver_body(source, "semantic_views", exa=exa))
+
+    assert rows[0]["objects"] is None
+
+
+def test_list_all_reports_declared_objects_including_v1_fallback(tmp_path):
+    """List-all mode reports each entry's DECLARED inventory, v1 fallback included.
+
+    No artifact is read in list-all mode, so a composite entry's objects come
+    straight from the index declaration, and a schema_version-1 entry (no
+    `objects` key) falls back to the single script_name object -- matching
+    module/db-catalog's pre-install review contract.
+    """
+    specs = [*standard_library_specs(), composite_library_module("subsystem_mod", version=1)]
+    source, exa, _ = _stage_local(tmp_path, specs, schema_version=1)
+
+    rows = _ok_rows(run_resolver_body(source, "*", exa=exa))
+
+    by_name = {row["name"]: row for row in rows}
+    assert by_name["cast_shorthand"]["objects"] == encode_objects(
+        [{"type": "LUA SCRIPT", "name": "PREPROC_RT.CAST_SHORTHAND_V1"}]
+    )
+    # schema_version=1 strips every declared 'objects' key, even the composite
+    # entry's -- the fallback derives ONLY the single script_name object, which
+    # is the honest reading of a genuine version-1 index (it predates 'objects'
+    # entirely, so a v1 index could never have declared the two companions).
+    assert by_name["subsystem_mod"]["objects"] == encode_objects(
+        [{"type": "LUA SCRIPT", "name": "PREPROC_RT.SUBSYSTEM_MOD_V1"}]
+    )
+
+
+# ---------------------------------------------------------------------------
+# Generational discipline and inventory width: rules manifest.py enforces for
+# the CLI, which the DB path MUST enforce identically or MODULE_INSTALL accepts
+# what `preproc module add` rejects on the identical bytes.
+# ---------------------------------------------------------------------------
+
+# The width of PREPROC.MODULES.objects (sql/install/22_modules_table.sql), of
+# MODULE_REGISTER's CAST, and of the resolver's own `objects` EMITS column.
+#
+# Imported, never restated: the resolver body under test carries its own PINNED
+# copy of this number (it cannot import from Python), so asserting the CANONICAL
+# value appears in the resolver's own error message makes these tests double as a
+# drift check on that mirror — a resolver left at the old width would fail here
+# rather than silently becoming the effective limit.
+_OBJECTS_MAX_CHARS = OBJECTS_MAX_CHARS
+
+
+def _terminated(statement: str) -> str:
+    return statement.rstrip("\n") + "\n;\n"
+
+
+def _composite(*statements: str) -> str:
+    """Join statements into one ``;``-separated composite artifact."""
+    return "".join(_terminated(statement) for statement in statements)
+
+
+def _table(name: str) -> str:
+    return f"CREATE OR REPLACE TABLE {name} (k VARCHAR(64))"
+
+
+def _manifest_for(name: str, version: int, objects, artifact_text: str):
+    """A contract-valid manifest declaring ``objects`` for ``artifact_text``.
+
+    Lets a resolver test assert the CLI's verdict on the very bytes it stages,
+    so a parity claim is proven rather than assumed.
+    """
+    return parse_manifest(
+        {
+            "name": name,
+            "description": f"{name} module.",
+            "phase": "TRANSLATE",
+            "script_name": f"PREPROC_RT.{name.upper()}_V{version}",
+            "function": name,
+            "version": version,
+            "min_framework": "1.0.0",
+            "deploy_mode": "library-deployed",
+            "sha256": hashlib.sha256(artifact_text.encode("utf-8")).hexdigest(),
+            "suggested_scope": {"type": "ROLE", "value": "PREPROC_ADMIN"},
+            "objects": list(objects),
+        }
+    )
+
+
+def test_object_without_version_suffix_is_hard_failure(tmp_path):
+    """An index-declared object with no ``_V<N>`` suffix is refused, naming the rule.
+
+    This is the failure the widened reclaim ownership boundary depends on being
+    impossible. An unsuffixed name is shared across generations, so an index
+    declaring ``PREPROC_RT.SHARED_STATE`` for both v1 and v2 lets a v1 reclaim
+    drop an object live v2 depends on. ``manifest.py`` rejects the declaration
+    at parse time, so only a hand-edited ``index.json``, a fork, or a publisher
+    not using ``generate_index`` can produce one -- and it reaches the database
+    through this resolver, never through the CLI.
+
+    The declared and derived inventories AGREE here, so the both-directions
+    comparison cannot catch it: the suffix rule is the only gate.
+    """
+    shared = "PREPROC_RT.SHARED_STATE"
+    artifact = _composite(default_artifact_text("shared_mod", 1, "shared_mod"), _table(shared))
+    hand_edited = [
+        {"type": "LUA SCRIPT", "name": "PREPROC_RT.SHARED_MOD_V1"},
+        {"type": "TABLE", "name": shared},
+    ]
+    # module.toml keeps a contract-valid declaration -- manifest.py would reject
+    # the hand-edited one -- so only the SERIALIZED index carries the unsuffixed
+    # object, exactly as `tamper` corrupts only the tarball copy of the bytes.
+    specs = [
+        library_module(
+            "shared_mod",
+            version=1,
+            function="shared_mod",
+            artifact_text=artifact,
+            objects=(
+                {"type": "LUA SCRIPT", "name": "PREPROC_RT.SHARED_MOD_V1"},
+                {"type": "TABLE", "name": f"{shared}_V1"},
+            ),
+        )
+    ]
+    source, exa, _ = _stage_local(tmp_path, specs, objects_override={"shared_mod": hand_edited})
+
+    row = _error_row(run_resolver_body(source, "shared_mod", exa=exa))
+
+    assert row["error_kind"] == "artifact_invalid"
+    assert row["artifact_chunk"] is None
+    assert row["objects"] is None
+    assert shared in row["error_message"]
+    assert "_V1" in row["error_message"]
+
+
+def test_object_with_another_generations_suffix_is_hard_failure(tmp_path):
+    """A declared object suffixed ``_V2`` while the module is v1 is refused.
+
+    The other half of ``manifest.py``'s rule: carrying *a* suffix is not
+    enough, it must be the module's own. A v1 entry declaring a ``_V2``
+    companion would make v1's reclaim drop the v2 generation's object.
+    """
+    crossgen = "PREPROC_RT.CROSSGEN_MOD_STATE_V2"
+    artifact = _composite(
+        default_artifact_text("crossgen_mod", 1, "crossgen_mod"), _table(crossgen)
+    )
+    hand_edited = [
+        {"type": "LUA SCRIPT", "name": "PREPROC_RT.CROSSGEN_MOD_V1"},
+        {"type": "TABLE", "name": crossgen},
+    ]
+    specs = [
+        library_module(
+            "crossgen_mod",
+            version=1,
+            function="crossgen_mod",
+            artifact_text=artifact,
+            objects=(
+                {"type": "LUA SCRIPT", "name": "PREPROC_RT.CROSSGEN_MOD_V1"},
+                {"type": "TABLE", "name": "PREPROC_RT.CROSSGEN_MOD_STATE_V1"},
+            ),
+        )
+    ]
+    source, exa, _ = _stage_local(tmp_path, specs, objects_override={"crossgen_mod": hand_edited})
+
+    row = _error_row(run_resolver_body(source, "crossgen_mod", exa=exa))
+
+    assert row["error_kind"] == "artifact_invalid"
+    assert row["artifact_chunk"] is None
+    assert crossgen in row["error_message"]
+    assert "_V1" in row["error_message"]
+
+
+def test_artifact_creating_an_object_twice_is_hard_failure(tmp_path):
+    """An artifact creating the same object twice is refused, as the CLI refuses it.
+
+    A single declaration plus two creating statements makes the declared and
+    derived *sets* equal, so the both-directions comparison is blind to it --
+    set equality has no multiplicity. ``verify_artifact_inventory`` catches it
+    with an explicit duplicate check, and this asserts both verdicts on the one
+    artifact so the parity requirement is proven, not assumed.
+    """
+    state = "PREPROC_RT.DUP_MOD_STATE_V1"
+    artifact = _composite(
+        default_artifact_text("dup_mod", 1, "dup_mod"), _table(state), _table(state)
+    )
+    declared = [
+        {"type": "LUA SCRIPT", "name": "PREPROC_RT.DUP_MOD_V1"},
+        {"type": "TABLE", "name": state},
+    ]
+
+    with pytest.raises(ArtifactError, match="more than once"):
+        verify_artifact_inventory(_manifest_for("dup_mod", 1, declared, artifact), artifact)
+
+    specs = [
+        library_module(
+            "dup_mod",
+            version=1,
+            function="dup_mod",
+            artifact_text=artifact,
+            objects=tuple(declared),
+        )
+    ]
+    source, exa, _ = _stage_local(tmp_path, specs)
+
+    row = _error_row(run_resolver_body(source, "dup_mod", exa=exa))
+
+    assert row["error_kind"] == "artifact_invalid"
+    assert row["artifact_chunk"] is None
+    assert row["objects"] is None
+    assert "more than once" in row["error_message"]
+    assert state in row["error_message"]
+
+
+def test_declaration_missing_its_name_stays_a_structured_failure(tmp_path):
+    """A declaration with no ``name`` key is refused as ``artifact_invalid``, not ``error``.
+
+    The suffix rule has to read each declared name, and a hand-edited entry may
+    simply omit it. The resolver's contract is that every failure is a
+    *structured* row, so this must stay in the ``artifact_invalid`` vocabulary
+    rather than surfacing a Python ``AttributeError`` as the operator's
+    diagnostic under the catch-all ``error`` kind.
+    """
+    artifact = _composite(
+        default_artifact_text("noname_mod", 1, "noname_mod"),
+        _table("PREPROC_RT.NONAME_MOD_STATE_V1"),
+    )
+    legal = (
+        {"type": "LUA SCRIPT", "name": "PREPROC_RT.NONAME_MOD_V1"},
+        {"type": "TABLE", "name": "PREPROC_RT.NONAME_MOD_STATE_V1"},
+    )
+    specs = [
+        library_module(
+            "noname_mod",
+            version=1,
+            function="noname_mod",
+            artifact_text=artifact,
+            objects=legal,
+        )
+    ]
+    source, exa, _ = _stage_local(
+        tmp_path, specs, objects_override={"noname_mod": [dict(legal[0]), {"type": "TABLE"}]}
+    )
+
+    row = _error_row(run_resolver_body(source, "noname_mod", exa=exa))
+
+    assert row["error_kind"] == "artifact_invalid"
+    assert "must declare both 'type' and 'name'" in row["error_message"]
+    assert "AttributeError" not in row["error_message"]
+
+
+def _inventory_over_limit(name: str, version: int) -> list[dict[str, str]]:
+    """A declared inventory whose encoded wire form just exceeds the objects column.
+
+    Grown one TABLE at a time until it does, so the fixture tracks the limit
+    instead of hard-coding an object count that a column widening would rot.
+
+    The running length is accumulated as objects are appended rather than
+    re-encoding the whole list per candidate: at the current width the inventory
+    runs to a few thousand objects, where re-encoding is quadratic in that count
+    and would dominate this file's runtime. The single ``encode_objects`` call at
+    the end keeps that arithmetic honest against the real wire format.
+    """
+    upper = name.upper()
+    objects = [{"type": "LUA SCRIPT", "name": f"PREPROC_RT.{upper}_V{version}"}]
+    encoded_length = len(encode_objects(objects))
+    while encoded_length <= _OBJECTS_MAX_CHARS:
+        table = {
+            "type": "TABLE",
+            "name": f"PREPROC_RT.{upper}_STATE_{len(objects):04d}_V{version}",
+        }
+        objects.append(table)
+        encoded_length += len("\n") + len(table["type"]) + len("|") + len(table["name"])
+    assert len(encode_objects(objects)) == encoded_length
+    return objects
+
+
+def _inventory_at_limit(name: str, version: int) -> list[dict[str, str]]:
+    """A declared inventory whose encoded wire form is EXACTLY the column width."""
+    objects = _inventory_over_limit(name, version)[:-1]
+    suffix = f"_V{version}"
+    padding = "X" * (_OBJECTS_MAX_CHARS - len(encode_objects(objects)))
+    tail = objects[-1]
+    objects[-1] = {"type": tail["type"], "name": tail["name"][: -len(suffix)] + padding + suffix}
+    assert len(encode_objects(objects)) == _OBJECTS_MAX_CHARS
+    return objects
+
+
+def _artifact_for_inventory(name: str, version: int, objects) -> str:
+    """A composite artifact creating exactly ``objects``, in declaration order."""
+    statements = [default_artifact_text(name, version, name)]
+    statements += [_table(obj["name"]) for obj in objects[1:]]
+    return _composite(*statements)
+
+
+def _inventory_spec(name: str, objects) -> list:
+    return [
+        library_module(
+            name,
+            version=1,
+            function=name,
+            artifact_text=_artifact_for_inventory(name, 1, objects),
+            objects=tuple(objects),
+        )
+    ]
+
+
+def test_inventory_wider_than_the_objects_column_is_hard_failure(tmp_path):
+    """An inventory too wide for PREPROC.MODULES.objects is refused before any write.
+
+    Nothing in the contract caps the object count, so a large subsystem module
+    reaches an encoded inventory the provenance column cannot hold -- and this
+    manifest is entirely contract-valid, so the CLI accepts it too. The
+    provenance row is written LAST, after every CREATE and after RULE_ENSURE, so
+    discovering the width there would leave the module live and dispatching with
+    no provenance row: un-retirable and un-reclaimable, the exact inverse of "a
+    partial install is inert".
+
+    The over-width value is also invisible to this harness's own emit (a Python
+    list has no column width) and would fail opaquely inside the UDF on a real
+    cluster, which is why the resolver needs its own length check rather than
+    Exasol's.
+    """
+    objects = _inventory_over_limit("wide_inventory_mod", 1)
+    source, exa, _ = _stage_local(tmp_path, _inventory_spec("wide_inventory_mod", objects))
+
+    row = _error_row(run_resolver_body(source, "wide_inventory_mod", exa=exa))
+
+    assert row["error_kind"] == "artifact_invalid"
+    assert row["artifact_chunk"] is None
+    assert row["objects"] is None
+    assert str(_OBJECTS_MAX_CHARS) in row["error_message"]
+    assert str(len(encode_objects(objects))) in row["error_message"]
+
+
+def test_inventory_exactly_at_the_column_width_resolves(tmp_path):
+    """An inventory encoding to exactly the column width is legal and resolves.
+
+    Pins the comparison as "over the limit", never "at the limit": an
+    off-by-one would refuse a maximal but perfectly recordable inventory.
+    """
+    objects = _inventory_at_limit("edge_inventory_mod", 1)
+    source, exa, _ = _stage_local(tmp_path, _inventory_spec("edge_inventory_mod", objects))
+
+    rows = _ok_rows(run_resolver_body(source, "edge_inventory_mod", exa=exa))
+
+    assert rows[0]["objects"] == encode_objects(objects)
+    assert len(rows[0]["objects"]) == _OBJECTS_MAX_CHARS
+
+
+def test_list_all_over_wide_inventory_emits_only_the_error_row(tmp_path):
+    """One over-wide entry fails list-all as a single ERROR row, leaking no OK rows.
+
+    The catalog's ``objects`` column has the same width, so an over-wide entry
+    cannot be listed at all. Every entry is therefore encoded BEFORE the first
+    row is emitted, which keeps the documented "a failure is a single ERROR row"
+    shape rather than emitting OK rows for whichever entries sorted ahead of the
+    offender (``wide_inventory_mod`` sorts LAST of the three staged here, so a
+    per-entry check would emit two OK rows first).
+    """
+    objects = _inventory_over_limit("wide_inventory_mod", 1)
+    specs = [*standard_library_specs(), *_inventory_spec("wide_inventory_mod", objects)]
+    source, exa, _ = _stage_local(tmp_path, specs)
+
+    row = _error_row(run_resolver_body(source, "*", exa=exa))
+
+    assert row["error_kind"] == "artifact_invalid"
+    assert str(_OBJECTS_MAX_CHARS) in row["error_message"]

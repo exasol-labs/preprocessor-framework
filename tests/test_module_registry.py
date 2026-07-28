@@ -10,13 +10,18 @@ network or database.
 
 import hashlib
 import json
+import re
+from pathlib import Path
 
 import pytest
 
 from preproc.module.registry import (
+    OBJECTS_MAX_CHARS,
     RegistryEntry,
     RegistryError,
     RegistryIndex,
+    decode_objects,
+    encode_objects,
     generate_index,
     index_drift,
     read_registry,
@@ -48,13 +53,24 @@ def _write_library_module(
     deploy_mode: str = "library-deployed",
     sha256: str | None = "__auto__",
     source: str | None = None,
+    extra_statements: list[str] | None = None,
+    objects: list[tuple[str, str]] | None = None,
 ) -> None:
-    """Write a conformant modules/<name>/{module.toml,<name>_v<N>.sql} pair."""
+    """Write a conformant modules/<name>/{module.toml,<name>_v<N>.sql} pair.
+
+    ``extra_statements`` appends companion statements (each already block-closed
+    with its own trailing ``/`` marker line) after the entry Lua script, turning
+    the artifact composite. ``objects`` writes a ``[[objects]]`` array declaring
+    ``(type, name)`` pairs in file order; when omitted the manifest declares
+    none, which is legal only for a single-statement (N=1) artifact.
+    """
     function = function or name.replace("-", "_")
     module_dir = tmp_path / "modules" / name
     module_dir.mkdir(parents=True, exist_ok=True)
 
     artifact_text = _artifact_text(name, version, function)
+    if extra_statements:
+        artifact_text += "\n" + "\n".join(extra_statements) + "\n"
     artifact_path = module_dir / f"{name}_v{version}.sql"
     artifact_path.write_text(artifact_text, encoding="utf-8")
 
@@ -85,6 +101,12 @@ def _write_library_module(
         'type = "ROLE"',
         'value = "PREPROC_ADMIN"',
     ]
+    if objects:
+        for obj_type, obj_name in objects:
+            lines.append("")
+            lines.append("[[objects]]")
+            lines.append(f'type = "{obj_type}"')
+            lines.append(f'name = "{obj_name}"')
     (module_dir / "module.toml").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -169,6 +191,119 @@ def test_index_autoindex_library_module(tmp_path):
         "repo": "exasol-labs/preprocessor-library",
         "ref": "cast_shorthand-v1",
     }
+
+
+def test_library_module_autoindexed_with_objects(tmp_path):
+    """A central-library module is auto-indexed from its manifest, including objects."""
+    _write_library_module(tmp_path, "cast_shorthand", version=1)
+
+    index = generate_index(
+        tmp_path, repo="exasol-labs/preprocessor-library", ref="cast_shorthand-v1"
+    )
+
+    assert len(index.entries) == 1
+    entry = index.entries[0]
+    assert entry.name == "cast_shorthand"
+    assert entry.version == 1
+    assert entry.phase == "TRANSLATE"
+    assert entry.script_name == "PREPROC_RT.CAST_SHORTHAND_V1"
+    assert entry.function == "cast_shorthand"
+    assert entry.sha256 is not None
+    assert entry.objects == ({"type": "LUA SCRIPT", "name": "PREPROC_RT.CAST_SHORTHAND_V1"},)
+    assert entry.source == {
+        "repo": "exasol-labs/preprocessor-library",
+        "ref": "cast_shorthand-v1",
+    }
+
+
+def test_single_statement_manifest_yields_one_object(tmp_path):
+    """A single-statement manifest with no [[objects]] array still yields an inventory."""
+    _write_library_module(tmp_path, "cast_shorthand", version=1)
+
+    index = generate_index(tmp_path, repo="exasol-labs/preprocessor-library")
+
+    entry = index.entries[0]
+    assert entry.objects == ({"type": "LUA SCRIPT", "name": "PREPROC_RT.CAST_SHORTHAND_V1"},)
+
+
+def test_index_entry_carries_object_inventory(tmp_path):
+    """A composite module's index entry carries its declared object inventory, in file order."""
+    _write_library_module(
+        tmp_path,
+        "subsystem_mod",
+        version=1,
+        extra_statements=[
+            "CREATE OR REPLACE PYTHON3 SCALAR SCRIPT PREPROC_RT.SUBSYSTEM_MOD_HELPER_V1"
+            "(x VARCHAR(100)) RETURNS VARCHAR(100) AS\n"
+            "def run(x):\n"
+            "    return x\n"
+            "/\n",
+            "CREATE OR REPLACE PYTHON3 SCALAR SCRIPT PREPROC_RT.SUBSYSTEM_MOD_OTHER_V1"
+            "(x VARCHAR(100)) RETURNS VARCHAR(100) AS\n"
+            "def run(x):\n"
+            "    return x\n"
+            "/\n",
+        ],
+        objects=[
+            ("LUA SCRIPT", "PREPROC_RT.SUBSYSTEM_MOD_V1"),
+            ("PYTHON3 SCALAR SCRIPT", "PREPROC_RT.SUBSYSTEM_MOD_HELPER_V1"),
+            ("PYTHON3 SCALAR SCRIPT", "PREPROC_RT.SUBSYSTEM_MOD_OTHER_V1"),
+        ],
+    )
+
+    index = generate_index(tmp_path, repo="exasol-labs/preprocessor-library")
+
+    entry = index.entries[0]
+    assert entry.objects == (
+        {"type": "LUA SCRIPT", "name": "PREPROC_RT.SUBSYSTEM_MOD_V1"},
+        {"type": "PYTHON3 SCALAR SCRIPT", "name": "PREPROC_RT.SUBSYSTEM_MOD_HELPER_V1"},
+        {"type": "PYTHON3 SCALAR SCRIPT", "name": "PREPROC_RT.SUBSYSTEM_MOD_OTHER_V1"},
+    )
+
+    rendered_first = render_index(index)
+    rendered_second = render_index(
+        generate_index(tmp_path, repo="exasol-labs/preprocessor-library")
+    )
+    assert rendered_first == rendered_second
+
+
+def test_generated_index_declares_schema_version_2(tmp_path):
+    """The generated index declares a top-level schema_version of 2."""
+    _write_library_module(tmp_path, "cast_shorthand", version=1)
+
+    index = generate_index(tmp_path, repo="exasol-labs/preprocessor-library")
+
+    assert index.schema_version == 2
+    assert json.loads(render_index(index))["schema_version"] == 2
+
+
+def test_schema_version_1_index_still_reads():
+    """A published schema_version 1 index (no per-entry objects key) keeps resolving."""
+    raw = {
+        "schema_version": 1,
+        "modules": [
+            {
+                "name": "cast_shorthand",
+                "version": 1,
+                "phase": "TRANSLATE",
+                "script_name": "PREPROC_RT.CAST_SHORTHAND_V1",
+                "function": "cast_shorthand",
+                "description": "Cast shorthand module.",
+                "min_framework": "1.0.0",
+                "suggested_scope": {"type": "ROLE", "value": "PREPROC_ADMIN"},
+                "deploy_mode": "library-deployed",
+                "sha256": "a" * 64,
+                "artifact_path": "modules/cast_shorthand/cast_shorthand_v1.sql",
+                "source": {"repo": "exasol-labs/preprocessor-library", "ref": "main"},
+            }
+        ],
+    }
+
+    index = RegistryIndex.from_dict(raw)
+
+    assert len(index.entries) == 1
+    entry = index.entries[0]
+    assert entry.objects == ({"type": "LUA SCRIPT", "name": "PREPROC_RT.CAST_SHORTHAND_V1"},)
 
 
 def test_index_library_version_stamped_and_roundtrips(tmp_path):
@@ -304,6 +439,63 @@ def test_registry_sha_mismatch_aborts(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# objects column encoding: newline-separated TYPE|NAME lines
+# ---------------------------------------------------------------------------
+
+
+def test_encode_objects_pins_the_exact_wire_format():
+    """encode_objects emits one 'TYPE|NAME' line per object, in order, joined by '\\n'.
+
+    Pinned so the format cannot drift silently: task 4.4 (module_reclaim.lua)
+    parses this exact text with ``line:match("^(.-)|(.*)$")`` per line.
+    """
+    declared = [
+        {"type": "LUA SCRIPT", "name": "PREPROC_RT.CONTROL_DATABASE_V1"},
+        {"type": "PYTHON3 SCALAR SCRIPT", "name": "PREPROC_RT.CONFD_JOB_V1"},
+    ]
+    assert encode_objects(declared) == (
+        "LUA SCRIPT|PREPROC_RT.CONTROL_DATABASE_V1\nPYTHON3 SCALAR SCRIPT|PREPROC_RT.CONFD_JOB_V1"
+    )
+
+
+def test_encode_objects_none_or_empty_is_null():
+    """None and an empty inventory both encode to None (SQL NULL)."""
+    assert encode_objects(None) is None
+    assert encode_objects([]) is None
+
+
+def test_decode_objects_none_is_none():
+    """A NULL column decodes to None, the 'fall back to script_name' signal."""
+    assert decode_objects(None) is None
+
+
+def test_objects_round_trips_through_encode_decode():
+    """decode_objects(encode_objects(objs)) == objs for a multi-object inventory."""
+    declared = [
+        {"type": "LUA SCRIPT", "name": "PREPROC_RT.CONTROL_DATABASE_V1"},
+        {"type": "PYTHON3 SCALAR SCRIPT", "name": "PREPROC_RT.CONFD_JOB_V1"},
+        {"type": "TABLE", "name": "PREPROC_RT.CONFD_STATE_V1"},
+    ]
+    assert decode_objects(encode_objects(declared)) == declared
+
+
+def test_decode_objects_splits_on_first_pipe_only():
+    """A name that legitimately contains no pipe (validation forbids it) still round-trips.
+
+    Confirms decode splits each line on its FIRST '|', matching the Lua
+    ``(.-)|(.*)`` non-greedy/greedy pattern task 4.4 will use.
+    """
+    raw = "LUA SCRIPT|PREPROC_RT.CONTROL_DATABASE_V1"
+    assert decode_objects(raw) == [{"type": "LUA SCRIPT", "name": "PREPROC_RT.CONTROL_DATABASE_V1"}]
+
+
+def test_decode_objects_rejects_a_line_with_no_pipe():
+    """A line missing the '|' delimiter raises rather than silently misparsing."""
+    with pytest.raises(RegistryError):
+        decode_objects("LUA SCRIPT PREPROC_RT.CONTROL_DATABASE_V1")
+
+
+# ---------------------------------------------------------------------------
 # CI sync-drift check
 # ---------------------------------------------------------------------------
 
@@ -329,3 +521,91 @@ def test_index_sync_check_missing_committed_index(tmp_path):
     _write_library_module(tmp_path, "cast_shorthand", version=1)
     drift = index_drift(tmp_path, repo="exasol-labs/preprocessor-library")
     assert drift != []
+
+
+# ---------------------------------------------------------------------------
+# Width of PREPROC.MODULES.objects: the canonical constant and its mirrors
+# ---------------------------------------------------------------------------
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+# A pinned copy of the objects-column width takes one of two forms: an SQL width
+# declared on a column named `objects` (the table DDL, the widening ALTER,
+# MODULE_REGISTER's CAST, the resolver's EMITS, MODULE_CATALOG's EMITS), or an
+# OBJECTS_MAX_CHARS assignment (the resolver's and module_install.lua's
+# abort-before-write guards). `manifest VARCHAR(4000)` in 20_tables.sql is a
+# different column and deliberately does not match.
+_PINNED_WIDTH = re.compile(r"objects\s+(?:AS\s+)?VARCHAR\((\d+)\)|OBJECTS_MAX_CHARS\s*=\s*(\d+)")
+
+# Every source that MUST carry at least one pinned copy. Enumerated so a site
+# that is renamed away, or reformatted past the pattern above, fails loudly
+# instead of passing with nothing to check.
+_WIDTH_MIRROR_FILES = (
+    "sql/install/22_modules_table.sql",
+    "sql/install/25_column_upgrades.sql",
+    "sql/lua/module_register.lua",
+    "sql/lua/module_catalog.lua",
+    "sql/lua/module_install.lua",
+    "sql/udf/module_resolver_v1.sql",
+    "src/preproc/module/registry.py",
+)
+
+
+def _pinned_widths(path):
+    """Every pinned objects-column width in one source file, as (line number, value)."""
+    text = path.read_text(encoding="utf-8")
+    return [
+        (number, int(match.group(1) or match.group(2)))
+        for number, line in enumerate(text.splitlines(), start=1)
+        for match in _PINNED_WIDTH.finditer(line)
+    ]
+
+
+def _width_sources():
+    """Every shipped SQL, Lua, and Python source that could pin the width."""
+    return sorted(
+        [
+            *(_REPO_ROOT / "sql").rglob("*.sql"),
+            *(_REPO_ROOT / "sql").rglob("*.lua"),
+            *(_REPO_ROOT / "src").rglob("*.py"),
+        ]
+    )
+
+
+def test_every_pinned_objects_width_equals_the_canonical_constant():
+    """No shipped source may pin a PREPROC.MODULES.objects width other than the constant.
+
+    The width is declared in seven places that cannot import each other: the
+    table DDL, the widening ALTER in ``25_column_upgrades.sql``,
+    MODULE_REGISTER's CAST, the resolver's ``objects`` EMITS and its
+    ``OBJECTS_MAX_CHARS`` pre-flight guard, MODULE_CATALOG's EMITS, and
+    ``module_install.lua``'s pre-flight guard. Because an abort-before-write
+    gate reads that number, the NARROWEST copy is the effective limit — so a
+    partial widening does not fail, it silently keeps the old ceiling while
+    every other site advertises the new one. Nothing but this test makes the
+    seven move together.
+
+    Scanned by pattern over the whole shipped tree rather than by enumeration,
+    so a width pinned in a source added later is covered without being
+    remembered here.
+    """
+    stale = [
+        (path.relative_to(_REPO_ROOT).as_posix(), number, width)
+        for path in _width_sources()
+        for number, width in _pinned_widths(path)
+        if width != OBJECTS_MAX_CHARS
+    ]
+    assert stale == [], (
+        f"these sources pin a PREPROC.MODULES.objects width other than "
+        f"OBJECTS_MAX_CHARS ({OBJECTS_MAX_CHARS}): {stale}"
+    )
+
+
+@pytest.mark.parametrize("relative_path", _WIDTH_MIRROR_FILES)
+def test_each_known_width_mirror_still_pins_a_width(relative_path):
+    """Each source known to pin the width still does, so the scan above has teeth.
+
+    A pattern that matches nothing passes vacuously; this pins the six mirrors
+    plus the canonical constant as sources the scan genuinely reads.
+    """
+    assert _pinned_widths(_REPO_ROOT / relative_path) != []

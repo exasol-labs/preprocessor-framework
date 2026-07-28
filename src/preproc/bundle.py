@@ -140,7 +140,7 @@ def _script_statements() -> dict[str, str]:
         f"RETURNS TABLE AS\n{_read_source(_RULE_ENSURE_LUA_PATH, 'rule_ensure.lua')}",
         "MODULE_REGISTER": f"CREATE OR REPLACE LUA SCRIPT PREPROC.MODULE_REGISTER("
         f"name, version, source, ref, sha256, script_name, function_name, phase, deploy_mode, "
-        f"source_url, library_version) "
+        f"source_url, library_version, objects) "
         f"RETURNS TABLE AS\n{_read_source(_MODULE_REGISTER_LUA_PATH, 'module_register.lua')}",
         "MODULE_RETIRE": f"CREATE OR REPLACE LUA SCRIPT PREPROC.MODULE_RETIRE(name, version) "
         f"RETURNS TABLE AS\n{_read_source(_MODULE_RETIRE_LUA_PATH, 'module_retire.lua')}",

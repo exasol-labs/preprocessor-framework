@@ -41,6 +41,25 @@
 --                                 or pinned URL, or bucketfs: path), or SQL NULL
 --   library_version VARCHAR(64)   concrete library release the index declared
 --                                 (audits a `latest` install), or SQL NULL
+--   objects       VARCHAR(200000) deployed object inventory as newline-separated
+--                                 'TYPE|NAME' lines, one per object, in FILE
+--                                 order, each line split on its FIRST '|'
+--                                 (preproc.module.registry.encode_objects).
+--                                 Delimiter safety comes from validation, not
+--                                 escaping: manifest.py rejects a declared type
+--                                 or name containing '\n', '\r', or '|'.
+--                                 Deliberately not JSON, so MODULE_RECLAIM can
+--                                 parse it back with no JSON library guaranteed.
+--                                 SQL NULL for a self-deployed module (no
+--                                 artifact, so nothing to inventory) or a row
+--                                 written before this column existed. The
+--                                 CALLER is responsible for confirming the
+--                                 encoding fits: the CAST below rejects an
+--                                 over-long value, and by the time this script
+--                                 runs the artifact's DDL and the activation
+--                                 rule are already committed (see
+--                                 module_install.lua's OBJECTS_MAX_CHARS
+--                                 pre-flight and the resolver's own check)
 --
 -- Validation order (rejected call is side-effect free)
 --   phase is validated first and raises via error() before any MERGE, mirroring
@@ -50,11 +69,11 @@
 --   PREPROC.MODULES is unchanged on rejection.
 --
 -- NULL binding
---   Nullable parameters (source, ref, sha256, source_url, library_version) are
---   normalised to the Exasol `null` sentinel before binding: a Lua nil would drop
---   the key from the bind table and fail the bind, whereas `null` binds SQL NULL.
---   Every USING column is CAST to its target type so a NULL bind still carries an
---   explicit type into the MERGE.
+--   Nullable parameters (source, ref, sha256, source_url, library_version,
+--   objects) are normalised to the Exasol `null` sentinel before binding: a Lua
+--   nil would drop the key from the bind table and fail the bind, whereas
+--   `null` binds SQL NULL. Every USING column is CAST to its target type so a
+--   NULL bind still carries an explicit type into the MERGE.
 --
 -- Result contract
 --   Created RETURNS TABLE: (name, version, status, created). created is TRUE when
@@ -65,7 +84,7 @@
 -- The CREATE header declares the typed parameters; luacheck cannot see it, so
 -- declare them (and the Exasol `null` sentinel is already a project read_global).
 -- luacheck: read globals name version source ref sha256 script_name function_name phase deploy_mode
--- luacheck: read globals source_url library_version
+-- luacheck: read globals source_url library_version objects
 
 local VALID_PHASES = {TRANSLATE = true, EXPAND = true, REWRITE = true}
 
@@ -113,7 +132,8 @@ local mg_ok, mg_res = pquery(
               CAST(:script_name AS VARCHAR(128))     AS script_name,
               CAST(:function_name AS VARCHAR(128))   AS function_name,
               CAST(:phase AS VARCHAR(32))            AS phase,
-              CAST(:deploy_mode AS VARCHAR(32))      AS deploy_mode
+              CAST(:deploy_mode AS VARCHAR(32))      AS deploy_mode,
+              CAST(:objects AS VARCHAR(200000))      AS objects
       ) s
       ON m.name = s.name AND m.version = s.version
       WHEN MATCHED THEN UPDATE SET
@@ -126,20 +146,22 @@ local mg_ok, mg_res = pquery(
           function_name   = s.function_name,
           phase           = s.phase,
           deploy_mode     = s.deploy_mode,
+          objects         = s.objects,
           status          = 'deployed',
           retired_at      = NULL
       WHEN NOT MATCHED THEN INSERT
           (name, version, source_repo, source_ref, source_url, library_version, sha256,
-           script_name, function_name, phase, deploy_mode, status, installed_at, retired_at)
+           script_name, function_name, phase, deploy_mode, objects, status, installed_at,
+           retired_at)
           VALUES
           (s.name, s.version, s.source_repo, s.source_ref, s.source_url, s.library_version,
-           s.sha256, s.script_name, s.function_name, s.phase, s.deploy_mode, 'deployed',
-           CURRENT_TIMESTAMP, NULL)]],
+           s.sha256, s.script_name, s.function_name, s.phase, s.deploy_mode, s.objects,
+           'deployed', CURRENT_TIMESTAMP, NULL)]],
     {
         name = name, version = version, source = nz(source), ref = nz(ref),
         source_url = nz(source_url), library_version = nz(library_version),
         sha256 = nz(sha256), script_name = script_name, function_name = function_name,
-        phase = phase, deploy_mode = deploy_mode,
+        phase = phase, deploy_mode = deploy_mode, objects = nz(objects),
     }
 )
 if not mg_ok then

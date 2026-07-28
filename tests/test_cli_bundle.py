@@ -7,12 +7,16 @@ path constants. The subprocess test invokes ``uv run preproc bundle`` to
 exercise the installed entry point.
 """
 
+import hashlib
 import subprocess
 from pathlib import Path
 
 import pytest
 
 from preproc import bundle
+from preproc.module.artifact import split_statements
+from preproc.module.offline_bundle import build_offline_bundle, run_offline_bundle
+from preproc.module.registry import RegistryEntry, decode_objects
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -282,6 +286,213 @@ def test_cli_bundle_help():
     assert "--output" in result.stdout
 
 
+_WIDGET_ARTIFACT = (
+    "--/\n"
+    "CREATE OR REPLACE LUA SCRIPT PREPROC_RT.WIDGET_V1() AS\n"
+    "function widget(sqltext)\n"
+    "    local x = 1; return sqltext\n"
+    "end;\n"
+    "/\n"
+    "\n"
+    "--/\n"
+    "CREATE OR REPLACE PYTHON3 SCALAR SCRIPT PREPROC_RT.WIDGET_HELPER_V1"
+    "(x VARCHAR(100)) RETURNS VARCHAR(100) AS\n"
+    "import re;\n"
+    "def run(ctx):\n"
+    "    return ctx.x\n"
+    "/\n"
+    "\n"
+    "CREATE TABLE PREPROC_RT.WIDGET_CACHE_V1 (ID INT);\n"
+)
+_WIDGET_OBJECTS = (
+    {"type": "LUA SCRIPT", "name": "PREPROC_RT.WIDGET_V1"},
+    {"type": "PYTHON3 SCALAR SCRIPT", "name": "PREPROC_RT.WIDGET_HELPER_V1"},
+    {"type": "TABLE", "name": "PREPROC_RT.WIDGET_CACHE_V1"},
+)
+
+
+def _write_composite_widget(tmp_path):
+    """Write the synthetic 3-object composite module under ``tmp_path`` and index it.
+
+    Returns the ``RegistryEntry`` a registry index would carry for it: a Lua
+    entry script, a companion Python UDF, and a plain table (ADR-054/D3).
+    """
+    module_dir = tmp_path / "modules" / "widget"
+    module_dir.mkdir(parents=True)
+    (module_dir / "widget_v1.sql").write_text(_WIDGET_ARTIFACT, encoding="utf-8")
+    return RegistryEntry(
+        name="widget",
+        version=1,
+        phase="TRANSLATE",
+        script_name="PREPROC_RT.WIDGET_V1",
+        function="widget",
+        description="widget module.",
+        min_framework="1.0.0",
+        suggested_scope={"type": "ROLE", "value": "PREPROC_ADMIN"},
+        deploy_mode="library-deployed",
+        source={"repo": "exasol-labs/preprocessor-library", "ref": "main"},
+        sha256=hashlib.sha256(_WIDGET_ARTIFACT.encode("utf-8")).hexdigest(),
+        artifact_path="modules/widget/widget_v1.sql",
+        objects=_WIDGET_OBJECTS,
+    )
+
+
+def _declared_parameters(create_header):
+    """The bare parameter names a generated ``CREATE ... SCRIPT`` header declares."""
+    return [name.strip() for name in create_header.split("(", 1)[1].split(")", 1)[0].split(",")]
+
+
+def _call_arguments(statement):
+    """The top-level arguments of an ``EXECUTE SCRIPT x(...)`` call, verbatim.
+
+    Commas inside a single-quoted literal (``''`` escapes a quote) do not
+    separate arguments, so a literal carrying a comma or a newline stays one
+    argument — which is how the emitted call is read by the database too.
+    """
+    inner = statement[statement.index("(") + 1 : statement.rindex(")")]
+    args = [""]
+    quoted = False
+    for char in inner:
+        if char == "'":
+            quoted = not quoted
+        if char == "," and not quoted:
+            args.append("")
+        else:
+            args[-1] += char
+    return [arg.strip() for arg in args]
+
+
+def _literal_value(argument):
+    """The Python string a rendered SQL literal argument carries."""
+    assert argument.startswith("'") and argument.endswith("'"), argument
+    return argument[1:-1].replace("''", "'")
+
+
+def test_bundle_emits_composite_statements_with_delimiters(tmp_path):
+    """A composite module's statements are each delimited so the bundle stays hand-runnable.
+
+    Exercises ``preproc.module.offline_bundle.build_offline_bundle`` directly
+    against a synthetic composite artifact (a Lua entry script, a companion
+    Python UDF, and a plain table — ADR-054/D3). Verifies ADR-058 (D4): a
+    statement whose body contains a semicolon is preserved VERBATIM inside a
+    ``--/`` ... ``/`` block — never routed through the terminator stripper that
+    would corrupt a trailing ``;`` the body's own syntax needs — while a plain
+    object statement with no internal semicolon is ``;``-terminated instead.
+    """
+    entry = _write_composite_widget(tmp_path)
+
+    body, count = build_offline_bundle([entry], str(tmp_path))
+
+    # Every statement's body survives verbatim, including its own internal ';'.
+    assert "local x = 1; return sqltext\nend;" in body, "block body must keep its own ';'"
+    assert "import re;\ndef run(ctx):" in body, "UDF body's ';' preserved verbatim"
+    assert "CREATE TABLE PREPROC_RT.WIDGET_CACHE_V1 (ID INT);" in body, (
+        "a statement with no internal ';' is plain ';'-terminated"
+    )
+    # The two script statements are block-delimited; the table statement is not.
+    assert body.count("--/\n") == 2
+    slash_lines = [ln for ln in body.splitlines() if ln == "/"]
+    assert len(slash_lines) == 2
+    # 3 artifact statements + RULE_ENSURE + MODULE_REGISTER + closing REFRESH.
+    assert count == 6
+
+
+def test_bundle_register_call_matches_the_installed_script_signature(tmp_path):
+    """The generated MODULE_REGISTER call supplies exactly the parameters the script declares.
+
+    The air-gap path aborts AFTER every artifact statement has committed if the
+    generated call is short an argument, leaving the module installed but
+    unregistered — so the argument count is compared against the parameter list
+    the release bundle's own ``CREATE ... PREPROC.MODULE_REGISTER`` header
+    declares, not against a hard-coded number that could drift with it.
+    """
+    entry = _write_composite_widget(tmp_path)
+
+    body, _count = build_offline_bundle([entry], str(tmp_path))
+
+    calls = [
+        statement
+        for statement in split_statements(body)
+        if statement.startswith("EXECUTE SCRIPT PREPROC.MODULE_REGISTER(")
+    ]
+    assert len(calls) == 1
+    parameters = _declared_parameters(bundle._script_statements()["MODULE_REGISTER"])
+    arguments = _call_arguments(calls[0])
+    assert len(arguments) == len(parameters), (
+        f"PREPROC.MODULE_REGISTER declares {len(parameters)} parameters {parameters} "
+        f"but the bundle supplies {len(arguments)}: {arguments}"
+    )
+
+
+def test_bundle_register_call_carries_the_encoded_inventory(tmp_path):
+    """A composite module's recorded inventory is emitted, not left as SQL NULL.
+
+    The inventory is the ownership boundary and MODULE_RECLAIM's undo list, so a
+    bundle that registers NULL would orphan every companion object of a module
+    installed from it. The encoded value must round-trip through
+    ``decode_objects`` back to the declared inventory, in file order.
+    """
+    entry = _write_composite_widget(tmp_path)
+
+    body, _count = build_offline_bundle([entry], str(tmp_path))
+
+    call = next(
+        statement
+        for statement in split_statements(body)
+        if statement.startswith("EXECUTE SCRIPT PREPROC.MODULE_REGISTER(")
+    )
+    objects_argument = _call_arguments(call)[-1]
+    assert objects_argument != "NULL", "a composite module's inventory must not be recorded as NULL"
+    assert decode_objects(_literal_value(objects_argument)) == [dict(o) for o in _WIDGET_OBJECTS]
+
+
+def test_bundle_multiline_inventory_literal_stays_one_statement(tmp_path):
+    """The multi-line inventory literal keeps the file hand-runnable in EXAplus.
+
+    The encoded inventory is newline-separated, so it renders as a SQL literal
+    spanning lines. Re-parsing the generated file with the framework's own
+    model of the EXAplus grammar (``artifact.split_statements`` — the same code
+    embedded in the in-database resolver) must yield exactly the statements the
+    generator counted, with the register call whole. Every continuation line of
+    the literal is additionally inert to a naive ``;``-scanning client: it
+    carries no terminator, no comment marker, and is neither block marker.
+    """
+    entry = _write_composite_widget(tmp_path)
+
+    body, count = build_offline_bundle([entry], str(tmp_path))
+
+    statements = split_statements(body)
+    assert len(statements) == count, "the file must re-parse into exactly `count` statements"
+
+    call = next(s for s in statements if s.startswith("EXECUTE SCRIPT PREPROC.MODULE_REGISTER("))
+    inventory = _literal_value(_call_arguments(call)[-1])
+    lines = inventory.split("\n")
+    assert len(lines) == len(_WIDGET_OBJECTS), "one inventory line per object"
+    for line in lines:
+        assert ";" not in line, f"an inventory line must not carry a terminator: {line!r}"
+        assert "--" not in line, f"an inventory line must not open a comment: {line!r}"
+        assert line.strip() not in ("/", "--/"), f"an inventory line must not be a marker: {line!r}"
+
+
+def test_bundle_file_separates_inventory_lines_with_lf(tmp_path):
+    """The written file uses LF, so the inventory literal never carries a CR.
+
+    ``module_reclaim.lua`` splits the recorded inventory on ``[^\\n]+``. A CRLF
+    file would leave a trailing ``\\r`` on every object name but the last, and
+    reclaim's DROP would name an object that does not exist — so the generator
+    must not inherit the platform line separator. Guards the Windows path from
+    any platform.
+    """
+    entry = _write_composite_widget(tmp_path)
+    out = tmp_path / "off.sql"
+
+    run_offline_bundle([entry], str(tmp_path), out)
+
+    raw = out.read_bytes()
+    assert b"\r" not in raw, "the bundle must be written with LF endings on every platform"
+    assert b"'LUA SCRIPT|PREPROC_RT.WIDGET_V1\nPYTHON3 SCALAR SCRIPT|" in raw
+
+
 def test_release_bundle_is_framework_only(tmp_path):
     """run_release_bundle emits the framework + control surface, no demos/UDF.
 
@@ -322,8 +533,15 @@ def test_release_bundle_is_framework_only(tmp_path):
     assert "CREATE OR REPLACE LUA SCRIPT PREPROC_RT.DEMO_" not in text, (
         "release bundle must not deploy any demo module"
     )
-    assert "PYTHON3 SCALAR SCRIPT" not in text, "release bundle must not include the demo UDF"
+    assert "CREATE OR REPLACE PYTHON3 SCALAR SCRIPT" not in text, (
+        "release bundle must not include the demo UDF"
+    )
     assert "ADD COLUMN" not in text, "release bundle must omit upgrade-only column ALTERs"
+    # The upgrade file also carries a WIDENING (ALTER TABLE ... MODIFY) for a
+    # column an existing install already has; the bundle is clean-install only, so
+    # 22_modules_table.sql declares the final width and the MODIFY has no place
+    # here either.
+    assert "MODIFY (" not in text, "release bundle must omit upgrade-only column widenings"
 
     # Delimiter contract (EXAplus style): plain SQL is ';'-terminated; each Lua
     # script CREATE is wrapped between a '--/' line and a lone '/' line so the

@@ -31,7 +31,7 @@ import tempfile
 import time
 import urllib.request
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -61,6 +61,7 @@ RESOLVER_COLUMNS: tuple[str, ...] = (
     "chunk_index",
     "chunk_count",
     "artifact_chunk",
+    "objects",
 )
 
 _REPO_ROOT = Path(__file__).parent.parent
@@ -91,6 +92,44 @@ def default_artifact_text(name: str, version: int, function: str) -> str:
     return _ARTIFACT_TEMPLATE.format(upper=_upper(name), version=version, function=function)
 
 
+_COMPANION_TEMPLATE = (
+    "CREATE OR REPLACE PYTHON3 SCALAR SCRIPT PREPROC_RT.{upper}_{suffix}_V{version}"
+    "(x VARCHAR(2000)) RETURNS VARCHAR(2000) AS\n"
+    "def run(ctx):\n"
+    "    return ctx.x\n"
+)
+
+
+def composite_object_specs(name: str, version: int) -> list[dict[str, str]]:
+    """The declared ``objects`` inventory for ``composite_artifact_text``'s output.
+
+    One ``LUA SCRIPT`` entry point plus two ``PYTHON3 SCALAR SCRIPT`` companions,
+    in the same file order the artifact creates them in.
+    """
+    upper = _upper(name)
+    return [
+        {"type": "LUA SCRIPT", "name": f"PREPROC_RT.{upper}_V{version}"},
+        {"type": "PYTHON3 SCALAR SCRIPT", "name": f"PREPROC_RT.{upper}_HELPER_A_V{version}"},
+        {"type": "PYTHON3 SCALAR SCRIPT", "name": f"PREPROC_RT.{upper}_HELPER_B_V{version}"},
+    ]
+
+
+def composite_artifact_text(name: str, version: int, function: str) -> str:
+    """A 3-statement composite artifact: one Lua entry script + two Python UDFs.
+
+    Matches the inventory ``composite_object_specs`` declares for the same
+    ``name``/``version``, so the two travel together in a test's fixtures.
+    """
+    upper = _upper(name)
+    parts = [default_artifact_text(name, version, function).rstrip("\n") + "\n;\n"]
+    for suffix in ("HELPER_A", "HELPER_B"):
+        parts.append(
+            _COMPANION_TEMPLATE.format(upper=upper, suffix=suffix, version=version).rstrip("\n")
+            + "\n;\n"
+        )
+    return "".join(parts)
+
+
 @dataclass(frozen=True)
 class ModuleSpec:
     """One module version to place in a throwaway release tarball."""
@@ -102,6 +141,7 @@ class ModuleSpec:
     deploy_mode: str = "library-deployed"
     source: tuple[str, str] | None = None
     artifact_text: str | None = None
+    objects: tuple[dict[str, str], ...] | None = None
 
     @property
     def resolved_function(self) -> str:
@@ -121,6 +161,33 @@ class ModuleSpec:
 
 def library_module(name: str, version: int = 1, **kwargs: Any) -> ModuleSpec:
     return ModuleSpec(name=name, version=version, deploy_mode="library-deployed", **kwargs)
+
+
+def composite_library_module(name: str, version: int = 1, **kwargs: Any) -> ModuleSpec:
+    """A library-deployed composite module: 1 Lua entry script + 2 Python UDFs.
+
+    Its ``module.toml`` declares the matching ``[[objects]]`` inventory
+    (``composite_object_specs``), which is what a well-formed composite entry
+    looks like -- the shape ``test_composite_inventory_verified_against_entry``
+    exercises. A caller may override ``objects`` to build a deliberately
+    disagreeing declaration for a hard-failure test.
+    """
+    function = kwargs.pop("function", None) or name.replace("-", "_")
+    artifact_text = kwargs.pop("artifact_text", None) or composite_artifact_text(
+        name, version, function
+    )
+    objects = kwargs.pop("objects", None)
+    if objects is None:
+        objects = tuple(composite_object_specs(name, version))
+    return ModuleSpec(
+        name=name,
+        version=version,
+        deploy_mode="library-deployed",
+        function=function,
+        artifact_text=artifact_text,
+        objects=objects,
+        **kwargs,
+    )
 
 
 def self_deployed_module(
@@ -168,6 +235,9 @@ def _write_module_tree(root: Path, spec: ModuleSpec) -> Path | None:
         repo, ref = spec.source
         lines += ["", "[source]", f'repo = "{repo}"', f'ref = "{ref}"']
     lines += ["", "[suggested_scope]", 'type = "ROLE"', 'value = "PREPROC_ADMIN"']
+    if spec.objects is not None:
+        for obj in spec.objects:
+            lines += ["", "[[objects]]", f'type = "{obj["type"]}"', f'name = "{obj["name"]}"']
     (module_dir / "module.toml").write_text("\n".join(lines) + "\n", encoding="utf-8")
     return artifact_path
 
@@ -189,6 +259,8 @@ def build_library_tarball(
     ref: str = _DEFAULT_REF,
     library_version: str | None = None,
     tamper: dict[str, bytes] | None = None,
+    objects_override: dict[str, list[dict[str, str]]] | None = None,
+    schema_version: int | None = None,
 ) -> BuiltTarball:
     """Build a ``preproc-lib-<ver>.tar.gz`` from throwaway module sources.
 
@@ -197,6 +269,17 @@ def build_library_tarball(
     ``modules/<name>/<name>_v<N>.sql`` path. ``tamper`` maps a module name to
     extra bytes appended to *only the tarball copy* of its artifact, leaving the
     index's ``sha256`` describing the clean bytes — used to force a mismatch.
+
+    ``objects_override`` maps a module name to a replacement ``objects`` list
+    written into the SERIALIZED index only (``module.toml`` and the artifact's
+    bytes are untouched) — used to build a declared inventory that disagrees
+    with what the artifact actually creates, exactly as ``tamper`` forces a
+    sha256 mismatch by only touching the tarball copy of the bytes.
+
+    ``schema_version``, when given, overrides the generated index's schema
+    version and strips every entry's ``objects`` (a genuine ``schema_version:
+    1`` index carries no ``objects`` key on any entry at all) — for building a
+    version-1 fixture.
     """
     tamper = tamper or {}
     work = Path(tempfile.mkdtemp(prefix="preproc-lib-"))
@@ -207,6 +290,22 @@ def build_library_tarball(
             artifacts[spec.name] = artifact_path
 
     index = generate_index(work, repo=repo, ref=ref, library_version=library_version)
+    if schema_version is not None:
+        index = replace(
+            index,
+            schema_version=schema_version,
+            entries=tuple(replace(entry, objects=None) for entry in index.entries),
+        )
+    if objects_override:
+        index = replace(
+            index,
+            entries=tuple(
+                replace(entry, objects=tuple(objects_override[entry.name]))
+                if entry.name in objects_override
+                else entry
+                for entry in index.entries
+            ),
+        )
     index_text = render_index(index)
     registry_dir = work / "registry"
     registry_dir.mkdir(exist_ok=True)

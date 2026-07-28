@@ -1157,7 +1157,7 @@ A future semantic-views hook-in becomes a straightforward register-only case rat
 
 **Date:** 2026-07-17
 **Plan:** `add-module-ecosystem`
-**Status:** Accepted
+**Status:** Accepted — refined by ADR-054 (the one file may carry 1..N statements; the one-statement restriction is lifted, the one-file rule and the standard layout stand)
 
 ### Context
 
@@ -1482,3 +1482,185 @@ Add `PREPROC INSTALL MODULE <name> FROM '<source>' FOR (ROLE|USER) <x>` (plus `P
 ### Consequences
 
 DBAs get a readable `PREPROC INSTALL MODULE …` / `PREPROC CATALOG MODULES …` surface that funnels through the same validating admin scripts as the scripted entry points, with no new privilege introduced by the sugar layer.
+
+---
+
+## ADR-054: Module artifact is a composite .sql carrying 1..N statements
+
+**Date:** 2026-07-27
+**Plan:** `change-module-artifact-to-composite`
+**Status:** Accepted — refines ADR-042 (the artifact stays ONE self-contained file; only the one-statement restriction is lifted)
+
+### Context
+
+`module/contract` promised "exactly ONE contract regardless of whether the module is a tiny transform or the front door to a whole subsystem", while simultaneously requiring the artifact to be exactly one `CREATE OR REPLACE LUA SCRIPT`. Both could not hold. Any module needing a Python UDF or a table was silently pushed to `self-deployed`, where the library carries only a pointer and never delivers the code — making `preprocessor-library` a phone book rather than a distribution channel for precisely the modules most worth distributing.
+
+The documented justification for the one-statement rule (`docs/module-authoring.md`: "trivially hand-carryable for air-gapped deployment and trivially hashed for integrity verification") does not survive scrutiny — a multi-statement file is equally hand-carryable and hashes identically. The real cause was mechanical: `module_install.lua` executed a single `pquery(artifact_text)`, and `pquery` takes one statement.
+
+### Decision
+
+The canonical artifact is ONE self-contained `.sql` file carrying ONE OR MORE statements. Exactly one statement MUST be the `CREATE OR REPLACE LUA SCRIPT <script_name>` entry script; the remaining statements MAY create any other objects the module needs. N=1 is the degenerate case and stays valid unchanged. `deploy_mode` gains no third value: `library-deployed` is generalised in place and `self-deployed` is untouched.
+
+### Options Considered
+
+| Option | Verdict |
+|--------|---------|
+| One file, 1..N statements; `library-deployed` generalised in place | Chosen — resolves the contradiction, keeps one contract, and makes the library a real distribution channel for subsystem modules |
+| A third `deploy_mode` for composite modules | Rejected — reintroduces the two-kinds split ADR-040 rejects |
+| A packaged archive format | Rejected — adds tooling weight and stops the artifact being hand-runnable, killing the air-gap story |
+| Multi-file artifacts | Rejected — complicates hashing and hand-carry (unchanged from ADR-042) |
+
+### Consequences
+
+A module that is the front door to a whole subsystem can now be `library-deployed` and installed from the registry. `sha256` is unaffected — it remains a digest over the whole file. The mechanical consequence is that every executor must split the artifact into statements, which ADR-058 and ADR-059 govern.
+
+---
+
+## ADR-055: Object inventory is declared in module.toml AND parse-verified
+
+**Date:** 2026-07-27
+**Plan:** `change-module-artifact-to-composite`
+**Status:** Accepted
+
+### Context
+
+Once an artifact can create N objects, something must know which objects a module owns — for pre-install review, for compensating cleanup on a failed install, and for reclaim. The database never retains the artifact, so reclaim cannot re-derive the list at drop time.
+
+### Decision
+
+`module.toml` gains an `[[objects]]` array declaring every object the artifact creates, each with a `type` and a fully-qualified `name`. Tooling ALSO parses the artifact to derive the same list independently and rejects the module when the two disagree in either direction — the same accept/reject discipline already applied to `sha256`. `[[objects]]` MAY be omitted when the artifact carries exactly one statement, in which case the inventory is derived as the single object named by `script_name`; it is REQUIRED once the artifact carries more than one statement.
+
+### Options Considered
+
+| Option | Verdict |
+|--------|---------|
+| Declare in the manifest AND verify by parsing | Chosen — drift becomes impossible, the manifest stays human-reviewable before install, and reclaim reads the declaration without re-parsing |
+| Derive by parsing only | Rejected — nothing human-reviewable before install, and reclaim would have to re-parse an artifact the database does not retain |
+| Declare only, no parse check | Rejected — permits silent drift between manifest and artifact, exactly the failure mode the `sha256` discipline exists to prevent |
+| Require `[[objects]]` even at N=1 | Rejected — would force edits to `cast_shorthand` and `trailing_comma` for zero information gain, breaking the "N=1 keeps working untouched" invariant |
+
+### Consequences
+
+The inventory becomes the module's ownership boundary: it is the undo list for compensating cleanup, the drop set for reclaim, and the pre-install review surface `MODULE_CATALOG` reports. It travels in the registry index, which is why the index `schema_version` moves to 2. It is persisted in `PREPROC.MODULES.objects` at install time.
+
+---
+
+## ADR-056: Every object in a composite artifact carries the module version suffix
+
+**Date:** 2026-07-27
+**Plan:** `change-module-artifact-to-composite`
+**Status:** Accepted
+
+### Context
+
+ADR-019 forbids `CREATE OR REPLACE` on a live module so a pinned session is never mutated out from under. With a single-script artifact that discipline was fully expressed by the entry script's `_V<N>` suffix. A composite artifact creates companions too, and an unversioned companion would be overwritten by the next generation's install.
+
+### Decision
+
+Every object an artifact creates MUST carry the module's `_V<N>` version suffix, not only the entry script. A companion whose body is identical between v1 and v2 is still redeployed under the new versioned name. The entry script MUST reference its companions by their versioned names.
+
+### Options Considered
+
+| Option | Verdict |
+|--------|---------|
+| Version every object | Chosen — v1 and v2 generations share no object name, so they coexist with zero collisions and reclaim is unambiguous |
+| Version only the entry script | Rejected — a v2 install would `CREATE OR REPLACE` a live v1 companion, which is precisely what ADR-019 forbids |
+| Version only companions that changed | Rejected — makes the inventory generation-dependent and reclaim ambiguous about shared ownership |
+
+### Consequences
+
+Redeploying an unchanged companion under a new name costs a little duplication, bought against unambiguous generational isolation. Reclaiming v1 can never drop an object v2 is using. A migrating subsystem must suffix every object it ships.
+
+---
+
+## ADR-057: Composite artifacts may target any writable schema; reclaim is inventory-bounded
+
+**Date:** 2026-07-27
+**Plan:** `change-module-artifact-to-composite`
+**Status:** Accepted
+
+### Context
+
+`module_reclaim.lua` guarded its `DROP SCRIPT` with a "PREPROC_RT-owned artifacts only" check, reasoning that the framework only ever deploys module artifacts into `PREPROC_RT`. A subsystem module, however, legitimately owns its own schema; restricting the namespace would push exactly those modules back to `self-deployed`, defeating ADR-054.
+
+### Decision
+
+A composite artifact MAY create objects in any schema the installing admin can write. The `PREPROC_RT`-only drop guard is replaced by the recorded object inventory as the ownership boundary: reclaim drops every object in the version's recorded inventory, in any schema, and MUST NOT drop an object absent from that inventory. Because installing a library-deployed module is therefore arbitrary DDL under the `PREPROC_ADMIN` boundary, `PREPROC.MODULE_CATALOG` reports each advertised module's declared object inventory so an operator sees exactly what an install would create BEFORE running it.
+
+### Options Considered
+
+| Option | Verdict |
+|--------|---------|
+| Unrestricted namespace, inventory-bounded reclaim, catalog as review gate | Chosen — safe because the inventory is declared and parse-verified (ADR-055), so reclaim knows precisely what it owns |
+| Restrict objects to `PREPROC_RT` / `PREPROC` | Rejected — a subsystem module owns its own schema; the restriction would force it back to `self-deployed` |
+| Allow any schema but keep reclaim `PREPROC_RT`-only | Rejected — would strand out-of-schema objects permanently on reclaim |
+| Require an explicit operator allow-list of writable schemas | Rejected — duplicates the privilege check the database already performs at DDL time |
+
+### Consequences
+
+The security posture is explicit rather than implied: installing a module is arbitrary DDL bounded by what `PREPROC_ADMIN` can write, and the pre-install review path is the catalog's object listing. Reclaim's correctness now depends entirely on the inventory being accurate, which ADR-055 guarantees by parse verification.
+
+---
+
+## ADR-058: Statement separation uses the EXAplus `--/` … `/` block convention
+
+**Date:** 2026-07-27
+**Plan:** `change-module-artifact-to-composite`
+**Status:** Accepted
+
+### Context
+
+A composite artifact needs an unambiguous statement separator. Lua and Python bodies contain semicolons freely, so a bare `;` split is incorrect. Whatever is chosen must not break the air-gap invariant that the artifact is one hand-carryable file an operator can simply run.
+
+### Decision
+
+Statements whose bodies contain semicolons are wrapped between a line consisting solely of `--/` and a line consisting solely of `/`. All other statements are terminated by `;`. This is the convention the framework's own `release.sql` already emits, that `confd-via-sql`'s `build.py` already emits, and that `module_install.lua` already half-knows — it strips a lone `/` terminator today.
+
+### Options Considered
+
+| Option | Verdict |
+|--------|---------|
+| EXAplus `--/` … `/` block markers | Chosen — the artifact stays directly runnable by hand in EXAplus/DbVisualiser, so hand-carry needs no tooling; already emitted by `release.sql` and `build.py` |
+| Bare `;` splitting | Rejected — cannot survive semicolons inside Lua and Python bodies |
+| A JSON or TOML array of statements | Rejected — the file stops being runnable by hand, killing the air-gap story |
+| A custom sentinel comment (e.g. `-- @@STATEMENT@@`) | Rejected — invents a dialect the framework's own tooling and Exasol clients do not already speak |
+
+### Consequences
+
+The air-gap story is strengthened rather than preserved: an operator can hand-carry the file and just run it, with no framework tooling in the loop. The cost is that every executor needs a splitter implementing this grammar, in Python and in Lua, whose agreement is pinned by a shared conformance corpus.
+
+---
+
+## ADR-059: Composite-install atomicity is constructed, not inherited
+
+**Date:** 2026-07-27
+**Plan:** `change-module-artifact-to-composite`
+**Status:** Accepted
+
+### Context
+
+A single-statement install was atomic by accident: one `pquery`, one outcome. A composite artifact executes N statements, so a failure at statement k raises the question of what happens to statements 1..k-1.
+
+The framework's transactional reality is asymmetric and easy to get wrong. DML inside a Lua script IS transactional and rollback-able — `refresh_core.lua` performs DELETE + INSERT + stamp under a single explicit `COMMIT`, issued as SQL through `pquery` because there is no `commit()` global (`refresh_core.lua:775`), and ADR-era notes record that this provides the required atomicity guarantee regardless of the client's autocommit setting. DDL is NOT: `refresh_core.lua:111,117,742` and `module_reclaim.lua:68` all document that `CREATE OR REPLACE` and `DROP SCRIPT` implicitly commit preceding DML and cannot themselves be rolled back, and `refresh_core.lua` visibly works around this. A composite artifact is mostly DDL.
+
+### Decision
+
+All-or-nothing is BUILT from four mechanisms rather than delegated to a transaction:
+
+1. **Pre-flight validation** of all N statements and the object inventory BEFORE the first DDL, mirroring the existing "ANY resolver row with status = ERROR aborts HERE, BEFORE any DB write" pattern. This is the primary mechanism — the overwhelming majority of failures never reach a write.
+2. **Compensating cleanup** on failure at statement k: drop the objects created by statements 1..k-1, walking the declared inventory in reverse. Best-effort, and MUST NOT mask the original error. This is the second reason the inventory is required.
+3. **Idempotent re-run**: every artifact statement uses `CREATE OR REPLACE`, so re-running a part-way failed install converges even if compensating cleanup was itself incomplete.
+4. **Rule registration last**: the rule is DML, is rollback-able, and `RULE_ENSURE` already validates the script exists before inserting. A module whose statements deployed but whose rule was never registered is INERT — the grammar never activates — rather than half-active.
+
+### Options Considered
+
+| Option | Verdict |
+|--------|---------|
+| Pre-flight + compensating cleanup + idempotent re-run + rule-last | Chosen — the only construction available given that DDL cannot roll back; makes the framework's existing ordering a stated guarantee rather than an accident |
+| Wrap the install in a transaction | Rejected — a false guarantee: DDL implicitly commits preceding DML and cannot be rolled back, as the framework's own code documents and works around |
+| Leave partial state and require manual operator cleanup | Rejected — violates the existing "every mutating subcommand MUST leave the database consistent on failure" invariant in `module/cli` |
+| Stage objects under temporary names and rename on success | Rejected — Exasol has no atomic multi-object rename, so it moves the same problem without solving it |
+
+### Consequences
+
+The failure mode of a composite install is a well-defined one: nothing written at all (the common case, caught by pre-flight), or objects created and then dropped, with no rule and no provenance row — inert either way. Correctness depends on the inventory being accurate (ADR-055) and on the CLI and in-DB splitters agreeing, since a split divergence would break the byte-identical end-state parity `module/db-install` guarantees.

@@ -77,6 +77,17 @@ jobs:
       - name: Install Python dependencies
         run: uv sync
 
+      # Lua 5.1 — without an interpreter on PATH,
+      # test_lua_splitter_matches_corpus_under_a_local_interpreter (the fallback
+      # that proves the Python and Lua splitters agree with no Exasol instance in
+      # the loop) has no interpreter to find and skips; tests/_lua_splitter.py's
+      # lua_interpreter() discovers it via PREPROC_TEST_LUA or PATH with no
+      # further configuration needed.
+      - name: Set up Lua 5.1
+        uses: leafo/gh-actions-lua@v10
+        with:
+          luaVersion: "5.1"
+
       - name: Run unit tests
         run: uv run pytest -m "not integration" -v
 

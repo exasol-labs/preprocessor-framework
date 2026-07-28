@@ -39,12 +39,24 @@ add, so re-applying an unchanged desired file converges every module to the
 no-op branch: RULE_ENSURE returns the existing rule id, nothing is inserted,
 CONFIG is unchanged, and no refresh is issued.
 
+Provenance the convergence records
+----------------------------------
+Every ``add`` and ``update`` writes its provenance row through
+``PREPROC.MODULE_REGISTER`` carrying the inventory of the objects it just
+deployed (the pre-flighted ``plan.objects``), plus the effective registry as
+``source_url`` and the index's ``library_version``. The recorded inventory is
+the module's ownership boundary and ``MODULE_RECLAIM``'s undo list, so it is
+never left NULL for a library-deployed module: a NULL there makes reclaim take
+its entry-script-only fallback, report success, and delete the provenance row —
+permanently orphaning every companion object with no record they existed.
+
 Failure safety
 --------------
 Every desired ``module@version`` is resolved against the registry, and every
-library-deployed artifact is fetched and sha256-verified, BEFORE any DB write —
-so an unknown module or a tampered artifact aborts the whole convergence with the
-database untouched.
+library-deployed artifact is fetched and fully pre-flighted — ``sha256``, split,
+and declared-vs-derived object inventory — BEFORE any DB write, so an unknown
+module, a tampered artifact, or one whose inventory drifted from its manifest
+aborts the whole convergence with the database untouched.
 """
 
 from __future__ import annotations
@@ -55,6 +67,7 @@ from pathlib import Path
 from typing import Any
 
 from preproc.module.deploy import (
+    ArtifactPlan,
     deploy_artifact,
     fetch_and_verify_artifact,
     module_register,
@@ -62,6 +75,7 @@ from preproc.module.deploy import (
     resolve_scope,
     rule_ensure,
 )
+from preproc.module.manifest import ObjectSpec
 from preproc.module.registry import RegistryEntry, RegistryError, read_registry
 
 
@@ -210,19 +224,42 @@ def module_retire(connection: Any, name: str, version: int) -> None:
 # --- op appliers (all run norefresh; the caller drives the single refresh) ---
 
 
+def _deploy_and_inventory(
+    connection: Any,
+    entry: RegistryEntry,
+    registry: str,
+    reader,
+    plan: ArtifactPlan | None,
+) -> tuple[ObjectSpec, ...]:
+    """Deploy a library-deployed entry's artifact; return the inventory to record.
+
+    The returned inventory is the plan's — the pre-flighted, file-ordered object
+    list that was just deployed — and it MUST reach ``module_register``: the
+    recorded inventory is the module's ownership boundary and MODULE_RECLAIM's
+    undo list, so recording nothing orphans every companion object.
+
+    Empty for a self-deployed module: no artifact travels through the registry
+    for one, so there is nothing to inventory or reclaim.
+    """
+    if entry.deploy_mode != "library-deployed":
+        return ()
+    resolved = plan or fetch_and_verify_artifact(entry, registry, reader=reader)
+    deploy_artifact(connection, resolved)
+    return resolved.objects
+
+
 def _apply_add(
     connection: Any,
     entry: RegistryEntry,
     scope: tuple[str, str] | None,
     registry: str,
     reader,
-    script_text: str | None,
+    plan: ArtifactPlan | None,
+    *,
+    library_version: str | None = None,
 ) -> bool:
     """Deploy a new module version and register rule + provenance; return rule_created."""
-    if entry.deploy_mode == "library-deployed":
-        deploy_artifact(
-            connection, script_text or fetch_and_verify_artifact(entry, registry, reader=reader)
-        )
+    objects = _deploy_and_inventory(connection, entry, registry, reader, plan)
     scope_type, scope_value = resolve_scope(entry, scope)
     _rule_id, created = rule_ensure(
         connection,
@@ -233,7 +270,13 @@ def _apply_add(
         function_name=entry.function,
         norefresh=True,
     )
-    module_register(connection, entry)
+    module_register(
+        connection,
+        entry,
+        source_url=registry,
+        library_version=library_version,
+        objects=objects,
+    )
     return created
 
 
@@ -244,19 +287,29 @@ def _apply_update(
     scope: tuple[str, str] | None,
     registry: str,
     reader,
-    script_text: str | None,
+    plan: ArtifactPlan | None,
+    *,
+    library_version: str | None = None,
 ) -> bool:
     """Deploy V+1, register it, and repoint the old rule onto it; return config_changed.
+
+    The provenance row written here is the NEW version's, and it carries the new
+    version's own inventory — the old version's row keeps its own, so retiring
+    and later reclaiming the old version still drops exactly what that version
+    created.
 
     When no enabled rule names the old script (e.g. the rule was removed out of
     band), a fresh rule is ensured at the desired scope so the new version is
     still dispatched.
     """
-    if entry.deploy_mode == "library-deployed":
-        deploy_artifact(
-            connection, script_text or fetch_and_verify_artifact(entry, registry, reader=reader)
-        )
-    module_register(connection, entry)
+    objects = _deploy_and_inventory(connection, entry, registry, reader, plan)
+    module_register(
+        connection,
+        entry,
+        source_url=registry,
+        library_version=library_version,
+        objects=objects,
+    )
 
     rule_ids = _enabled_rule_ids_for_script(connection, old_script)
     if rule_ids:
@@ -328,8 +381,8 @@ def converge(
         if name not in desired_names
     ]
 
-    # --- pre-fetch + verify all library artifacts before any DB write ---
-    prefetched: dict[tuple[str, int], str] = {}
+    # --- pre-fetch + pre-flight all library artifacts before any DB write ---
+    prefetched: dict[tuple[str, int], ArtifactPlan] = {}
     for _want, entry in adds:
         if entry.deploy_mode == "library-deployed":
             prefetched[(entry.name, entry.version)] = fetch_and_verify_artifact(
@@ -353,6 +406,7 @@ def converge(
             registry,
             reader,
             prefetched.get((entry.name, entry.version)),
+            library_version=index.library_version,
         )
         config_changed = config_changed or created
 
@@ -365,6 +419,7 @@ def converge(
             registry,
             reader,
             prefetched.get((entry.name, entry.version)),
+            library_version=index.library_version,
         )
         config_changed = config_changed or changed
         pending_retires.append((entry.name, old_version))
@@ -431,12 +486,21 @@ def update_module(
     if old_version == entry.version:
         return SyncResult(unchanged=1)
 
-    script_text = (
+    plan = (
         fetch_and_verify_artifact(entry, registry, reader=reader)
         if entry.deploy_mode == "library-deployed"
         else None
     )
-    changed = _apply_update(connection, old_script, entry, scope, registry, reader, script_text)
+    changed = _apply_update(
+        connection,
+        old_script,
+        entry,
+        scope,
+        registry,
+        reader,
+        plan,
+        library_version=index.library_version,
+    )
     if changed:
         refresh(connection)
     module_retire(connection, name, old_version)
