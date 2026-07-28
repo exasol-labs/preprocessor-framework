@@ -11,7 +11,7 @@ Index schema (``registry/index.json``)
 ::
 
     {
-      "schema_version": 1,
+      "schema_version": 2,
       "library_version": "0.2.0",
       "modules": [
         {
@@ -26,6 +26,7 @@ Index schema (``registry/index.json``)
           "deploy_mode": "library-deployed",
           "sha256": "<64 hex chars>",
           "artifact_path": "modules/cast_shorthand/cast_shorthand_v1.sql",
+          "objects": [{"type": "LUA SCRIPT", "name": "PREPROC_RT.CAST_SHORTHAND_V1"}],
           "source": {"repo": "exasol-labs/preprocessor-library", "ref": "main"}
         }
       ]
@@ -41,6 +42,20 @@ those — the module's own installer deploys it; the CLI only registers the
 rule). ``artifact_path`` is the artifact's path relative to its own
 ``source.repo`` checkout, following the standard module layout
 (``modules/<name>/<name>_v<N>.sql``, see docs/module-authoring.md).
+
+``objects`` is the object inventory a ``library-deployed`` entry's artifact
+creates: one ``{"type", "name"}`` element per object, copied from the
+manifest's declared ``[[objects]]`` (in its declared order) or, when the
+manifest declares none — legal only for a single-statement artifact — derived
+as the single entry object named by ``script_name``. It is ``null`` for a
+``self-deployed`` entry (no artifact travels through the registry for one, so
+there is nothing to inventory here).
+
+``schema_version`` is 2 as of this generator. A reader MUST also accept a
+published ``schema_version: 1`` index, whose entries carry no ``objects``
+key at all: each such entry's inventory is interpreted as the single object
+named by its ``script_name`` (see ``RegistryIndex.from_dict``), which is what
+lets an already-published version-1 index keep resolving unchanged.
 
 Public API
 ----------
@@ -61,6 +76,9 @@ Public API
     Verify a fetched library-deployed artifact's bytes against the entry's
     declared ``sha256`` (reuses ``manifest.verify_artifact_sha256``); a no-op
     for entries without one (self-deployed).
+``encode_objects(objects)`` / ``decode_objects(raw)``
+    Serialize an object inventory to/from the ``PREPROC.MODULES.objects``
+    VARCHAR form — see the format note on ``encode_objects``.
 """
 
 from __future__ import annotations
@@ -68,15 +86,18 @@ from __future__ import annotations
 import json
 import tomllib
 import urllib.request
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from preproc.module.artifact import normalize_object_name
 from preproc.module.manifest import (
+    ENTRY_OBJECT_TYPE,
     ArtifactError,
     ManifestError,
     ModuleManifest,
+    ObjectSpec,
     ScopeSpec,
     SourceSpec,
     load_manifest,
@@ -84,7 +105,7 @@ from preproc.module.manifest import (
     verify_artifact_sha256,
 )
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 DEFAULT_LIBRARY_REPO = "exasol-labs/preprocessor-library"
 DEFAULT_LIBRARY_REF = "main"
 
@@ -111,6 +132,7 @@ class RegistryEntry:
     source: dict[str, str]
     sha256: str | None = None
     artifact_path: str | None = None
+    objects: tuple[dict[str, str], ...] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -125,11 +147,18 @@ class RegistryEntry:
             "deploy_mode": self.deploy_mode,
             "sha256": self.sha256,
             "artifact_path": self.artifact_path,
+            "objects": [dict(obj) for obj in self.objects] if self.objects is not None else None,
             "source": dict(self.source),
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> RegistryEntry:
+        raw_objects = data.get("objects")
+        objects = (
+            tuple({"type": obj["type"], "name": obj["name"]} for obj in raw_objects)
+            if raw_objects is not None
+            else None
+        )
         return cls(
             name=data["name"],
             version=data["version"],
@@ -142,6 +171,7 @@ class RegistryEntry:
             deploy_mode=data["deploy_mode"],
             sha256=data.get("sha256"),
             artifact_path=data.get("artifact_path"),
+            objects=objects,
             source=dict(data["source"]),
         )
 
@@ -149,8 +179,10 @@ class RegistryEntry:
         """Reconstruct the ``ModuleManifest`` this entry was generated from.
 
         Lets registry-level code reuse ``manifest.py``'s validated
-        verification helpers (e.g. ``verify_artifact_sha256``) instead of
-        re-implementing them against a different type.
+        verification helpers (e.g. ``verify_artifact_sha256`` and
+        ``verify_artifact_inventory``) instead of re-implementing them against
+        a different type. ``objects`` round-trips into ``ObjectSpec`` entries
+        so a composite entry's declared inventory survives the reconstruction.
         """
         return ModuleManifest(
             name=self.name,
@@ -164,6 +196,11 @@ class RegistryEntry:
             deploy_mode=self.deploy_mode,
             sha256=self.sha256,
             source=SourceSpec(**self.source) if self.source else None,
+            objects=(
+                tuple(ObjectSpec(type=obj["type"], name=obj["name"]) for obj in self.objects)
+                if self.objects is not None
+                else None
+            ),
         )
 
 
@@ -193,14 +230,31 @@ class RegistryIndex:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> RegistryIndex:
+        """Parse an index mapping, accepting both ``schema_version`` 1 and 2.
+
+        A ``schema_version: 1`` index carries no ``objects`` key on any entry;
+        each such entry's inventory is filled in as the single object named by
+        its ``script_name`` (``ENTRY_OBJECT_TYPE``), so an already-published
+        version-1 index keeps resolving unchanged. A ``schema_version: 2``
+        entry's ``objects`` (including an explicit ``null`` for a
+        self-deployed entry) is taken as-is.
+        """
         try:
             modules = data["modules"]
             schema_version = data["schema_version"]
         except KeyError as exc:
             raise RegistryError(f"registry index is missing required key {exc}") from exc
+        entries = tuple(RegistryEntry.from_dict(entry) for entry in modules)
+        if schema_version == 1:
+            entries = tuple(
+                entry
+                if entry.objects is not None
+                else replace(entry, objects=_fallback_objects(entry))
+                for entry in entries
+            )
         return cls(
             schema_version=schema_version,
-            entries=tuple(RegistryEntry.from_dict(entry) for entry in modules),
+            entries=entries,
             library_version=data.get("library_version"),
         )
 
@@ -217,6 +271,32 @@ def render_index(index: RegistryIndex) -> str:
 
 def _artifact_relpath(name: str, version: int) -> str:
     return f"modules/{name}/{name}_v{version}.sql"
+
+
+def _fallback_objects(entry: RegistryEntry) -> tuple[dict[str, str], ...]:
+    """The single-object inventory a schema-version-1 entry is read as.
+
+    Mirrors ``verify_artifact_inventory``'s N=1 fallback: the entry object is
+    the ``ENTRY_OBJECT_TYPE`` object named by the entry's ``script_name``.
+    """
+    return ({"type": ENTRY_OBJECT_TYPE, "name": normalize_object_name(entry.script_name)},)
+
+
+def _entry_objects(manifest: ModuleManifest) -> tuple[dict[str, str], ...] | None:
+    """Derive the ``objects`` an index entry carries for ``manifest``.
+
+    ``None`` for a ``self-deployed`` module: no artifact travels through the
+    registry for one, so there is nothing to inventory. For a
+    ``library-deployed`` module this is the manifest's declared
+    ``[[objects]]`` (in declared order) or, when the manifest declares none —
+    legal only for a single-statement artifact — the single entry object named
+    by ``script_name``, exactly ``verify_artifact_inventory``'s N=1 fallback.
+    """
+    if manifest.deploy_mode != "library-deployed":
+        return None
+    if manifest.objects is not None:
+        return tuple({"type": obj.type, "name": obj.name} for obj in manifest.objects)
+    return ({"type": ENTRY_OBJECT_TYPE, "name": normalize_object_name(manifest.script_name)},)
 
 
 def _entry_from_manifest(
@@ -237,6 +317,7 @@ def _entry_from_manifest(
         deploy_mode=manifest.deploy_mode,
         sha256=manifest.sha256,
         artifact_path=artifact_path,
+        objects=_entry_objects(manifest),
         source={"repo": source.repo, "ref": source.ref},
     )
 
@@ -495,3 +576,91 @@ def fetch_artifact_bytes(
         return artifact_abspath.read_bytes()
     except FileNotFoundError as exc:
         raise RegistryError(f"artifact not found at {artifact_abspath}") from exc
+
+
+# The width of PREPROC.MODULES.objects (sql/install/22_modules_table.sql), of
+# MODULE_REGISTER's CAST, of the resolver's and MODULE_CATALOG's own `objects`
+# EMITS column, and of the widening ALTER in sql/install/25_column_upgrades.sql.
+# This is the CANONICAL copy: the resolver (sql/udf/module_resolver_v1.sql
+# `OBJECTS_MAX_CHARS`) and `module_install.lua` (`OBJECTS_MAX_CHARS`) each carry
+# a pinned copy because neither can import from here. All of them must move
+# together — every one is read by a gate that refuses an over-wide inventory
+# before the provenance write, so the NARROWEST copy is the effective limit and a
+# partial widening silently keeps the old ceiling instead of failing.
+# tests/test_module_registry.py::test_every_pinned_objects_width_equals_the_canonical_constant
+# is what keeps them in step; it scans the shipped tree rather than trusting a
+# hand-maintained list.
+#
+# 200,000 characters is roughly 2,000 objects at realistic ~100-character
+# qualified names, well past any plausible module (including the schema-owning
+# subsystem module ADR-057 blesses) and well under Exasol's 2,000,000-character
+# VARCHAR ceiling. An Exasol VARCHAR is variable-length, so the headroom costs
+# nothing in storage.
+#
+# Counted in CHARACTERS, not bytes: a quoted object identifier may legitimately
+# hold non-ASCII, and byte-counting would refuse an install the column itself
+# accepts.
+OBJECTS_MAX_CHARS = 200000
+
+
+def encode_objects(objects: Iterable[Mapping[str, str] | ObjectSpec] | None) -> str | None:
+    """Serialize an object inventory into the ``PREPROC.MODULES.objects`` VARCHAR form.
+
+    The wire format is newline-separated ``TYPE|NAME`` lines, one per object,
+    in file order::
+
+        LUA SCRIPT|PREPROC_RT.CONTROL_DATABASE_V1
+        PYTHON3 SCALAR SCRIPT|PREPROC_RT.CONFD_JOB_V1
+        TABLE|PREPROC_RT.CONFD_STATE_V1
+
+    This column is the one place ``PREPROC_RT.INSTALLED_MODULES`` lets an
+    operator without admin rights read a module's object inventory (see
+    ``install/schema-layout``), so the wire form itself must be readable, not
+    just decodable. Delimiter-safety is NOT handled by escaping here: a
+    declared object ``type`` or ``name`` containing ``\\n``, ``\\r``, or ``|``
+    is rejected at manifest parse time (``manifest.py``'s ``[[objects]]``
+    validation), so those characters can never occur in a value this function
+    encodes, and no escaping scheme is needed. ``module_reclaim.lua`` parses
+    this text back with ``line:match("^(.-)|(.*)$")`` per line — splitting
+    each line on its first ``|``, matching ``decode_objects`` below.
+
+    Returns ``None`` for ``None`` or an empty inventory, which callers bind as
+    SQL ``NULL`` — the same nullability the recorded inventory already has.
+    """
+    if not objects:
+        return None
+    lines = []
+    for obj in objects:
+        obj_type = obj["type"] if isinstance(obj, Mapping) else obj.type
+        name = obj["name"] if isinstance(obj, Mapping) else obj.name
+        lines.append(f"{obj_type}|{name}")
+    return "\n".join(lines)
+
+
+def decode_objects(raw: str | None) -> list[dict[str, str]] | None:
+    """Parse the ``PREPROC.MODULES.objects`` VARCHAR form back into a list.
+
+    The exact inverse of ``encode_objects``; see its docstring for the wire
+    format. Each line is split on its FIRST ``|`` (matching the Lua
+    ``(.-)|(.*)`` non-greedy/greedy pattern), so the split is unambiguous even
+    though it is a plain single-character delimiter — safe only because
+    ``manifest.py`` already rejects a declared type or name containing ``|``.
+
+    Returns ``None`` for ``None`` (no recorded inventory — a NULL column
+    reader falls back to the row's ``script_name``, same as a
+    schema-version-1 registry entry).
+
+    Raises:
+        RegistryError: if a non-empty line carries no ``|`` delimiter.
+    """
+    if raw is None:
+        return None
+    objects: list[dict[str, str]] = []
+    for line in raw.split("\n"):
+        if not line:
+            continue
+        obj_type, sep, name = line.partition("|")
+        if not sep:
+            raise RegistryError(f"malformed objects encoding: line {line!r} has no '|' delimiter")
+        objects.append({"type": obj_type, "name": name})
+    return objects

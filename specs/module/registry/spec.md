@@ -9,6 +9,12 @@ before deployment. The database never reads the registry; the operator's CLI
 machine does, online against a pinned index URL or offline against a local
 checkout.
 
+The index entry gains the object inventory and the index `schema_version`
+bumps from 1 to 2. The inventory must travel in the index because the in-DB
+resolver verifies the artifact against it, and because
+`PREPROC.MODULE_CATALOG` — which never fetches an artifact — is the
+pre-install review surface for what a composite module would create.
+
 ## Background
 
 * The registry is a generated index file (`index.json`) that lists one entry per
@@ -33,9 +39,22 @@ checkout.
 * For a `library-deployed` entry the CLI MUST verify the fetched artifact's
   `sha256` against the entry before the artifact is deployed; a mismatch MUST
   abort without deploying.
+* An index entry for a `library-deployed` module carries an `objects` list
+  alongside `sha256` and the artifact path: one element per object the artifact
+  creates, each with a `type` and a fully-qualified `name`. The list is copied
+  from the module's `module.toml` `[[objects]]` array, or derived as the single
+  object named by `script_name` when the manifest declares none.
+* The index top-level `schema_version` becomes 2. Readers MUST accept both 1 and
+  2: a `schema_version = 1` index carries no `objects` list on any entry and
+  every entry is interpreted as a single-statement module whose inventory is the
+  object named by `script_name`. This is what lets an already-published
+  version-1 index keep working unchanged.
+* A `self-deployed` entry carries no artifact and therefore no `objects` list;
+  its backing objects are its own installer's concern.
 * The generated index MUST be deterministic: the same set of `module.toml` and
   `registry/external/*.toml` inputs MUST produce a byte-identical `index.json`
-  (entries sorted by `name` then `version`), so the index can be committed and
+  (entries sorted by `name` then `version`, and each entry's `objects` list
+  emitted in the manifest's declared order), so the index can be committed and
   diffed and CI can assert it is in sync with its sources.
 * Registry reads are pure lookups: listing and searching MUST NOT require a
   database connection.
@@ -54,7 +73,7 @@ checkout.
 
 * *GIVEN* a `modules/cast_shorthand/module.toml` with `deploy_mode = "library-deployed"` and a `sha256`
 * *WHEN* the index generator runs
-* *THEN* the resulting entry MUST carry the manifest's `name`, `version`, `phase`, `script_name`, `function`, `sha256`, and `source`
+* *THEN* the resulting entry MUST carry the manifest's `name`, `version`, `phase`, `script_name`, `function`, `sha256`, `objects`, and `source`
 * *AND* the entry MUST record the artifact path relative to its source repo
 
 ### Scenario: An external-repo entry is merged from a curated block
@@ -90,3 +109,32 @@ checkout.
 * *WHEN* CI regenerates the index and compares it to the committed file
 * *THEN* the comparison MUST report a difference
 * *AND* CI MUST fail the check
+
+### Scenario: A composite module's index entry carries its object inventory
+
+* *GIVEN* a `modules/<name>/module.toml` declaring an `[[objects]]` array of a Lua entry script and two Python UDFs
+* *WHEN* the index generator runs
+* *THEN* the resulting entry MUST carry an `objects` list of exactly those three objects with their types and fully-qualified names
+* *AND* the list order MUST match the manifest's declared order
+* *AND* re-running the generator on the same inputs MUST produce a byte-identical file
+
+### Scenario: The generated index declares schema_version 2
+
+* *GIVEN* a `modules/` tree containing at least one module manifest
+* *WHEN* the index generator runs
+* *THEN* the emitted `index.json` MUST declare a top-level `schema_version` of 2
+
+### Scenario: A single-statement manifest with no objects array still yields an inventory
+
+* *GIVEN* a `modules/cast_shorthand/module.toml` with `script_name = "PREPROC_RT.CAST_SHORTHAND_V1"` and no `[[objects]]` array
+* *WHEN* the index generator runs
+* *THEN* the resulting entry's `objects` list MUST contain exactly one object named `PREPROC_RT.CAST_SHORTHAND_V1`
+* *AND* the manifest MUST NOT require editing for the generator to succeed
+
+### Scenario: A schema-version-1 index is read as single-statement entries
+
+* *GIVEN* a published `index.json` declaring `schema_version` 1 whose entries carry no `objects` list
+* *WHEN* the CLI reads that registry
+* *THEN* the CLI MUST load every entry without error
+* *AND* each entry's inventory MUST be interpreted as the single object named by its `script_name`
+* *AND* the CLI MUST NOT reject the index for the absent `objects` field

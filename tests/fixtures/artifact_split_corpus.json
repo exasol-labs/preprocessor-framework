@@ -1,0 +1,202 @@
+{
+  "format": {
+    "version": 1,
+    "purpose": "Pins the expected statement split of a module artifact for every implementation of the splitter. The canonical Python splitter lives in src/preproc/module/artifact.py; the in-database Lua splitter lives in sql/lua/module_install.lua. Both MUST reproduce every case here exactly, and MUST reject every error_case.",
+    "value_encoding": "A `text`, and each entry of `statements`, is EITHER a JSON string taken literally, OR a JSON array of parts. A part is either a literal string or an object {\"repeat_unit\": <string>, \"count\": <integer>} which materializes to repeat_unit repeated count times. Materialize an array by concatenating its parts in order. The array form exists only so the chunk-boundary case can pin a 2,000,000-character artifact without storing a 2 MB blob.",
+    "grammar": [
+      "Line endings are normalized to LF before splitting: CRLF and a bare CR both become LF.",
+      "A marker line is a COMPLETE physical line whose content, ignoring surrounding whitespace, is exactly `--/` (block open) or exactly `/` (block close). `SELECT 1; --/` is therefore not a marker; it is a statement followed by a comment.",
+      "A `--/` line opens a block. Every following line up to the next lone `/` line is the statement body, preserved VERBATIM: the body is never scanned for terminators, comments, or quotes, so a statement whose own syntax needs a trailing `;` (CREATE FUNCTION ... END;) survives intact. Neither marker line appears in the yielded statement.",
+      "Outside a block, a statement is terminated by the first `;` that falls outside a single-quoted string literal, a double-quoted identifier, a `--` line comment, and a `/* */` block comment. The terminating `;` is not part of the yielded statement. Two consecutive quote characters inside a literal are its escape and re-open the literal, which handles 'it''s' correctly.",
+      "Outside a block, a lone `/` line terminates the pending statement if any non-whitespace, non-comment content is pending, and is otherwise discarded. This mirrors EXAplus and is what keeps pre-composite single-statement artifacts valid unchanged.",
+      "A `--/` line while a statement is still pending is an error, as is a block that the artifact ends without closing.",
+      "Every yielded statement is stripped of leading and trailing whitespace. A statement that strips to empty is not yielded, so stray `;` and blank filler produce nothing."
+    ],
+    "notes": [
+      "PREPROC.MODULE_RESOLVER_V1 emits artifact text in VARCHAR(2000000) chunks. The in-database path MUST reassemble every chunk before splitting; the statement_straddling_chunk_boundary case is longer than one chunk and fails loudly for any implementation that splits per chunk."
+    ]
+  },
+  "cases": [
+    {
+      "name": "single_block_wrapped_lua_script",
+      "description": "The canonical shape of every library module published so far: one CREATE OR REPLACE LUA SCRIPT wrapped in block markers because its Lua body contains semicolons.",
+      "text": "--/\nCREATE OR REPLACE LUA SCRIPT PREPROC_RT.CAST_SHORTHAND_V1 AS\nfunction cast_shorthand(sqltext)\n    local parts = {};\n    return table.concat(parts);\nend\n/\n",
+      "statements": [
+        "CREATE OR REPLACE LUA SCRIPT PREPROC_RT.CAST_SHORTHAND_V1 AS\nfunction cast_shorthand(sqltext)\n    local parts = {};\n    return table.concat(parts);\nend"
+      ]
+    },
+    {
+      "name": "single_semicolon_terminated_statement",
+      "description": "A statement with no semicolons in its body needs no block markers; the terminating semicolon is not part of the statement.",
+      "text": "CREATE TABLE PREPROC_RT.CAST_CACHE_V1 (\n    cache_key VARCHAR(64)\n);\n",
+      "statements": [
+        "CREATE TABLE PREPROC_RT.CAST_CACHE_V1 (\n    cache_key VARCHAR(64)\n)"
+      ]
+    },
+    {
+      "name": "block_then_semicolon_statement",
+      "description": "The module/contract scenario: a block-wrapped statement whose body keeps its semicolons, followed by a semicolon-terminated statement. Exactly two statements, no marker lines.",
+      "text": "--/\nCREATE OR REPLACE LUA SCRIPT PREPROC_RT.CAST_SHORTHAND_V1 AS\nfunction cast_shorthand(sqltext)\n    local parts = {};\n    return table.concat(parts);\nend\n/\n\nCREATE TABLE PREPROC_RT.CAST_CACHE_V1 (\n    cache_key VARCHAR(64)\n);\n",
+      "statements": [
+        "CREATE OR REPLACE LUA SCRIPT PREPROC_RT.CAST_SHORTHAND_V1 AS\nfunction cast_shorthand(sqltext)\n    local parts = {};\n    return table.concat(parts);\nend",
+        "CREATE TABLE PREPROC_RT.CAST_CACHE_V1 (\n    cache_key VARCHAR(64)\n)"
+      ]
+    },
+    {
+      "name": "semicolon_inside_string_literal",
+      "description": "A semicolon inside a single-quoted string literal does not terminate the statement.",
+      "text": "INSERT INTO PREPROC_RT.SEED_V1 (label) VALUES ('a;b');\n",
+      "statements": [
+        "INSERT INTO PREPROC_RT.SEED_V1 (label) VALUES ('a;b')"
+      ]
+    },
+    {
+      "name": "escaped_quote_inside_string_literal",
+      "description": "A doubled quote is the literal's escape, so the semicolon after it is still inside the string. Two statements, not three.",
+      "text": "INSERT INTO PREPROC_RT.SEED_V1 (label) VALUES ('it''s; fine');\nINSERT INTO PREPROC_RT.SEED_V1 (label) VALUES ('next');\n",
+      "statements": [
+        "INSERT INTO PREPROC_RT.SEED_V1 (label) VALUES ('it''s; fine')",
+        "INSERT INTO PREPROC_RT.SEED_V1 (label) VALUES ('next')"
+      ]
+    },
+    {
+      "name": "semicolon_inside_line_comment",
+      "description": "A semicolon in a `--` comment does not split. The comment precedes the statement and stays part of its text.",
+      "text": "-- note; this semicolon must not split the statement\nCREATE TABLE PREPROC_RT.T_V1 (c INT);\n",
+      "statements": [
+        "-- note; this semicolon must not split the statement\nCREATE TABLE PREPROC_RT.T_V1 (c INT)"
+      ]
+    },
+    {
+      "name": "semicolon_inside_block_comment",
+      "description": "A `/* */` comment spans lines and its semicolons do not split.",
+      "text": "/* multi;\n   line; comment */\nCREATE TABLE PREPROC_RT.T_V1 (c INT);\n",
+      "statements": [
+        "/* multi;\n   line; comment */\nCREATE TABLE PREPROC_RT.T_V1 (c INT)"
+      ]
+    },
+    {
+      "name": "semicolon_inside_quoted_identifier",
+      "description": "A semicolon inside a double-quoted identifier does not split.",
+      "text": "CREATE TABLE PREPROC_RT.\"odd;name_V1\" (c INT);\n",
+      "statements": [
+        "CREATE TABLE PREPROC_RT.\"odd;name_V1\" (c INT)"
+      ]
+    },
+    {
+      "name": "lone_slash_terminates_unwrapped_statement",
+      "description": "A statement with no semicolons and no block markers, closed by the EXAplus lone `/`. The `/` is a terminator, never part of the statement.",
+      "text": "CREATE OR REPLACE LUA SCRIPT PREPROC_RT.M_V1 AS\nfunction m(t) return t end\n/\n",
+      "statements": [
+        "CREATE OR REPLACE LUA SCRIPT PREPROC_RT.M_V1 AS\nfunction m(t) return t end"
+      ]
+    },
+    {
+      "name": "stray_lone_slash_discarded",
+      "description": "A lone `/` with nothing pending is discarded rather than yielding an empty statement.",
+      "text": "CREATE TABLE PREPROC_RT.T_V1 (c INT);\n/\n\n/\n",
+      "statements": [
+        "CREATE TABLE PREPROC_RT.T_V1 (c INT)"
+      ]
+    },
+    {
+      "name": "crlf_line_endings",
+      "description": "A CRLF artifact splits identically to an LF one, and the yielded statement carries LF endings.",
+      "text": "--/\r\nCREATE OR REPLACE LUA SCRIPT PREPROC_RT.M_V1 AS\r\nfunction m(t) return t; end\r\n/\r\n",
+      "statements": [
+        "CREATE OR REPLACE LUA SCRIPT PREPROC_RT.M_V1 AS\nfunction m(t) return t; end"
+      ]
+    },
+    {
+      "name": "trailing_whitespace_on_marker_lines",
+      "description": "Marker lines are recognized ignoring surrounding whitespace, and the statement is stripped.",
+      "text": "--/   \n  CREATE TABLE PREPROC_RT.T_V1 (c INT)  \n   /  \n",
+      "statements": [
+        "CREATE TABLE PREPROC_RT.T_V1 (c INT)"
+      ]
+    },
+    {
+      "name": "block_body_keeps_its_trailing_semicolon",
+      "description": "A block body is preserved verbatim, so an author's trailing semicolon is kept. This is what lets a CREATE FUNCTION whose syntax ends in `END;` round-trip.",
+      "text": "--/\nCREATE TABLE PREPROC_RT.T_V1 (c INT);\n/\n",
+      "statements": [
+        "CREATE TABLE PREPROC_RT.T_V1 (c INT);"
+      ]
+    },
+    {
+      "name": "comments_between_statements_are_filler",
+      "description": "Blank lines and whole-line comments outside any statement are inter-statement filler: they are discarded, and a comment immediately before a `--/` does not make the block marker illegal.",
+      "text": "-- header comment\n\n--/\nCREATE OR REPLACE LUA SCRIPT PREPROC_RT.E_V1 AS\nfunction e(t) return t; end\n/\n\n-- trailing note\n",
+      "statements": [
+        "CREATE OR REPLACE LUA SCRIPT PREPROC_RT.E_V1 AS\nfunction e(t) return t; end"
+      ]
+    },
+    {
+      "name": "two_statements_on_one_line",
+      "description": "A terminating semicolon ends the statement mid-line; the rest of the line starts the next one.",
+      "text": "CREATE TABLE PREPROC_RT.A_V1 (c INT); CREATE TABLE PREPROC_RT.B_V1 (c INT);\n",
+      "statements": [
+        "CREATE TABLE PREPROC_RT.A_V1 (c INT)",
+        "CREATE TABLE PREPROC_RT.B_V1 (c INT)"
+      ]
+    },
+    {
+      "name": "no_terminator_at_end_of_file",
+      "description": "An artifact that ends with neither `;` nor `/` still yields its pending statement. This is the pre-composite single-statement form and MUST stay valid.",
+      "text": "CREATE OR REPLACE LUA SCRIPT PREPROC_RT.M_V1 AS\nfunction m(t) return t end\n",
+      "statements": [
+        "CREATE OR REPLACE LUA SCRIPT PREPROC_RT.M_V1 AS\nfunction m(t) return t end"
+      ]
+    },
+    {
+      "name": "blank_artifact_yields_no_statements",
+      "description": "Whitespace and comments alone carry no statement.",
+      "text": "\n\n   \n-- only a comment\n",
+      "statements": []
+    },
+    {
+      "name": "composite_lua_entry_python_udf_and_table",
+      "description": "A realistic composite artifact: a Lua entry script, a Python UDF companion whose body contains semicolons and a blank line, and a table. Three statements in file order.",
+      "text": "--/\nCREATE OR REPLACE LUA SCRIPT PREPROC_RT.CONTROL_DATABASE_V1 AS\nfunction control_database(sqltext)\n    local ok = pquery([[SELECT 1]]);\n    if not ok then return nil; end\n    return sqltext;\nend\n/\n\n--/\nCREATE OR REPLACE PYTHON3 SCALAR SCRIPT PREPROC_RT.CONFD_JOB_V1(payload VARCHAR(2000000)) RETURNS VARCHAR(2000000) AS\nimport json\n\ndef run(ctx):\n    data = json.loads(ctx.payload);\n    return json.dumps(data);\n/\n\nCREATE TABLE PREPROC_RT.CONFD_JOB_LOG_V1 (\n    job_id   DECIMAL(18,0),\n    payload  VARCHAR(2000000)\n);\n",
+      "statements": [
+        "CREATE OR REPLACE LUA SCRIPT PREPROC_RT.CONTROL_DATABASE_V1 AS\nfunction control_database(sqltext)\n    local ok = pquery([[SELECT 1]]);\n    if not ok then return nil; end\n    return sqltext;\nend",
+        "CREATE OR REPLACE PYTHON3 SCALAR SCRIPT PREPROC_RT.CONFD_JOB_V1(payload VARCHAR(2000000)) RETURNS VARCHAR(2000000) AS\nimport json\n\ndef run(ctx):\n    data = json.loads(ctx.payload);\n    return json.dumps(data);",
+        "CREATE TABLE PREPROC_RT.CONFD_JOB_LOG_V1 (\n    job_id   DECIMAL(18,0),\n    payload  VARCHAR(2000000)\n)"
+      ]
+    },
+    {
+      "name": "statement_straddling_chunk_boundary",
+      "description": "One block-wrapped statement whose Lua body is padded past 2,000,000 characters, so the resolver's first VARCHAR(2000000) chunk ends in the middle of it — inside a string literal at that. An implementation that splits per chunk instead of after reassembly cannot produce this single statement.",
+      "text": [
+        "--/\nCREATE OR REPLACE LUA SCRIPT PREPROC_RT.BIG_V1 AS\nfunction big(sqltext)\n    local pad = \"",
+        {
+          "repeat_unit": "x",
+          "count": 2000000
+        },
+        "\"\n    return sqltext .. pad;\nend\n/\n"
+      ],
+      "statements": [
+        [
+          "CREATE OR REPLACE LUA SCRIPT PREPROC_RT.BIG_V1 AS\nfunction big(sqltext)\n    local pad = \"",
+          {
+            "repeat_unit": "x",
+            "count": 2000000
+          },
+          "\"\n    return sqltext .. pad;\nend"
+        ]
+      ]
+    }
+  ],
+  "error_cases": [
+    {
+      "name": "unterminated_block",
+      "description": "A `--/` block the artifact never closes with a lone `/` line.",
+      "text": "--/\nCREATE OR REPLACE LUA SCRIPT PREPROC_RT.M_V1 AS\nfunction m(t) return t; end\n"
+    },
+    {
+      "name": "block_marker_inside_unterminated_statement",
+      "description": "A `--/` opens while a semicolon-terminated statement is still pending, which would silently swallow the pending text.",
+      "text": "CREATE TABLE PREPROC_RT.A_V1 (c INT)\n--/\nCREATE OR REPLACE LUA SCRIPT PREPROC_RT.M_V1 AS\nfunction m(t) return t; end\n/\n"
+    }
+  ]
+}

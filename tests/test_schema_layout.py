@@ -2,8 +2,12 @@
 
 All tests here require a live Exasol instance (``installed`` fixture) and are
 marked ``integration``. They run idempotently — each assertion query is
-read-only except for ``test_my_pipeline_filters_current_user`` and
-``test_layout_idempotent``, which clean up after themselves in ``finally``.
+read-only except for ``test_my_pipeline_filters_current_user``,
+``test_layout_idempotent``, ``test_group_sys_with_dba_upgrade_idempotent``,
+``test_modules_objects_column_widening_is_idempotent``, and
+``test_installed_modules_view_exposes_objects``, which clean up after themselves
+in ``finally``. The widening test also narrows a column and restores it there, so
+a failure mid-test cannot leave the schema behind for the tests that follow.
 """
 
 from pathlib import Path
@@ -11,9 +15,15 @@ from pathlib import Path
 import pytest
 
 from preproc.install import run_install
+from preproc.module.registry import OBJECTS_MAX_CHARS, decode_objects, encode_objects
 
 _REPO_ROOT = Path(__file__).parent.parent
 _SQL_INSTALL_DIR = _REPO_ROOT / "sql" / "install"
+
+# The width PREPROC.MODULES.objects shipped with before it was widened. Hard-coded
+# on purpose: this is the historical state the widening upgrade has to convert
+# FROM, so it is a fixed fact rather than a mirror of the current width.
+_ORIGINAL_OBJECTS_WIDTH = 4000
 
 
 @pytest.mark.integration
@@ -344,6 +354,222 @@ def test_group_sys_with_dba_upgrade_idempotent(installed):
         assert grouped is True, "NULL group_sys_with_dba must be treated as grouped (TRUE)"
     finally:
         installed.execute("UPDATE PREPROC.SETTINGS SET group_sys_with_dba = TRUE")
+
+
+@pytest.mark.integration
+def test_modules_objects_column_idempotent_upgrade(installed):
+    """PREPROC.MODULES gains a nullable objects column, surviving a second install.
+
+    Covers the ``install/schema-layout`` scenario "PREPROC.MODULES gains a
+    nullable objects column via an idempotent upgrade": the column must exist
+    and be nullable (a NOT NULL add would fail on any pre-existing MODULES
+    row, mirroring GROUP_SYS_WITH_DBA), and running install again — which
+    re-applies ``25_column_upgrades.sql`` through its ``--@tolerate-exists``
+    guard, or a no-op ``CREATE TABLE IF NOT EXISTS`` for a fresh install that
+    already got the column from ``22_modules_table.sql`` — must not fail and
+    must not duplicate or drop it.
+
+    This is the ADDITIVE guarantee only. The column's WIDTH, and the separate
+    guarantee that widening it over an existing install preserves rows and
+    converges on re-application, are pinned by
+    ``test_modules_objects_column_widening_is_idempotent``.
+    """
+    rows = installed.execute(
+        "SELECT COLUMN_IS_NULLABLE FROM EXA_ALL_COLUMNS "
+        "WHERE COLUMN_SCHEMA = 'PREPROC' AND COLUMN_TABLE = 'MODULES' "
+        "AND COLUMN_NAME = 'OBJECTS'"
+    ).fetchall()
+    assert len(rows) == 1, "OBJECTS column not found in PREPROC.MODULES"
+    assert rows[0][0] is True, "OBJECTS must be nullable"
+
+    run_install(installed)
+
+    rows_again = installed.execute(
+        "SELECT COLUMN_NAME FROM EXA_ALL_COLUMNS "
+        "WHERE COLUMN_SCHEMA = 'PREPROC' AND COLUMN_TABLE = 'MODULES' "
+        "AND COLUMN_NAME = 'OBJECTS'"
+    ).fetchall()
+    assert len(rows_again) == 1, "OBJECTS column missing after re-install"
+
+
+def _objects_column_width(connection):
+    """The declared character width of PREPROC.MODULES.objects."""
+    return int(
+        connection.execute(
+            "SELECT COLUMN_MAXSIZE FROM EXA_ALL_COLUMNS "
+            "WHERE COLUMN_SCHEMA = 'PREPROC' AND COLUMN_TABLE = 'MODULES' "
+            "AND COLUMN_NAME = 'OBJECTS'"
+        ).fetchval()
+    )
+
+
+def _objects_column_is_nullable(connection):
+    """Whether PREPROC.MODULES.objects still admits NULL."""
+    return connection.execute(
+        "SELECT COLUMN_IS_NULLABLE FROM EXA_ALL_COLUMNS "
+        "WHERE COLUMN_SCHEMA = 'PREPROC' AND COLUMN_TABLE = 'MODULES' "
+        "AND COLUMN_NAME = 'OBJECTS'"
+    ).fetchval()
+
+
+@pytest.mark.integration
+def test_modules_objects_column_widening_is_idempotent(installed):
+    """PREPROC.MODULES.objects is widened in place, preserving rows, and re-widens cleanly.
+
+    Covers the ``install/schema-layout`` scenario "PREPROC.MODULES.objects is
+    widened in place on an existing install". The column shipped at 4,000
+    characters — about 39 objects at realistic ~100-character qualified names,
+    too tight for a subsystem module that owns its own schema (ADR-057) — so
+    ``25_column_upgrades.sql`` carries an ``ALTER TABLE ... MODIFY`` after the
+    additive ``ADD COLUMN``. A widening is a different operation from an
+    addition: MODIFY states the target type ABSOLUTELY, which is what makes
+    re-application converge instead of erroring (and why it carries no
+    ``--@tolerate-exists`` marker — a second run raises no "already exists" error
+    to tolerate), and Exasol converts the stored values in place rather than
+    dropping and recreating the column, which is what makes it safe on an install
+    that already holds provenance rows.
+
+    The column is deliberately narrowed back to its original width first, and a
+    row with a non-NULL ``objects`` value is seeded through the narrow column:
+    that reconstructs the pre-widening state of a real upgrade, which is the only
+    way to prove the ALTER genuinely widens. Asserting on the installed state
+    alone would pass on a fresh install where ``22_modules_table.sql`` already
+    declared the final width and the ALTER did nothing.
+    """
+    name, version = "schema_layout_widening_test", 1
+    assert _objects_column_width(installed) == OBJECTS_MAX_CHARS, (
+        "PREPROC.MODULES.objects is not at the canonical width before the test starts"
+    )
+
+    longest = installed.execute(
+        "SELECT COALESCE(MAX(LENGTH(objects)), 0) FROM PREPROC.MODULES"
+    ).fetchval()
+    assert int(longest) <= _ORIGINAL_OBJECTS_WIDTH, (
+        "a recorded inventory is already wider than the original column width, so the "
+        "pre-widening state cannot be reconstructed without destroying it"
+    )
+
+    # Sized to the narrow column so it can be written BEFORE the widening, which
+    # is what makes "existing rows survive" an assertion rather than an aspiration.
+    recorded = encode_objects(
+        [{"type": "LUA SCRIPT", "name": "PREPROC_RT.SCHEMA_LAYOUT_WIDENING_TEST_V1"}]
+    )
+    try:
+        installed.execute(
+            f"ALTER TABLE PREPROC.MODULES MODIFY (objects VARCHAR({_ORIGINAL_OBJECTS_WIDTH}))"
+        )
+        assert _objects_column_width(installed) == _ORIGINAL_OBJECTS_WIDTH
+
+        installed.execute(
+            "INSERT INTO PREPROC.MODULES "
+            "(name, version, script_name, function_name, phase, deploy_mode, status, "
+            "installed_at, objects) VALUES "
+            "({n}, {v}, {sn}, {fn}, 'TRANSLATE', 'library-deployed', 'deployed', "
+            "CURRENT_TIMESTAMP, {ob})",
+            {
+                "n": name,
+                "v": version,
+                "sn": "PREPROC_RT.SCHEMA_LAYOUT_WIDENING_TEST_V1",
+                "fn": "schema_layout_widening_test",
+                "ob": recorded,
+            },
+        )
+
+        run_install(installed)
+
+        assert _objects_column_width(installed) == OBJECTS_MAX_CHARS, (
+            "25_column_upgrades.sql did not widen PREPROC.MODULES.objects"
+        )
+        assert _objects_column_is_nullable(installed) is True, "OBJECTS must stay nullable"
+        survived = installed.execute(
+            "SELECT objects FROM PREPROC.MODULES WHERE name = {n} AND version = {v}",
+            {"n": name, "v": version},
+        ).fetchall()
+        assert [row[0] for row in survived] == [recorded], (
+            "the widening did not preserve the existing provenance row's inventory"
+        )
+
+        # Second application: the widening runs again against an ALREADY-wide
+        # column. Convergent, not tolerated — no error, no narrowing, no data loss.
+        run_install(installed)
+
+        assert _objects_column_width(installed) == OBJECTS_MAX_CHARS
+        assert _objects_column_is_nullable(installed) is True
+        survived_again = installed.execute(
+            "SELECT objects FROM PREPROC.MODULES WHERE name = {n} AND version = {v}",
+            {"n": name, "v": version},
+        ).fetchall()
+        assert [row[0] for row in survived_again] == [recorded]
+    finally:
+        installed.execute(
+            "DELETE FROM PREPROC.MODULES WHERE name = {n} AND version = {v}",
+            {"n": name, "v": version},
+        )
+        # Never leave the column narrowed for the tests that follow, even if an
+        # assertion above failed between the narrowing and the re-install.
+        installed.execute(
+            f"ALTER TABLE PREPROC.MODULES MODIFY (objects VARCHAR({OBJECTS_MAX_CHARS}))"
+        )
+
+
+@pytest.mark.integration
+def test_installed_modules_view_exposes_objects(installed):
+    """PREPROC_RT.INSTALLED_MODULES exposes a composite module's recorded inventory.
+
+    Covers the ``install/schema-layout`` scenario "The installed-modules view
+    exposes the object inventory to a non-admin user": registers a composite
+    module's provenance row (four objects, ``preproc.module.registry
+    .encode_objects`` — see its docstring for the exact wire format) directly
+    through ``PREPROC.MODULE_REGISTER`` (already deployed by ``run_install``,
+    see ``install.py._deploy_admin_scripts``) and reads it back through the
+    definer-rights view. The view is exercised over the same connection used
+    to install (mirroring ``tests/test_module_lifecycle.py``'s rationale for
+    not provisioning a throwaway non-admin user): ``INSTALLED_MODULES`` is
+    covered by the schema-level PUBLIC SELECT grant on PREPROC_RT (ADR-002,
+    asserted independently elsewhere), so this only needs to prove the column
+    is exposed and round-trips, not who may read it.
+    """
+    name, version = "schema_layout_objects_test", 1
+    declared = [
+        {"type": "LUA SCRIPT", "name": "PREPROC_RT.SCHEMA_LAYOUT_OBJECTS_TEST_V1"},
+        {
+            "type": "PYTHON3 SCALAR SCRIPT",
+            "name": "PREPROC_RT.SCHEMA_LAYOUT_OBJECTS_TEST_HELPER_V1",
+        },
+        {"type": "TABLE", "name": "PREPROC_RT.SCHEMA_LAYOUT_OBJECTS_TEST_STATE_V1"},
+        {"type": "VIEW", "name": "PREPROC_RT.SCHEMA_LAYOUT_OBJECTS_TEST_VIEW_V1"},
+    ]
+    try:
+        installed.execute(
+            "EXECUTE SCRIPT PREPROC.MODULE_REGISTER("
+            "{n}, {v}, {src}, {rf}, {sh}, {sn}, {fn}, {ph}, {dm}, {su}, {lv}, {ob})",
+            {
+                "n": name,
+                "v": version,
+                "src": "library",
+                "rf": "v1",
+                "sh": "b" * 64,
+                "sn": declared[0]["name"],
+                "fn": "schema_layout_objects_test",
+                "ph": "TRANSLATE",
+                "dm": "library-deployed",
+                "su": "https://example.invalid/registry/index.json",
+                "lv": "0.9.0",
+                "ob": encode_objects(declared),
+            },
+        ).fetchall()
+
+        row = installed.execute(
+            "SELECT objects FROM PREPROC_RT.INSTALLED_MODULES WHERE name = {n} AND version = {v}",
+            {"n": name, "v": version},
+        ).fetchone()
+        assert row is not None, "registered row not visible through INSTALLED_MODULES"
+        assert decode_objects(row[0]) == declared
+    finally:
+        installed.execute(
+            "DELETE FROM PREPROC.MODULES WHERE name = {n} AND version = {v}",
+            {"n": name, "v": version},
+        )
 
 
 @pytest.mark.integration

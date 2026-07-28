@@ -26,7 +26,10 @@ ORDER BY r.phase, r.ordinal;
 -- SELECT grant on PREPROC_RT (ADR-002), so any non-admin user can read it.
 -- Unlike MY_PIPELINE there is no CURRENT_USER filter: provenance is global and
 -- every user sees every deployed/retired module version. ORDER BY name, version
--- makes the listing deterministic.
+-- makes the listing deterministic. objects exposes the recorded object
+-- inventory (see 22_modules_table.sql / 25_column_upgrades.sql) so a non-admin
+-- user can review what a module version created without any grant on the
+-- locked PREPROC.MODULES admin table.
 
 CREATE OR REPLACE VIEW PREPROC_RT.INSTALLED_MODULES AS
 SELECT
@@ -43,6 +46,7 @@ SELECT
     deploy_mode,
     status,
     installed_at,
-    retired_at
+    retired_at,
+    objects
 FROM PREPROC.MODULES
 ORDER BY name, version;

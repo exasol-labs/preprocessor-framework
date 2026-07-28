@@ -1,6 +1,6 @@
 # Feature: Two-Schema Database Layout
 
-Establishes the foundational database objects the preprocessor framework dispatches from: a locked admin schema (`PREPROC`) holding configuration and a PUBLIC-accessible runtime schema (`PREPROC_RT`) holding the dispatcher, views, and (later) generated scripts. This slice extends the layout for resolution: `RESOLUTION` gains an `ordinal` column for deterministic within-phase dispatch order, `SETTINGS` gains a state-fingerprint column for staleness detection, `MY_PIPELINE` exposes `client_pattern` and orders by `phase, ordinal`, and the `PREPROC_ADMIN` role gains `SELECT ANY DICTIONARY` so the admin-owned refresh script can read the role-grant dictionary tables. This delta extends the layout to add a `profile_hash` column to `PREPROC.RESOLUTION`, an `orphaned_at` column to `PREPROC.PROFILES` (for the retire-then-reclaim cleanup lifecycle), and exposes `mode` and `profile_hash` from `PREPROC_RT.MY_PIPELINE` to support session self-optimization. It further extends `PREPROC.SETTINGS` with a `group_sys_with_dba` BOOLEAN column that governs whether the `SYS` account is grouped with `DBA` during resolution. Fresh installs seed it `TRUE` (grouped — preserving today's behavior); existing installs gain it as a nullable additive upgrade whose `NULL` is treated as `TRUE` by the resolution `COALESCE`, so an upgrade changes no behavior. This delta further extends the layout for the in-database module installer: the locked admin schema `PREPROC` gains the admin-only resolver UDF(s), `PREPROC.MODULE_INSTALL`, and `PREPROC.MODULE_CATALOG` — owned by `PREPROC_ADMIN` and NEVER granted to PUBLIC. The BucketFS source used by the installer is an operator-created CONNECTION object; the framework never creates it.
+Establishes the foundational database objects the preprocessor framework dispatches from: a locked admin schema (`PREPROC`) holding configuration and a PUBLIC-accessible runtime schema (`PREPROC_RT`) holding the dispatcher, views, and (later) generated scripts. This slice extends the layout for resolution: `RESOLUTION` gains an `ordinal` column for deterministic within-phase dispatch order, `SETTINGS` gains a state-fingerprint column for staleness detection, `MY_PIPELINE` exposes `client_pattern` and orders by `phase, ordinal`, and the `PREPROC_ADMIN` role gains `SELECT ANY DICTIONARY` so the admin-owned refresh script can read the role-grant dictionary tables. This delta extends the layout to add a `profile_hash` column to `PREPROC.RESOLUTION`, an `orphaned_at` column to `PREPROC.PROFILES` (for the retire-then-reclaim cleanup lifecycle), and exposes `mode` and `profile_hash` from `PREPROC_RT.MY_PIPELINE` to support session self-optimization. It further extends `PREPROC.SETTINGS` with a `group_sys_with_dba` BOOLEAN column that governs whether the `SYS` account is grouped with `DBA` during resolution. Fresh installs seed it `TRUE` (grouped — preserving today's behavior); existing installs gain it as a nullable additive upgrade whose `NULL` is treated as `TRUE` by the resolution `COALESCE`, so an upgrade changes no behavior. This delta further extends the layout for the in-database module installer: the locked admin schema `PREPROC` gains the admin-only resolver UDF(s), `PREPROC.MODULE_INSTALL`, and `PREPROC.MODULE_CATALOG` — owned by `PREPROC_ADMIN` and NEVER granted to PUBLIC. The BucketFS source used by the installer is an operator-created CONNECTION object; the framework never creates it. This delta adds the one storage change the composite artifact contract needs: `PREPROC.MODULES` gains a nullable `objects` column recording each installed version's object inventory, so `MODULE_RECLAIM` can drop every object the module created without re-parsing an artifact the database does not retain.
 
 ## Background
 
@@ -11,6 +11,44 @@ Establishes the foundational database objects the preprocessor framework dispatc
 * The `group_sys_with_dba` column is nullable in both the fresh-install `CREATE TABLE` and the upgrade `ALTER TABLE`, matching the established additive-upgrade pattern (a NOT NULL add would fail on the existing single SETTINGS row); the seed sets the fresh-install value explicitly to `TRUE` and the resolution SQL `COALESCE`s a `NULL` to `TRUE`.
 * The resolver Python3 UDF(s), `PREPROC.MODULE_INSTALL`, and `PREPROC.MODULE_CATALOG` are objects in the locked `PREPROC` admin schema owned by `PREPROC_ADMIN`. Unlike the runtime schema, `PREPROC` is not granted to PUBLIC (ADR-002), so these objects are admin-only — the resolver, which reaches BucketFS/network, is never invokable by an ordinary user.
 * The BucketFS source is an operator responsibility: the operator creates the Exasol CONNECTION object and grants ACCESS on it to `PREPROC_ADMIN`; the framework install DDL creates no CONNECTION. The source string names that CONNECTION (`bucketfs:<CONNECTION_NAME>/<path>`), so no connection name is hardcoded.
+* `PREPROC.MODULES` gains a nullable `objects` column holding the deployed
+  object inventory as a serialised list of `type` + fully-qualified `name`
+  entries. It is added through `sql/install/25_column_upgrades.sql` using the
+  same idempotent additive-column pattern already used for
+  `PREPROC.PROFILES.orphaned_at`, `PREPROC.SETTINGS.group_sys_with_dba`, and
+  `PREPROC.MODULES.source_url` / `library_version`, so re-applying the layout
+  over an existing install is a no-op.
+* The column is 200,000 characters wide — roughly 2,000 objects at realistic
+  ~100-character qualified names, and well under Exasol's 2,000,000-character
+  VARCHAR ceiling. The 4,000 it was first added at held about 39 objects: a house
+  default rather than a derived bound, and too tight for the subsystem module
+  that legitimately owns its own schema (ADR-057). An Exasol VARCHAR is
+  variable-length, so the headroom costs nothing in storage.
+* That width is pinned in seven places that cannot import one another — the table
+  DDL, the widening `ALTER` in `sql/install/25_column_upgrades.sql`,
+  `MODULE_REGISTER`'s `CAST`, the resolver's and `MODULE_CATALOG`'s `objects`
+  EMITS, and the `OBJECTS_MAX_CHARS` pre-flight guards in the resolver and
+  `module_install.lua`, canonically
+  `preproc.module.registry.OBJECTS_MAX_CHARS`. Because each one is read by a gate
+  that refuses an over-wide inventory BEFORE the provenance write, the narrowest
+  copy is the effective limit: a partial widening does not fail, it silently
+  keeps the old ceiling. They therefore MUST move together.
+* Widening the column over an existing install is a different operation from
+  adding it, so it ships as an `ALTER TABLE ... MODIFY` rather than the additive
+  `--@tolerate-exists` `ADD COLUMN` pattern. `MODIFY` states the target type
+  absolutely, which is what makes re-application converge rather than error (a
+  second run raises no "already exists" error for a marker to tolerate), and
+  Exasol converts the stored values in place, so recorded inventories survive and
+  the column is never dropped and recreated. The statement follows the additive
+  `ADD COLUMN` in the same file, which guarantees the column exists by the time it
+  runs. The release bundle is clean-install only and skips that file, so the
+  widening path is reached exclusively by re-installing over an existing install.
+* A NULL `objects` value denotes a row written before this delta or a
+  single-statement module; readers interpret it as the single object named by
+  the row's `script_name`.
+* `PREPROC_RT.INSTALLED_MODULES` exposes the new column through the existing
+  definer-rights view bridge, so an operator can read a module's object
+  inventory without holding admin rights.
 
 ## Scenarios
 
@@ -131,3 +169,29 @@ Establishes the foundational database objects the preprocessor framework dispatc
 * *THEN* the install DDL MUST NOT create any BucketFS CONNECTION object
 * *AND* the in-database installer MUST resolve the BucketFS location from a CONNECTION named in the source string (`bucketfs:<CONNECTION_NAME>/<path>`)
 * *AND* using that CONNECTION MUST require the operator to have created it and granted ACCESS on it to `PREPROC_ADMIN`
+
+### Scenario: PREPROC.MODULES gains a nullable objects column via an idempotent upgrade
+
+* *GIVEN* an existing install whose `PREPROC.MODULES` table has no `objects` column
+* *WHEN* the install DDL is applied
+* *THEN* `PREPROC.MODULES` MUST have a nullable `objects` column
+* *AND* existing provenance rows MUST be preserved with a NULL `objects` value
+* *AND* re-applying the install DDL MUST NOT fail and MUST NOT duplicate the column
+
+### Scenario: PREPROC.MODULES.objects is widened in place over an existing install
+
+* *GIVEN* an existing install whose `PREPROC.MODULES.objects` column is narrower than the 200,000 characters the install DDL declares
+* *AND* `PREPROC.MODULES` holds provenance rows, at least one with a non-NULL `objects` value written through the narrower column
+* *WHEN* the install DDL is applied
+* *THEN* `PREPROC.MODULES.objects` MUST be 200,000 characters wide
+* *AND* every existing provenance row MUST be preserved with its recorded `objects` value unchanged
+* *AND* the column MUST remain nullable
+* *AND* the widening MUST NOT drop and recreate the column
+* *AND* re-applying the install DDL over the already-widened column MUST NOT fail, MUST NOT narrow the column, and MUST NOT alter any recorded `objects` value
+
+### Scenario: The installed-modules view exposes the object inventory to a non-admin user
+
+* *GIVEN* an installed framework with a composite module whose provenance row records four objects
+* *WHEN* a non-admin user selects from `PREPROC_RT.INSTALLED_MODULES`
+* *THEN* the view MUST expose the module's recorded object inventory
+* *AND* the user MUST NOT require any grant on the `PREPROC.MODULES` admin table

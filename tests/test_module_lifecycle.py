@@ -34,11 +34,29 @@ The reclaim safety argument under test
     boundary the guard defends. ``test_module_reclaim_when_unreferenced`` proves
     the drop happens once both guards pass.
 
+    Both guards are evaluated against the ENTRY script, because a rule names an
+    entry script and a profile bakes an entry script — never a companion.
+
+What reclaim drops, once both guards pass
+    The RECORDED INVENTORY (``PREPROC.MODULES.objects``), in REVERSE file order,
+    and nothing else. The inventory, not a schema name, is the ownership boundary
+    (ADR-057): an object outside ``PREPROC_RT`` is reclaimed when the inventory
+    records it, and an object the inventory does not record is never dropped
+    however closely its name or schema resembles a recorded one. A NULL inventory
+    is read as the single Lua script named by ``script_name``, which is what keeps
+    a pre-composite provenance row reclaiming correctly.
+
+    ``test_reclaim_spares_objects_absent_from_inventory`` is where that boundary is
+    enforced rather than described: every object it asserts survives is one that a
+    schema sweep, a CASCADE, or a name-prefix match would have taken.
+
 Shared-state discipline (CONFIG/RESOLUTION/PROFILES/MODULES are global tables)
     ``lifecycle_env`` wipes all four tables before and after every test, restores
     convenience mode, deploys the two test module scripts (V1/V2), and on teardown
     deactivates the preprocessor, drops the test scripts, and refreshes to a clean
     (empty) RESOLUTION so nothing leaks into the rest of the shared session.
+    ``composite_env`` layers the multi-type, multi-schema scaffolding and the
+    decoys on top of it for the inventory-driven reclaim tests.
 
 How a transform is observed
     MASTER is a SQL preprocessor: it rewrites statement text and returns nothing.
@@ -56,6 +74,9 @@ from pathlib import Path
 import pytest
 
 from preproc.connection import connect_from_env
+from preproc.module.artifact import derive_objects, split_statements
+from preproc.module.manifest import ENTRY_OBJECT_TYPE
+from preproc.module.registry import decode_objects, encode_objects
 
 _REPO_ROOT = Path(__file__).parent.parent
 _LUA_DIR = _REPO_ROOT / "sql" / "lua"
@@ -72,7 +93,7 @@ _MODULE_SCRIPTS = {
     "module_register.lua": (
         "CREATE OR REPLACE LUA SCRIPT PREPROC.MODULE_REGISTER("
         "name, version, source, ref, sha256, script_name, function_name, phase, deploy_mode, "
-        "source_url, library_version"
+        "source_url, library_version, objects"
         ") RETURNS TABLE AS\n"
     ),
     "module_retire.lua": (
@@ -115,6 +136,84 @@ _MODULE_BODY = (
     "    end\n"
 )
 
+# --- composite scaffolding --------------------------------------------------
+#
+# Reclaim is now inventory-driven, so the reclaim tests need real objects of more
+# than one type living in more than one schema, plus DECOYS that no inventory
+# records. ``composite_env`` creates and tears down everything below; each test
+# then states which of them its own provenance row records, so "in the recorded
+# inventory" and "in the database" stay independently visible.
+#
+# Two of the schemas matter structurally:
+#   * ``_OUT_SCHEMA`` is a schema the module only writes INTO. It is never in an
+#     inventory, so it must survive every reclaim (ADR-057 widens the boundary to
+#     the inventory, it does not widen it to a schema).
+#   * ``_OWNED_SCHEMA_V1`` is a schema a module version creates and therefore
+#     DOES record, together with a table inside it — the dependency that makes
+#     reverse-order teardown observable.
+_OUT_SCHEMA = "ZZ_PREPROC_LC_OUT"
+_OWNED_SCHEMA_V1 = "ZZ_PREPROC_LC_OWNED_V1"
+
+_STATE_V1 = f"{_OUT_SCHEMA}.MOD_STATE_V1"
+_STATE_V2 = f"{_OUT_SCHEMA}.MOD_STATE_V2"
+_OWNED_CHILD_V1 = f"{_OWNED_SCHEMA_V1}.CHILD_V1"
+_HELPER_V1 = "PREPROC_RT.CAST_SHORTHAND_HELPER_V1"
+_HELPER_V2 = "PREPROC_RT.CAST_SHORTHAND_HELPER_V2"
+_UDF_V1 = "PREPROC_RT.CAST_SHORTHAND_UDF_V1"
+_FMT_UDF_V1 = "PREPROC_RT.CAST_SHORTHAND_FMT_V1"
+
+# Decoys, recorded by no inventory. _DECOY_SCRIPT's name has the entry script's
+# fully-qualified name as a STRICT PREFIX and shares its schema; _DECOY_TABLE
+# sits in the very schema a recorded object lives in. Between them they fail any
+# implementation that resolved its drop set from a schema or a name pattern
+# instead of from the recorded inventory.
+_DECOY_SCRIPT = f"{_SCRIPT_V1}_KEEP"
+_DECOY_TABLE = f"{_OUT_SCHEMA}.KEEP_TABLE_V1"
+
+# manifest.ENTRY_OBJECT_TYPE is the Lua-script object type; a companion Lua
+# script carries the same type, so the one constant serves both roles.
+_LUA_SCRIPT = ENTRY_OBJECT_TYPE
+_PY_UDF = "PYTHON3 SCALAR SCRIPT"
+_TABLE = "TABLE"
+_SCHEMA = "SCHEMA"
+
+# A companion whose body is BYTE-IDENTICAL between generations: only the object
+# name carries the _V<N> suffix (ADR-056), so nothing but the recorded name can
+# tell a v1 companion from its v2 counterpart.
+_HELPER_BODY = (
+    "CREATE OR REPLACE LUA SCRIPT {name}() AS\n    function helper()\n        return 1\n    end\n"
+)
+
+_UDF_BODY = (
+    "CREATE OR REPLACE PYTHON3 SCALAR SCRIPT {name}(x DECIMAL(9,0)) RETURNS DECIMAL(9,0) AS\n"
+    "def run(ctx):\n"
+    "    return ctx.x\n"
+)
+
+# A composite artifact in the canonical grammar: three block-wrapped statements
+# and one ';'-terminated one, creating a Lua entry script, two Python UDFs, and a
+# table. test_provenance_records_full_inventory splits it with the canonical
+# splitter so the declared inventory is pinned to what the artifact really
+# creates rather than to a hand-written literal.
+_COMPOSITE_ARTIFACT = f"""--/
+CREATE OR REPLACE LUA SCRIPT {_SCRIPT_V1}() AS
+    function cast_shorthand(sqltext)
+        return sqltext
+    end
+/
+--/
+CREATE OR REPLACE PYTHON3 SCALAR SCRIPT {_UDF_V1}(x DECIMAL(9,0)) RETURNS DECIMAL(9,0) AS
+def run(ctx):
+    return ctx.x
+/
+--/
+CREATE OR REPLACE PYTHON3 SCALAR SCRIPT {_FMT_UDF_V1}(x VARCHAR(100)) RETURNS VARCHAR(100) AS
+def run(ctx):
+    return ctx.x
+/
+CREATE TABLE IF NOT EXISTS {_STATE_V1} (payload DECIMAL(9,0));
+"""
+
 
 @pytest.fixture(scope="session")
 def lifecycle_deployed(installed):
@@ -151,6 +250,48 @@ def lifecycle_env(lifecycle_deployed):
             _reset(conn)
             _drop_test_modules(conn)
             conn.execute("EXECUTE SCRIPT PREPROC.REFRESH").fetchall()
+
+
+@pytest.fixture
+def composite_env(lifecycle_env):
+    """``lifecycle_env`` plus the composite scaffolding objects and decoys.
+
+    Layered on ``lifecycle_env`` rather than folded into it so the tests that
+    need only the V1/V2 entry scripts stay cheap; the inner fixture also finalises
+    first, so the scaffolding is gone before the shared tables are wiped.
+    """
+    conn = lifecycle_env
+    _create_composite_objects(conn)
+    try:
+        yield conn
+    finally:
+        _drop_composite_objects(conn)
+
+
+def _create_composite_objects(conn):
+    """Create the composite scaffolding: two schemas, four tables, four scripts."""
+    for schema in (_OUT_SCHEMA, _OWNED_SCHEMA_V1):
+        conn.execute(f"CREATE SCHEMA IF NOT EXISTS {schema}")
+    # CREATE SCHEMA also OPENs it. Every statement here is fully qualified, but
+    # PREPROC is reopened so the session is left exactly as the fixture found it.
+    conn.execute("OPEN SCHEMA PREPROC")
+    for table in (_STATE_V1, _STATE_V2, _OWNED_CHILD_V1, _DECOY_TABLE):
+        conn.execute(f"CREATE TABLE IF NOT EXISTS {table} (payload DECIMAL(9,0))")
+    for script in (_HELPER_V1, _HELPER_V2):
+        conn.execute(_HELPER_BODY.format(name=script))
+    conn.execute(_MODULE_BODY.format(name=_DECOY_SCRIPT, seed=_SEED, tag="KEEP"))
+    conn.execute(_UDF_BODY.format(name=_UDF_V1))
+    conn.commit()
+
+
+def _drop_composite_objects(conn):
+    """Remove the scaffolding. CASCADE is safe here — these are test-owned schemas."""
+    for script in (_UDF_V1, _DECOY_SCRIPT, _HELPER_V2, _HELPER_V1):
+        conn.execute(f"DROP SCRIPT IF EXISTS {script}")
+    for schema in (_OWNED_SCHEMA_V1, _OUT_SCHEMA):
+        conn.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.execute("OPEN SCHEMA PREPROC")
+    conn.commit()
 
 
 def _reset(conn):
@@ -201,10 +342,12 @@ def _register(
     deploy_mode=_DEPLOY_MODE,
     source_url=None,
     library_version=None,
+    objects=None,
 ):
     """Run MODULE_REGISTER and return its result rows [(name, version, status, created)]."""
     su_sql = "{su}" if source_url is not None else "NULL"
     lv_sql = "{lv}" if library_version is not None else "NULL"
+    ob_sql = "{ob}" if objects is not None else "NULL"
     params = {
         "n": name,
         "v": version,
@@ -220,11 +363,30 @@ def _register(
         params["su"] = source_url
     if library_version is not None:
         params["lv"] = library_version
+    if objects is not None:
+        params["ob"] = objects
     return conn.execute(
         "EXECUTE SCRIPT PREPROC.MODULE_REGISTER("
-        "{n}, {v}, {src}, {rf}, {sh}, {sn}, {fn}, {ph}, {dm}, " + su_sql + ", " + lv_sql + ")",
+        "{n}, {v}, {src}, {rf}, {sh}, {sn}, {fn}, {ph}, {dm}, "
+        + su_sql
+        + ", "
+        + lv_sql
+        + ", "
+        + ob_sql
+        + ")",
         params,
     ).fetchall()
+
+
+def _inventory(*objects):
+    """Encode ``(type, name)`` pairs with the canonical registry encoder.
+
+    Using ``registry.encode_objects`` rather than a hand-written string is what
+    makes these tests an agreement check between the Python encoder and the Lua
+    parser in ``module_reclaim.lua``, not merely a check of the Lua against
+    itself.
+    """
+    return encode_objects([{"type": obj_type, "name": name} for obj_type, name in objects])
 
 
 def _retire(conn, name, version):
@@ -263,13 +425,13 @@ def _module_row(conn, name, version):
 
     Column order: name(0) version(1) source_repo(2) source_ref(3) sha256(4) script_name(5)
     function_name(6) phase(7) deploy_mode(8) status(9) installed_at(10) retired_at(11)
-    source_url(12) library_version(13). The audit columns are appended last so the
-    original positional indices stay valid.
+    source_url(12) library_version(13) objects(14). The audit columns are appended
+    last so the original positional indices stay valid.
     """
     rows = conn.execute(
         "SELECT name, version, source_repo, source_ref, sha256, script_name, function_name, "
-        "phase, deploy_mode, status, installed_at, retired_at, source_url, library_version "
-        "FROM PREPROC.MODULES WHERE name = {n} AND version = {v}",
+        "phase, deploy_mode, status, installed_at, retired_at, source_url, library_version, "
+        "objects FROM PREPROC.MODULES WHERE name = {n} AND version = {v}",
         {"n": name, "v": version},
     ).fetchall()
     return rows[0] if rows else None
@@ -288,6 +450,26 @@ def _script_exists(conn, qualified):
         conn.execute(
             "SELECT COUNT(*) FROM EXA_ALL_SCRIPTS WHERE SCRIPT_SCHEMA = {s} AND SCRIPT_NAME = {n}",
             {"s": schema, "n": name},
+        ).fetchval()
+        > 0
+    )
+
+
+def _table_exists(conn, qualified):
+    schema, _, name = qualified.partition(".")
+    return (
+        conn.execute(
+            "SELECT COUNT(*) FROM EXA_ALL_TABLES WHERE TABLE_SCHEMA = {s} AND TABLE_NAME = {n}",
+            {"s": schema, "n": name},
+        ).fetchval()
+        > 0
+    )
+
+
+def _schema_exists(conn, name):
+    return (
+        conn.execute(
+            "SELECT COUNT(*) FROM EXA_ALL_SCHEMAS WHERE SCHEMA_NAME = {n}", {"n": name}
         ).fetchval()
         > 0
     )
@@ -334,11 +516,32 @@ def _probe_transformed():
 
 
 @pytest.mark.integration
-def test_module_register_writes_row(lifecycle_env):
-    """MODULE_REGISTER writes one deployed row and exposes it via the RT view."""
-    conn = lifecycle_env
+def test_module_register_writes_provenance_with_objects(lifecycle_env):
+    """MODULE_REGISTER writes one deployed row, inventory included, RT-visible.
 
-    result = _register(conn, version=1, ref="v1", script_name=_SCRIPT_V1)
+    The nullable audit trio is source_url, library_version, and objects: each is
+    recorded when supplied and NULL when it is not, so a pre-composite caller and
+    a composite one both round-trip through the same MERGE.
+    """
+    conn = lifecycle_env
+    url = (
+        "https://raw.githubusercontent.com/exasol-labs/preprocessor-library/"
+        "v0.2.0/registry/index.json"
+    )
+    declared = [
+        {"type": ENTRY_OBJECT_TYPE, "name": _SCRIPT_V1},
+        {"type": _TABLE, "name": _STATE_V1},
+    ]
+
+    result = _register(
+        conn,
+        version=1,
+        ref="v1",
+        script_name=_SCRIPT_V1,
+        source_url=url,
+        library_version="0.2.0",
+        objects=encode_objects(declared),
+    )
     assert result[0][3] is True, "first register must report created=TRUE"
 
     row = _module_row(conn, _MODULE_NAME, 1)
@@ -346,13 +549,22 @@ def test_module_register_writes_row(lifecycle_env):
     assert row[9] == "deployed"
     assert row[10] is not None, "installed_at must be stamped"
     assert row[11] is None, "retired_at must be NULL for a deployed version"
+    assert row[12] == url
+    assert row[13] == "0.2.0"
+    assert decode_objects(row[14]) == declared, "the object inventory was not recorded verbatim"
 
-    # PREPROC_RT.INSTALLED_MODULES exposes the row. It is PUBLIC-readable via the
-    # schema-level grant on PREPROC_RT (ADR-002); the read is verified here from
-    # the admin connection because provisioning a throwaway non-admin user is not
-    # reliable in the integration env (see test_control_admin_scripts).
+    # A caller supplying none of the three records NULL for each.
+    _register(conn, version=2, ref="v2", script_name=_SCRIPT_V2)
+    bare = _module_row(conn, _MODULE_NAME, 2)
+    assert (bare[12], bare[13], bare[14]) == (None, None, None)
+
+    # PREPROC_RT.INSTALLED_MODULES exposes the row and its inventory. It is
+    # PUBLIC-readable via the schema-level grant on PREPROC_RT (ADR-002); the read
+    # is verified here from the admin connection because provisioning a throwaway
+    # non-admin user is not reliable in the integration env (see
+    # test_control_admin_scripts).
     view = conn.execute(
-        "SELECT name, version, status FROM PREPROC_RT.INSTALLED_MODULES "
+        "SELECT name, version, status, objects FROM PREPROC_RT.INSTALLED_MODULES "
         "WHERE name = {n} AND version = 1",
         {"n": _MODULE_NAME},
     ).fetchall()
@@ -360,6 +572,35 @@ def test_module_register_writes_row(lifecycle_env):
     assert view[0][0] == _MODULE_NAME
     assert int(view[0][1]) == 1
     assert view[0][2] == "deployed"
+    assert decode_objects(view[0][3]) == declared
+
+
+@pytest.mark.integration
+def test_provenance_records_full_inventory(lifecycle_env):
+    """A composite module's row records every object its artifact creates, in file order.
+
+    The recorded inventory is pinned to what the artifact REALLY creates, not to a
+    hand-written literal: the declared list is first checked against the inventory
+    the canonical splitter derives from ``_COMPOSITE_ARTIFACT``, and only then
+    registered and read back. Declared, derived, and recorded therefore all have
+    to agree for this to pass.
+    """
+    conn = lifecycle_env
+    declared = [
+        {"type": ENTRY_OBJECT_TYPE, "name": _SCRIPT_V1},
+        {"type": _PY_UDF, "name": _UDF_V1},
+        {"type": _PY_UDF, "name": _FMT_UDF_V1},
+        {"type": _TABLE, "name": _STATE_V1},
+    ]
+    assert derive_objects(split_statements(_COMPOSITE_ARTIFACT)) == declared, (
+        "the fixture artifact no longer creates exactly the four declared objects"
+    )
+
+    _register(conn, version=1, ref="v1", script_name=_SCRIPT_V1, objects=encode_objects(declared))
+
+    row = _module_row(conn, _MODULE_NAME, 1)
+    assert row is not None
+    assert decode_objects(row[14]) == declared, "the full four-object inventory was not recorded"
 
 
 @pytest.mark.integration
@@ -556,6 +797,199 @@ def test_module_reclaim_when_unreferenced(lifecycle_env):
 
     assert not _script_exists(conn, _SCRIPT_V1), "the unreferenced retired script was not dropped"
     assert _module_row(conn, _MODULE_NAME, 1) is None, "the reclaimed row was not removed"
+
+
+# --- inventory-driven reclaim (ADR-055, ADR-056, ADR-057) -------------------
+
+
+@pytest.mark.integration
+def test_reclaim_drops_all_inventory_objects_reverse_order(composite_env):
+    """Reclaim drops every recorded object, and only REVERSE file order can succeed.
+
+    The inventory is ordered so that forward teardown is impossible: the module's
+    own schema comes FIRST and a table inside it comes second, and a SCHEMA is
+    dropped RESTRICT, never CASCADE (reclaim must not destroy data it does not
+    own). Dropping the schema before its table therefore fails and leaves the
+    schema behind, so reaching ``reclaimed`` with all four objects gone is
+    achievable only by walking the inventory backwards.
+    """
+    conn = composite_env
+    objects = (
+        (_SCHEMA, _OWNED_SCHEMA_V1),
+        (_TABLE, _OWNED_CHILD_V1),
+        (_PY_UDF, _UDF_V1),
+        (ENTRY_OBJECT_TYPE, _SCRIPT_V1),
+    )
+    _register(conn, version=1, ref="v1", script_name=_SCRIPT_V1, objects=_inventory(*objects))
+    _retire(conn, _MODULE_NAME, 1)
+
+    assert _schema_exists(conn, _OWNED_SCHEMA_V1)
+    assert _table_exists(conn, _OWNED_CHILD_V1)
+    assert _script_exists(conn, _UDF_V1)
+    assert _script_exists(conn, _SCRIPT_V1)
+
+    result = _reclaim(conn, _MODULE_NAME, 1)
+    assert result[0][4] == "reclaimed", (
+        "forward-order teardown fails here on the still-populated owned schema"
+    )
+    assert result[0][2] is True, "the inventory must be reported dropped"
+    assert result[0][3] is True, "the provenance row must be removed"
+
+    assert not _script_exists(conn, _SCRIPT_V1)
+    assert not _script_exists(conn, _UDF_V1), "a Python UDF companion was not dropped"
+    assert not _table_exists(conn, _OWNED_CHILD_V1)
+    assert not _schema_exists(conn, _OWNED_SCHEMA_V1), "the module-owned schema was not dropped"
+    assert _module_row(conn, _MODULE_NAME, 1) is None, "the reclaimed row was not removed"
+
+
+@pytest.mark.integration
+def test_reclaim_drops_out_of_schema_objects(composite_env):
+    """A recorded object outside PREPROC_RT is dropped; the old schema guard is gone.
+
+    ``_OUT_SCHEMA`` itself is NOT in the inventory — the module only put a table
+    inside it — so the schema must survive. The inventory is the boundary in both
+    directions: it admits the out-of-schema table AND it protects the schema.
+    """
+    conn = composite_env
+    objects = ((ENTRY_OBJECT_TYPE, _SCRIPT_V1), (_TABLE, _STATE_V1))
+    _register(conn, version=1, ref="v1", script_name=_SCRIPT_V1, objects=_inventory(*objects))
+    _retire(conn, _MODULE_NAME, 1)
+    assert _table_exists(conn, _STATE_V1)
+
+    result = _reclaim(conn, _MODULE_NAME, 1)
+    assert result[0][4] == "reclaimed", "the former PREPROC_RT-only guard still blocks"
+    assert result[0][2] is True
+
+    assert not _table_exists(conn, _STATE_V1), "the non-PREPROC_RT object was not dropped"
+    assert not _script_exists(conn, _SCRIPT_V1)
+    assert _schema_exists(conn, _OUT_SCHEMA), "reclaim dropped a schema no inventory records"
+    assert _module_row(conn, _MODULE_NAME, 1) is None
+
+
+@pytest.mark.integration
+def test_reclaim_spares_objects_absent_from_inventory(composite_env):
+    """Reclaim drops the recorded inventory and NOTHING else, in any schema.
+
+    This is the test that makes the widened ownership boundary real, so every
+    survivor is a decoy a WIDER boundary would have taken:
+
+      * ``_DECOY_SCRIPT`` has the entry script's fully-qualified name as a strict
+        prefix and shares its schema, so a name-prefix or LIKE match, or a sweep
+        of the entry script's schema, drops it.
+      * ``_DECOY_TABLE`` sits in the very schema a recorded object lives in, so a
+        sweep of a touched schema — or CASCADE-ing it — drops it.
+      * ``_HELPER_V1`` and ``_UDF_V1`` share the module's name prefix AND its _V1
+        generation suffix but are absent from THIS version's inventory, so only
+        reading the inventory spares them.
+      * ``_OUT_SCHEMA`` and ``_OWNED_SCHEMA_V1`` are schemas the inventory does
+        not name, so neither may be dropped even though the reclaim empties part
+        of one.
+
+    The reclaim must also SUCCEED. Sparing every decoy by refusing to do anything
+    would satisfy the survival assertions on their own, so ``reclaimed`` and the
+    recorded objects' absence are asserted alongside them.
+    """
+    conn = composite_env
+    objects = ((ENTRY_OBJECT_TYPE, _SCRIPT_V1), (_TABLE, _STATE_V1))
+    _register(conn, version=1, ref="v1", script_name=_SCRIPT_V1, objects=_inventory(*objects))
+    _retire(conn, _MODULE_NAME, 1)
+
+    assert _script_exists(conn, _DECOY_SCRIPT), "the decoy script fixture did not deploy"
+    assert _table_exists(conn, _DECOY_TABLE), "the decoy table fixture did not deploy"
+
+    result = _reclaim(conn, _MODULE_NAME, 1)
+    assert result[0][4] == "reclaimed", "the reclaim itself must have succeeded"
+    assert not _script_exists(conn, _SCRIPT_V1), "the recorded entry script was not dropped"
+    assert not _table_exists(conn, _STATE_V1), "the recorded table was not dropped"
+
+    assert _script_exists(conn, _DECOY_SCRIPT), (
+        "reclaim dropped a PREPROC_RT script whose name merely extends the entry script's"
+    )
+    assert _table_exists(conn, _DECOY_TABLE), (
+        "reclaim dropped a sibling table in a schema it only had one recorded object in"
+    )
+    for spared in (_HELPER_V1, _UDF_V1):
+        assert _script_exists(conn, spared), (
+            f"reclaim dropped {spared}, which shares the module's name and generation "
+            "but is absent from this version's recorded inventory"
+        )
+    for schema in (_OUT_SCHEMA, _OWNED_SCHEMA_V1):
+        assert _schema_exists(conn, schema), f"reclaim dropped schema {schema}, in no inventory"
+
+
+@pytest.mark.integration
+def test_null_inventory_row_reclaims_entry_script(composite_env):
+    """A row with NULL objects reclaims exactly the one object script_name names.
+
+    This is the pre-composite provenance row, and equally the single-statement
+    module: the NULL is read as the single LUA SCRIPT named by ``script_name`` —
+    the same one-object inventory ``preproc.module.registry`` derives for a
+    schema_version 1 index entry — so the drop set is one object, never a sweep,
+    and the absent inventory is not an error.
+    """
+    conn = composite_env
+    _register(conn, version=1, ref="v1", script_name=_SCRIPT_V1)
+    row = _module_row(conn, _MODULE_NAME, 1)
+    assert row[14] is None, "this test requires a NULL recorded inventory"
+    _retire(conn, _MODULE_NAME, 1)
+
+    result = _reclaim(conn, _MODULE_NAME, 1)
+    assert result[0][4] == "reclaimed", "an absent inventory must not fail the reclaim"
+    assert result[0][2] is True, "the entry script must be reported dropped"
+    assert result[0][3] is True
+    assert not _script_exists(conn, _SCRIPT_V1), "the entry script named by script_name survived"
+    assert _module_row(conn, _MODULE_NAME, 1) is None
+
+    # The fallback names ONE object: same-generation companions are not swept up.
+    assert _script_exists(conn, _HELPER_V1)
+    assert _script_exists(conn, _UDF_V1)
+    assert _table_exists(conn, _STATE_V1)
+
+
+@pytest.mark.integration
+def test_reclaim_v1_leaves_v2_companions(composite_env):
+    """Reclaiming v1 drops every v1 object and no v2 object; v2 still transforms.
+
+    ``_HELPER_V1`` and ``_HELPER_V2`` have BYTE-IDENTICAL bodies and differ only in
+    their _V<N>-suffixed names (ADR-056), so nothing but the recorded name can
+    separate the two generations — which is the discipline under test. v2 is the
+    live generation, so both liveness guards pass for v1: the rule names V2, and
+    the profile the probe bakes contains V2, whose manifest entry cannot
+    prefix-match the V1 needle because the needle is flanked by '|'.
+    """
+    conn = composite_env
+    user = _current_user(conn)
+    v1_objects = (
+        (ENTRY_OBJECT_TYPE, _SCRIPT_V1),
+        (_LUA_SCRIPT, _HELPER_V1),
+        (_TABLE, _STATE_V1),
+    )
+    v2_objects = (
+        (ENTRY_OBJECT_TYPE, _SCRIPT_V2),
+        (_LUA_SCRIPT, _HELPER_V2),
+        (_TABLE, _STATE_V2),
+    )
+    _register(conn, version=1, ref="v1", script_name=_SCRIPT_V1, objects=_inventory(*v1_objects))
+    _register(conn, version=2, ref="v2", script_name=_SCRIPT_V2, objects=_inventory(*v2_objects))
+
+    _ensure_rule(conn, scope_type="USER", scope_value=user, script_name=_SCRIPT_V2)
+    assert _probe_transformed() == f"{_SEED}|V2", "V2 must transform before the v1 reclaim"
+
+    _retire(conn, _MODULE_NAME, 1)
+    result = _reclaim(conn, _MODULE_NAME, 1)
+    assert result[0][4] == "reclaimed"
+    assert result[0][2] is True
+
+    for gone in (_SCRIPT_V1, _HELPER_V1):
+        assert not _script_exists(conn, gone), f"{gone} survived the v1 reclaim"
+    assert not _table_exists(conn, _STATE_V1)
+
+    for live in (_SCRIPT_V2, _HELPER_V2):
+        assert _script_exists(conn, live), f"reclaiming v1 dropped the live {live}"
+    assert _table_exists(conn, _STATE_V2), "reclaiming v1 dropped the live v2 table"
+    assert _module_row(conn, _MODULE_NAME, 2) is not None, "the v2 provenance row was removed"
+
+    assert _probe_transformed() == f"{_SEED}|V2", "v2 must still transform after the v1 reclaim"
 
 
 @pytest.mark.integration

@@ -15,9 +15,10 @@ Public API
 ----------
 ``parse_manifest(data)`` / ``load_manifest(path)``
     Parse and validate a manifest, returning a ``ModuleManifest``.
-``verify_artifact_script_name(manifest, artifact_text)``
-    Confirm the artifact is a single ``CREATE OR REPLACE LUA SCRIPT``
-    statement whose script name matches the manifest.
+``verify_artifact_inventory(manifest, artifact_text)``
+    Split the artifact, derive the object inventory it creates, and confirm it
+    agrees with the manifest's declared ``[[objects]]`` in both directions.
+    Returns the derived inventory.
 ``verify_artifact_sha256(manifest, artifact_bytes)``
     For a ``library-deployed`` module, confirm the artifact's bytes hash to
     the manifest's declared ``sha256``.
@@ -31,6 +32,15 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from preproc.module.artifact import (
+    UNQUALIFIED_TYPES,
+    ArtifactSyntaxError,
+    derive_objects,
+    normalize_object_name,
+    qualified_parts,
+    split_statements,
+)
 
 PHASES: tuple[str, ...] = ("TRANSLATE", "EXPAND", "REWRITE")
 DEPLOY_MODES: tuple[str, ...] = ("library-deployed", "self-deployed")
@@ -49,16 +59,24 @@ _REQUIRED_FIELDS = (
 )
 
 _VERSION_SUFFIX_RE = re.compile(r"_V(\d+)$", re.IGNORECASE)
+# The PREPROC.MODULES.objects column encodes each object as a 'TYPE|NAME'
+# line; these are exactly the characters that would corrupt that encoding, so
+# a declared type or name is rejected up front instead of ever being escaped.
+_FORBIDDEN_OBJECT_CHARS: tuple[tuple[str, str], ...] = (
+    ("\n", "a newline"),
+    ("\r", "a carriage return"),
+    ("|", "a pipe ('|')"),
+)
 _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 # A module name must be a plain SQL-style identifier: a letter followed by
 # letters, digits, or underscores. Hyphens are disallowed so the name can be
 # used unquoted in the `PREPROC INSTALL MODULE <name>` sugar (an unquoted Exasol
 # identifier cannot contain a hyphen), and it is matched case-insensitively.
 _NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
-_CREATE_SCRIPT_RE = re.compile(
-    r"CREATE\s+OR\s+REPLACE\s+LUA\s+SCRIPT\s+([A-Za-z_][A-Za-z0-9_.\"]*)",
-    re.IGNORECASE,
-)
+
+# The entry script is always an EXECUTE-SCRIPT Lua script; a companion may be
+# any object type the artifact's DDL creates.
+ENTRY_OBJECT_TYPE = "LUA SCRIPT"
 
 
 class ManifestError(Exception):
@@ -95,6 +113,19 @@ class SourceSpec:
 
 
 @dataclass(frozen=True)
+class ObjectSpec:
+    """One database object an artifact creates: its DDL type and its canonical name.
+
+    ``type`` is the normalised DDL form (``LUA SCRIPT``,
+    ``PYTHON3 SCALAR SCRIPT``, ``TABLE``, …) and ``name`` is the canonical
+    fully-qualified name, so a declared entry and a parsed one compare directly.
+    """
+
+    type: str
+    name: str
+
+
+@dataclass(frozen=True)
 class ModuleManifest:
     """A parsed, contract-validated ``module.toml``.
 
@@ -114,6 +145,7 @@ class ModuleManifest:
     deploy_mode: str
     sha256: str | None = None
     source: SourceSpec | None = None
+    objects: tuple[ObjectSpec, ...] | None = None
 
 
 def _missing_and_typed_fields(data: dict[str, Any], errors: list[str]) -> None:
@@ -217,13 +249,113 @@ def _validate_deploy_mode_fields(
     return sha256, source
 
 
+def _delimiter_error(name: str, field: str, raw: str) -> str | None:
+    """Return an error message if ``raw`` (the object's ``field``) carries a forbidden character.
+
+    ``name`` identifies the offending object in the message even when
+    ``name`` itself is the field that is invalid (there is no other handle to
+    name it by).
+    """
+    for char, label in _FORBIDDEN_OBJECT_CHARS:
+        if char in raw:
+            return (
+                f"object {name!r} {field} {raw!r} must not contain {label}: the "
+                "PREPROC.MODULES.objects column encodes each object as a "
+                "'TYPE|NAME' line, and a delimiter in a declared type or name "
+                "would corrupt that encoding"
+            )
+    return None
+
+
+def _validate_objects(data: dict[str, Any], errors: list[str]) -> tuple[ObjectSpec, ...] | None:
+    """Validate the optional ``[[objects]]`` inventory and return it normalised.
+
+    Returns None when the key is absent — which is legal only for a
+    single-statement artifact, a condition ``verify_artifact_inventory``
+    enforces because it needs the artifact to count its statements.
+    """
+    raw = data.get("objects")
+    if raw is None:
+        return None
+    if not isinstance(raw, list) or not raw:
+        errors.append("objects must be a non-empty array of tables, each with 'type' and 'name'")
+        return None
+
+    version = data.get("version")
+    expected_suffix = f"_V{version}" if isinstance(version, int) else "_V<N>"
+    specs: list[ObjectSpec] = []
+    seen: set[str] = set()
+
+    for index, item in enumerate(raw):
+        if not isinstance(item, dict) or not item.get("type") or not item.get("name"):
+            errors.append(f"objects[{index}] must declare both 'type' and 'name'")
+            continue
+
+        raw_type = str(item["type"])
+        raw_name = str(item["name"])
+        delimiter_error = _delimiter_error(raw_name, "type", raw_type) or _delimiter_error(
+            raw_name, "name", raw_name
+        )
+        if delimiter_error is not None:
+            errors.append(delimiter_error)
+            continue
+
+        object_type = " ".join(raw_type.upper().split())
+        try:
+            parts = qualified_parts(raw_name)
+        except ArtifactSyntaxError as exc:
+            errors.append(f"objects[{index}]: {exc}")
+            continue
+        name = ".".join(parts)
+
+        if object_type in UNQUALIFIED_TYPES:
+            if len(parts) != 1:
+                errors.append(
+                    f"object {name!r} is a {object_type} and must be a single "
+                    "unqualified identifier"
+                )
+                continue
+        elif len(parts) != 2:
+            errors.append(
+                f"object {name!r} must be fully qualified as <schema>.<object> so the "
+                "inventory never depends on the session's open schema"
+            )
+            continue
+        elif "." in parts[0]:
+            errors.append(
+                f"object {name!r} has a quoted schema part {parts[0]!r} containing a '.': "
+                "deploy.py and module_reclaim.lua re-split the canonical <schema>.<object> "
+                "name on its FIRST dot only, so a dot inside the schema part (unlike one in "
+                "the object part, which the tail absorbs) would be misparsed as the "
+                "schema/object separator"
+            )
+            continue
+
+        suffix = _VERSION_SUFFIX_RE.search(parts[-1])
+        if suffix is None or (isinstance(version, int) and int(suffix.group(1)) != version):
+            errors.append(
+                f"object {name!r} must carry the module's {expected_suffix} version suffix; "
+                "EVERY object an artifact creates carries it, not only the entry script, so "
+                "a v1 and a v2 generation coexist without collisions"
+            )
+            continue
+        if name in seen:
+            errors.append(f"object {name!r} is declared more than once in objects")
+            continue
+        seen.add(name)
+        specs.append(ObjectSpec(type=object_type, name=name))
+
+    return tuple(specs)
+
+
 def parse_manifest(data: dict[str, Any]) -> ModuleManifest:
     """Validate a decoded ``module.toml`` mapping against the module contract.
 
     Raises:
         ManifestError: with every violation found, if the mapping does not
             satisfy the contract (missing fields, unknown phase, version/
-            script_name suffix mismatch, or a deploy-mode field rule).
+            script_name suffix mismatch, a malformed ``[[objects]]`` entry, or a
+            deploy-mode field rule).
     """
     errors: list[str] = []
     _missing_and_typed_fields(data, errors)
@@ -233,6 +365,7 @@ def parse_manifest(data: dict[str, Any]) -> ModuleManifest:
     _validate_version_matches_script_name(data, errors)
     scope = _validate_suggested_scope(data, errors)
     sha256, source = _validate_deploy_mode_fields(data, errors)
+    objects = _validate_objects(data, errors)
 
     if errors:
         raise ManifestError(errors)
@@ -249,6 +382,7 @@ def parse_manifest(data: dict[str, Any]) -> ModuleManifest:
         deploy_mode=data["deploy_mode"],
         sha256=sha256,
         source=source,
+        objects=objects,
     )
 
 
@@ -264,35 +398,106 @@ def load_manifest(path: Path) -> ModuleManifest:
     return parse_manifest(data)
 
 
-def _extract_script_names(artifact_text: str) -> list[str]:
-    """Return every script name introduced by a CREATE OR REPLACE LUA SCRIPT statement."""
-    return _CREATE_SCRIPT_RE.findall(artifact_text)
+def _entry_script_errors(entry_name: str, derived: list[ObjectSpec], script_name: str) -> list[str]:
+    """Confirm exactly one derived object is the entry Lua script the manifest names."""
+    matches = [obj for obj in derived if obj.name == entry_name]
+    if not matches:
+        return [
+            f"artifact creates no {ENTRY_OBJECT_TYPE} named {entry_name} for the manifest "
+            f"script_name {script_name!r}"
+        ]
+    if matches[0].type != ENTRY_OBJECT_TYPE:
+        return [
+            f"artifact object {entry_name} is a {matches[0].type}, but the entry script named "
+            f"by script_name must be a {ENTRY_OBJECT_TYPE}"
+        ]
+    return []
 
 
-def verify_artifact_script_name(manifest: ModuleManifest, artifact_text: str) -> None:
-    """Confirm the artifact is a single self-contained CREATE OR REPLACE statement.
+def _inventory_errors(declared: list[ObjectSpec], derived: list[ObjectSpec]) -> list[str]:
+    """Compare the declared and parsed inventories in BOTH directions, naming each offender."""
+    declared_keys = {(obj.type, obj.name) for obj in declared}
+    derived_keys = {(obj.type, obj.name) for obj in derived}
+    errors = [
+        f"artifact creates {obj.type} {obj.name} but module.toml does not declare it"
+        for obj in derived
+        if (obj.type, obj.name) not in declared_keys
+    ]
+    errors.extend(
+        f"module.toml declares {obj.type} {obj.name} but the artifact does not create it"
+        for obj in declared
+        if (obj.type, obj.name) not in derived_keys
+    )
+    return errors
 
-    The canonical module artifact is exactly one
-    ``CREATE OR REPLACE LUA SCRIPT <script_name> AS <body>`` statement; see
-    docs/module-authoring.md § The canonical artifact.
+
+def _duplicate_object_names(derived: list[ObjectSpec]) -> list[str]:
+    seen: set[str] = set()
+    duplicates: list[str] = []
+    for obj in derived:
+        if obj.name in seen and obj.name not in duplicates:
+            duplicates.append(obj.name)
+        seen.add(obj.name)
+    return duplicates
+
+
+def verify_artifact_inventory(manifest: ModuleManifest, artifact_text: str) -> list[ObjectSpec]:
+    """Confirm the artifact's object inventory agrees with the manifest, and return it.
+
+    The artifact is split into its statements, the object each statement creates
+    is derived independently of the manifest, and the derived inventory is
+    compared with the declared ``[[objects]]`` in BOTH directions — the same
+    accept/reject discipline already applied to ``sha256``, which is what makes
+    drift between manifest and artifact impossible.
+
+    ``[[objects]]`` may be omitted only when the artifact carries exactly one
+    statement, in which case the inventory is the single entry named by
+    ``script_name``. That is precisely the pre-composite check, so existing
+    single-statement manifests stay valid unedited.
+
+    Returns:
+        The derived inventory, in file order — the order an installer creates
+        the objects in, and the reverse of the order reclaim drops them in.
 
     Raises:
-        ArtifactError: if the artifact contains zero or more than one
-            ``CREATE OR REPLACE LUA SCRIPT`` statement, or if the statement's
-            script name does not match ``manifest.script_name``.
+        ArtifactError: if the artifact cannot be split, creates an object twice,
+            carries more than one statement with no ``[[objects]]`` declared,
+            does not create the entry script the manifest names, or its
+            inventory disagrees with the declaration in either direction.
     """
-    names = _extract_script_names(artifact_text)
-    if len(names) != 1:
+    try:
+        statements = split_statements(artifact_text)
+        derived = [
+            ObjectSpec(type=item["type"], name=item["name"]) for item in derive_objects(statements)
+        ]
+        entry_name = normalize_object_name(manifest.script_name)
+    except ArtifactSyntaxError as exc:
+        raise ArtifactError(str(exc)) from exc
+
+    if not statements:
+        raise ArtifactError("artifact carries no statements")
+
+    duplicates = _duplicate_object_names(derived)
+    if duplicates:
         raise ArtifactError(
-            "artifact must contain exactly one CREATE OR REPLACE LUA SCRIPT "
-            f"statement; found {len(names)}"
+            "artifact creates the same object more than once: " + ", ".join(duplicates)
         )
-    actual = names[0]
-    if actual.upper() != manifest.script_name.upper():
+
+    if manifest.objects is not None:
+        declared = list(manifest.objects)
+    elif len(statements) == 1:
+        declared = [ObjectSpec(type=ENTRY_OBJECT_TYPE, name=entry_name)]
+    else:
         raise ArtifactError(
-            f"artifact script name {actual!r} does not match manifest "
-            f"script_name {manifest.script_name!r}"
+            "[[objects]] is REQUIRED once the artifact carries more than one statement; "
+            f"this artifact carries {len(statements)} statements"
         )
+
+    errors = _entry_script_errors(entry_name, derived, manifest.script_name)
+    errors.extend(_inventory_errors(declared, derived))
+    if errors:
+        raise ArtifactError("; ".join(errors))
+    return derived
 
 
 def verify_artifact_sha256(manifest: ModuleManifest, artifact_bytes: bytes) -> None:

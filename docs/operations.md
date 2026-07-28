@@ -477,7 +477,7 @@ to the central library's index,
 | `preproc module update <name> [--scope TYPE:value]` | Yes | Deploy the registry's latest version alongside the current one, repoint the rule, refresh, then mark the old version retired |
 | `preproc module remove <name>` | Yes | Drop the module's rule(s), refresh, mark its provenance retired (does not drop the script — see [Reclaim](#reclaiming-a-retired-version)) |
 | `preproc module bundle <names...> --output <file>` | No | Emit one self-contained offline `.sql` (artifact + `RULE_ENSURE` calls) for hand-carrying to an air-gapped instance |
-| `preproc module validate <name>` | Optional | Static conformance checks always; when a database is configured, also scratch-deploys the module and smoke-tests it, then tears the scratch copy down |
+| `preproc module validate <name>` | Optional | Static conformance checks always; when a database is configured, also compiles the artifact's `SCRIPT` statements and smoke-tests the entry function inside one disposable schema (never executes the artifact's own statements against a live schema), then drops the disposable schema |
 | `preproc module sync <manifest>` | Yes | Declaratively converge the database to a desired-state TOML file — add missing modules, update changed versions, retire dropped ones, in one pass with a single refresh |
 
 `--scope` overrides a module's `suggested_scope` from its manifest — pass

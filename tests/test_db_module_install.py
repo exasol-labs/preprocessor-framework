@@ -15,6 +15,9 @@ discipline):
 * ``test_install_https_no_egress_no_partial_deploy`` needs neither a staged
   source nor egress: it drives an unreachable ``https:`` source so the resolver
   signals a network error and the install aborts before any write — it runs live.
+* The composite scenarios share ONE staged release (``composite_source``), so the
+  BucketFS upload + auto-extract + replication wait is paid once for all seven
+  composite fixtures.
 * ``test_install_non_admin_rejected`` needs CREATE USER + a second login and
   skips where the env account cannot mint one (the admin boundary is also
   asserted structurally by the schema-layout suite).
@@ -34,6 +37,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
+from _corpus import load_split_corpus, load_split_error_cases
 from _dbfixtures import (
     bucketfs_config,
     bucketfs_delete,
@@ -45,12 +49,20 @@ from _dbfixtures import (
     standard_library_specs,
     wait_until_ok,
 )
+from _lua_splitter import (
+    CORPUS_TABLE,
+    PROBE_SCRIPT,
+    db_probe_body,
+    decode_probe_rows,
+    lua_interpreter,
+    run_local_probe,
+    write_local_probe,
+)
 
 from preproc.connection import connect_from_env, missing_env_vars
-from preproc.module.deploy import deploy_module, strip_script_terminator
-from preproc.module.registry import read_registry
-
-pytestmark = pytest.mark.integration
+from preproc.module.artifact import ArtifactSyntaxError, split_statements
+from preproc.module.deploy import deploy_module
+from preproc.module.registry import OBJECTS_MAX_CHARS, encode_objects, read_registry
 
 _REPO = Path(__file__).resolve().parent.parent
 _MODULE_INSTALL_LUA = _REPO / "sql" / "lua" / "module_install.lua"
@@ -59,6 +71,8 @@ _TAMPER_CONNECTION = "PREPROC_TEST_BFS_INSTALL_TAMPER"
 _TAMPER_BUCKET_PATH = "preproc-lib-install-tamper-0.1.0.tar.gz"
 _SELF_CONNECTION = "PREPROC_TEST_BFS_INSTALL_SELF"
 _SELF_BUCKET_PATH = "preproc-lib-install-self-0.1.0.tar.gz"
+_COMPOSITE_CONNECTION = "PREPROC_TEST_BFS_INSTALL_COMPOSITE"
+_COMPOSITE_BUCKET_PATH = "preproc-lib-install-composite-0.1.0.tar.gz"
 
 _CAST_SCRIPT = "PREPROC_RT.CAST_SHORTHAND_V1"
 _BROKEN_SCRIPT = "PREPROC_RT.BROKEN_MODULE_V1"
@@ -68,6 +82,271 @@ _SELF_MARKER = (
     "-- SELF DEPLOYED MARKER (its own installer deployed this backing script)\n"
     "function semantic_views(sqltext)\n    return sqltext\nend\n"
 )
+
+# --- composite-artifact fixtures --------------------------------------------
+#
+# Each artifact below is built from the same three primitives so a test asserts
+# on the object inventory it declares rather than on hand-written SQL. Script
+# statements are wrapped in the EXAplus ``--/`` … ``/`` block markers (the shape
+# a real composite artifact uses, ADR-058) and the plain DDL is ``;``-terminated,
+# so one fixture exercises both halves of the grammar.
+#
+# ``NOSUCHTYPE`` is the deliberate mid-artifact failure: an unknown column data
+# type is rejected by the parser, so the statement splits and derives its object
+# cleanly (passing pre-flight) and fails only when it executes.
+
+_BAD_COLUMN_TYPE = "NOSUCHTYPE"
+_OUTSIDE_SCHEMA = "PREPROC_TEST_OUTSIDE_SCHEMA"
+_INERT_SCHEMA = "PREPROC_TEST_INERT_V1"
+_INERT_SQUATTER = f"{_INERT_SCHEMA}.SQUATTER_NOT_IN_INVENTORY"
+_RERUN_BASE = "PREPROC_RT.RERUN_COMPOSITE_BASE_V1"
+
+# The width of PREPROC.MODULES.objects (sql/install/22_modules_table.sql), of
+# MODULE_REGISTER's CAST, and of the resolver's `objects` column.
+#
+# Imported, never restated: the pre-flight guard this exercises reads
+# module_install.lua's own PINNED copy of the number (Lua cannot import from
+# Python), so asserting the CANONICAL value appears in the refusal message makes
+# the test double as a drift check on that mirror.
+_OBJECTS_MAX_CHARS = OBJECTS_MAX_CHARS
+_WIDE_NAME_WIDTH = 100
+
+
+def _block(statement):
+    """Wrap a statement in the EXAplus ``--/`` … ``/`` block markers."""
+    return "--/\n" + statement.rstrip("\n") + "\n/\n"
+
+
+def _terminated(statement):
+    """Terminate a plain statement with the ``;`` the grammar splits on."""
+    return statement.rstrip("\n") + ";\n"
+
+
+def _entry_statement(upper, function, version):
+    return _block(
+        f"CREATE OR REPLACE LUA SCRIPT PREPROC_RT.{upper}_V{version}() AS\n"
+        f"function {function}(sqltext)\n"
+        "    return sqltext\n"
+        "end"
+    )
+
+
+def _python_statement(name):
+    return _block(
+        f"CREATE OR REPLACE PYTHON3 SCALAR SCRIPT {name}(x VARCHAR(2000))\n"
+        "RETURNS VARCHAR(2000) AS\n"
+        "def run(ctx):\n"
+        "    return ctx.x"
+    )
+
+
+def _table_statement(name):
+    return _terminated(f"CREATE OR REPLACE TABLE {name} (k VARCHAR(64))")
+
+
+def _broken_table_statement(name):
+    return _terminated(f"CREATE OR REPLACE TABLE {name} (c {_BAD_COLUMN_TYPE})")
+
+
+def _composite_spec(name, statements, objects, **kwargs):
+    """A library-deployed ModuleSpec carrying a hand-built composite artifact."""
+    return library_module(
+        name,
+        version=1,
+        function=name,
+        artifact_text="".join(statements),
+        objects=tuple(objects),
+        **kwargs,
+    )
+
+
+def _ok_composite():
+    """5 statements / 4 objects, ordered so file order is observable.
+
+    The VIEW (statement 4) selects from the TABLE (statement 2), so it can only
+    be created if the statements ran in file order. The INSERT (statement 3)
+    creates nothing, so it must consume no inventory slot and must never appear
+    in the compensating-cleanup undo list.
+    """
+    entry = "PREPROC_RT.COMPOSITE_OK_V1"
+    state = "PREPROC_RT.COMPOSITE_OK_STATE_V1"
+    view = "PREPROC_RT.COMPOSITE_OK_VIEW_V1"
+    helper = "PREPROC_RT.COMPOSITE_OK_HELPER_A_V1"
+    statements = [
+        _entry_statement("COMPOSITE_OK", "composite_ok", 1),
+        _table_statement(state),
+        _terminated(f"INSERT INTO {state} VALUES ('seed')"),
+        _terminated(f"CREATE OR REPLACE VIEW {view} AS SELECT k FROM {state}"),
+        _python_statement(helper),
+    ]
+    objects = [
+        {"type": "LUA SCRIPT", "name": entry},
+        {"type": "TABLE", "name": state},
+        {"type": "VIEW", "name": view},
+        {"type": "PYTHON3 SCALAR SCRIPT", "name": helper},
+    ]
+    return _composite_spec("composite_ok", statements, objects), objects
+
+
+def _broken_composite():
+    """4 statements whose LAST one is invalid DDL that passes pre-flight."""
+    entry = "PREPROC_RT.BROKEN_COMPOSITE_V1"
+    helper = "PREPROC_RT.BROKEN_COMPOSITE_HELPER_A_V1"
+    state = "PREPROC_RT.BROKEN_COMPOSITE_STATE_V1"
+    bad = "PREPROC_RT.BROKEN_COMPOSITE_BAD_V1"
+    statements = [
+        _entry_statement("BROKEN_COMPOSITE", "broken_composite", 1),
+        _python_statement(helper),
+        _table_statement(state),
+        _broken_table_statement(bad),
+    ]
+    objects = [
+        {"type": "LUA SCRIPT", "name": entry},
+        {"type": "PYTHON3 SCALAR SCRIPT", "name": helper},
+        {"type": "TABLE", "name": state},
+        {"type": "TABLE", "name": bad},
+    ]
+    return _composite_spec("broken_composite", statements, objects), objects
+
+
+def _outside_composite():
+    """3 statements, the middle one creating a TABLE outside PREPROC_RT."""
+    entry = "PREPROC_RT.OUTSIDE_COMPOSITE_V1"
+    outside = f"{_OUTSIDE_SCHEMA}.OUTSIDE_TABLE_V1"
+    bad = "PREPROC_RT.OUTSIDE_COMPOSITE_BAD_V1"
+    statements = [
+        _entry_statement("OUTSIDE_COMPOSITE", "outside_composite", 1),
+        _table_statement(outside),
+        _broken_table_statement(bad),
+    ]
+    objects = [
+        {"type": "LUA SCRIPT", "name": entry},
+        {"type": "TABLE", "name": outside},
+        {"type": "TABLE", "name": bad},
+    ]
+    return _composite_spec("outside_composite", statements, objects), objects
+
+
+def _inert_composite():
+    """3 statements declaring a SCHEMA, so cleanup can be made to fail.
+
+    The test seeds a table inside that schema that the inventory does not name.
+    Compensating cleanup drops a SCHEMA RESTRICT, never CASCADE, so the squatter
+    keeps the schema un-droppable — which is exactly the "cleanup could not drop
+    every created object" precondition the inert scenario needs, and doubles as
+    proof that best-effort compensation never destroys data.
+    """
+    entry = "PREPROC_RT.INERT_COMPOSITE_V1"
+    bad = "PREPROC_RT.INERT_COMPOSITE_BAD_V1"
+    statements = [
+        _entry_statement("INERT_COMPOSITE", "inert_composite", 1),
+        _terminated(f"CREATE SCHEMA IF NOT EXISTS {_INERT_SCHEMA}"),
+        _broken_table_statement(bad),
+    ]
+    objects = [
+        {"type": "LUA SCRIPT", "name": entry},
+        {"type": "SCHEMA", "name": _INERT_SCHEMA},
+        {"type": "TABLE", "name": bad},
+    ]
+    return _composite_spec("inert_composite", statements, objects), objects
+
+
+def _rerun_composite():
+    """3 statements whose LAST one fails only while a dependency is absent.
+
+    A VIEW over a base table outside the inventory: the install fails part-way
+    while the base table does not exist and converges once it does, so the SAME
+    artifact at the SAME version models "re-running an install that failed
+    part-way" without needing a second staged release.
+    """
+    entry = "PREPROC_RT.RERUN_COMPOSITE_V1"
+    helper = "PREPROC_RT.RERUN_COMPOSITE_HELPER_A_V1"
+    view = "PREPROC_RT.RERUN_COMPOSITE_VIEW_V1"
+    statements = [
+        _entry_statement("RERUN_COMPOSITE", "rerun_composite", 1),
+        _python_statement(helper),
+        _terminated(f"CREATE OR REPLACE VIEW {view} AS SELECT k FROM {_RERUN_BASE}"),
+    ]
+    objects = [
+        {"type": "LUA SCRIPT", "name": entry},
+        {"type": "PYTHON3 SCALAR SCRIPT", "name": helper},
+        {"type": "VIEW", "name": view},
+    ]
+    return _composite_spec("rerun_composite", statements, objects), objects
+
+
+def _wide_object_name(index):
+    """A long-but-legal qualified name (Exasol allows 128 characters), fixed width.
+
+    Padding the name to ``_WIDE_NAME_WIDTH`` is what lets the over-wide-inventory
+    fixture reach the column limit in roughly half the objects a minimal name
+    would need, and it models the same overflow a real subsystem module hits —
+    through name LENGTH rather than object COUNT.
+    """
+    stem = f"PREPROC_RT.WIDE_COMPOSITE_STATE_{index:04d}_"
+    return stem + "X" * (_WIDE_NAME_WIDTH - len(stem) - 3) + "_V1"
+
+
+def _wide_composite():
+    """A composite whose declared inventory is wider than PREPROC.MODULES.objects.
+
+    Contract-valid in every other respect — every object carries the module's
+    ``_V1`` suffix, and the artifact creates exactly what the manifest declares —
+    so no check ahead of the provenance write has any reason to reject it. Grown
+    one TABLE at a time until the encoded inventory passes the column width, so
+    the fixture tracks the limit instead of a hard-coded object count that a
+    widening would leave under it (turning the test that consumes this vacuous).
+
+    The running length is accumulated as objects are appended rather than
+    re-encoding the whole list per candidate: this fixture is built at import
+    time, on every collection of this module including the runs where every
+    database test skips, and at the current width re-encoding is quadratic in a
+    few thousand objects. The single ``encode_objects`` call at the end keeps that
+    arithmetic honest against the real wire format.
+    """
+    entry = "PREPROC_RT.WIDE_COMPOSITE_V1"
+    objects = [{"type": "LUA SCRIPT", "name": entry}]
+    encoded_length = len(encode_objects(objects))
+    while encoded_length <= _OBJECTS_MAX_CHARS:
+        table = {"type": "TABLE", "name": _wide_object_name(len(objects))}
+        objects.append(table)
+        encoded_length += len("\n") + len(table["type"]) + len("|") + len(table["name"])
+    assert len(encode_objects(objects)) == encoded_length
+    statements = [_entry_statement("WIDE_COMPOSITE", "wide_composite", 1)]
+    statements += [_table_statement(obj["name"]) for obj in objects[1:]]
+    return _composite_spec("wide_composite", statements, objects), objects
+
+
+def _undeclared_composite():
+    """2 statements; the index's declared inventory omits the second object."""
+    entry = "PREPROC_RT.UNDECLARED_COMPOSITE_V1"
+    helper = "PREPROC_RT.UNDECLARED_COMPOSITE_HELPER_A_V1"
+    statements = [
+        _entry_statement("UNDECLARED_COMPOSITE", "undeclared_composite", 1),
+        _python_statement(helper),
+    ]
+    objects = [
+        {"type": "LUA SCRIPT", "name": entry},
+        {"type": "PYTHON3 SCALAR SCRIPT", "name": helper},
+    ]
+    return _composite_spec("undeclared_composite", statements, objects), objects
+
+
+# name -> (ModuleSpec, declared inventory in file order)
+_COMPOSITE_FIXTURES = {
+    "composite_ok": _ok_composite(),
+    "broken_composite": _broken_composite(),
+    "outside_composite": _outside_composite(),
+    "inert_composite": _inert_composite(),
+    "rerun_composite": _rerun_composite(),
+    "undeclared_composite": _undeclared_composite(),
+    "wide_composite": _wide_composite(),
+}
+
+
+def _declared(module_name):
+    """The declared object inventory of a composite fixture, in file order."""
+    return _COMPOSITE_FIXTURES[module_name][1]
 
 
 # --- deployment + staging helpers ------------------------------------------
@@ -101,7 +380,7 @@ def _drop_source(connection, config, conn_name, bucket_path):
         pass
 
 
-def _stage(connection, conn_name, bucket_path, specs, *, probe, tamper=None):
+def _stage(connection, conn_name, bucket_path, specs, *, probe, tamper=None, objects_override=None):
     """Build + stage a release tarball into BucketFS; yield its ``source``.
 
     Skips cleanly (matching the ``db`` fixture) when BucketFS write is not
@@ -115,7 +394,9 @@ def _stage(connection, conn_name, bucket_path, specs, *, probe, tamper=None):
             "(and EXASOL_BFS_HOST) to stage the install fixture"
         )
     work = Path(tempfile.mkdtemp(prefix="preproc-install-fixture-"))
-    build_library_tarball(work / bucket_path, specs, tamper=tamper)
+    build_library_tarball(
+        work / bucket_path, specs, tamper=tamper, objects_override=objects_override
+    )
     try:
         bucketfs_put(config, bucket_path, (work / bucket_path).read_bytes())
     except Exception as exc:  # noqa: BLE001 - staging is environment-dependent; skip on any failure
@@ -153,6 +434,30 @@ def install_tamper_source(module_install_deployed):
         specs,
         probe="cast_shorthand",
         tamper={"broken_module": b"\n-- tampered\n"},
+    )
+
+
+@pytest.fixture(scope="session")
+def composite_source(module_install_deployed):
+    """Stage ONE release carrying every composite fixture this suite needs.
+
+    All six composite modules travel in a single tarball so the suite pays the
+    BucketFS upload + auto-extract + replication wait once. ``composite_ok`` is
+    the readiness probe because it is the only one that resolves AND installs
+    cleanly. ``undeclared_composite``'s declared inventory is overridden in the
+    SERIALIZED index only — its artifact and its ``module.toml`` stay consistent,
+    exactly as ``tamper`` forces a sha256 mismatch by touching only the tarball
+    copy of the bytes.
+    """
+    specs = [spec for spec, _objects in _COMPOSITE_FIXTURES.values()]
+    undeclared_objects = _COMPOSITE_FIXTURES["undeclared_composite"][1]
+    yield from _stage(
+        module_install_deployed,
+        _COMPOSITE_CONNECTION,
+        _COMPOSITE_BUCKET_PATH,
+        specs,
+        probe="composite_ok",
+        objects_override={"undeclared_composite": [undeclared_objects[0]]},
     )
 
 
@@ -206,7 +511,7 @@ def _capture_state(connection, script_name, scope_type, scope_value, module_name
     )
     modules = connection.execute(
         "SELECT name, version, source_repo, source_ref, sha256, script_name, "
-        "function_name, phase, deploy_mode, status FROM PREPROC.MODULES "
+        "function_name, phase, deploy_mode, status, objects FROM PREPROC.MODULES "
         f"WHERE name = '{module_name}' AND version = {version}"
     ).fetchall()
     return InstallState(
@@ -214,6 +519,67 @@ def _capture_state(connection, script_name, scope_type, scope_value, module_name
         config_rows=config_rows,
         modules_row=tuple(modules[0]) if modules else None,
     )
+
+
+def _object_exists(connection, obj):
+    """Whether one inventory object is present, resolved by its declared type."""
+    obj_type = obj["type"]
+    name = obj["name"]
+    if obj_type in ("SCHEMA", "VIRTUAL SCHEMA"):
+        query = f"SELECT COUNT(*) FROM EXA_ALL_SCHEMAS WHERE UPPER(schema_name) = UPPER('{name}')"
+    else:
+        schema, _, local = name.partition(".")
+        if obj_type.endswith("SCRIPT"):
+            source = "EXA_ALL_SCRIPTS"
+            columns = ("script_schema", "script_name")
+        elif obj_type == "FUNCTION":
+            source = "EXA_ALL_FUNCTIONS"
+            columns = ("function_schema", "function_name")
+        else:
+            source = "EXA_ALL_OBJECTS"
+            columns = ("root_name", "object_name")
+        query = (
+            f"SELECT COUNT(*) FROM {source} "
+            f"WHERE UPPER({columns[0]}) = UPPER('{schema}') "
+            f"AND UPPER({columns[1]}) = UPPER('{local}')"
+        )
+    return connection.execute(query).fetchall()[0][0] > 0
+
+
+def _present(connection, objects):
+    """The names of ``objects`` that exist, so an assertion names what survived."""
+    return [obj["name"] for obj in objects if _object_exists(connection, obj)]
+
+
+def _drop_objects(connection, objects):
+    """Best-effort teardown of an inventory, in reverse creation order."""
+    for obj in reversed(objects):
+        schema, _, local = obj["name"].partition(".")
+        if obj["type"].endswith("SCRIPT"):
+            statement = f'DROP SCRIPT IF EXISTS "{schema}"."{local}"'
+        elif obj["type"] in ("SCHEMA", "VIRTUAL SCHEMA"):
+            statement = f'DROP SCHEMA IF EXISTS "{obj["name"]}" CASCADE'
+        elif obj["type"] == "VIEW":
+            statement = f'DROP VIEW IF EXISTS "{schema}"."{local}"'
+        else:
+            statement = f'DROP TABLE IF EXISTS "{schema}"."{local}"'
+        try:
+            connection.execute(statement)
+        except Exception:
+            pass
+
+
+def _purge_composite(connection, module_name):
+    """Full teardown for a composite fixture: rules, provenance, and every object."""
+    objects = _declared(module_name)
+    _purge(
+        connection,
+        module_name=module_name,
+        version=1,
+        script_name=objects[0]["name"],
+        drop_script=False,
+    )
+    _drop_objects(connection, objects)
 
 
 def _purge(connection, *, module_name, version, script_name, drop_script=True):
@@ -254,7 +620,8 @@ def _install(connection, source, module_name, scope):
 # --- scenarios --------------------------------------------------------------
 
 
-def test_install_bucketfs_parity_with_cli(
+@pytest.mark.integration
+def test_bucketfs_install_matches_cli_end_state(
     module_install_deployed, bucketfs_library_source, tmp_path
 ):
     """A BucketFS install leaves an end-state byte-identical to a CLI add.
@@ -264,7 +631,15 @@ def test_install_bucketfs_parity_with_cli(
     registry built from the same sources. Because both paths converge on an
     identical end-state, the CLI deploy is a no-op — so ``after == before`` proves
     byte-identical parity (a divergence would make CREATE OR REPLACE / MERGE
-    change the captured state).
+    change the captured state), and the captured state now includes the recorded
+    ``objects`` inventory, so a divergence in the inventory wire form fails here.
+
+    ``cast_shorthand`` is a single-statement artifact, and it now takes the same
+    split-then-execute path a composite one does: the splitter drops the leading
+    ``--/`` marker line where the old code retained it, so the database receives
+    text starting at ``CREATE``. Exasol regenerates the CREATE header into
+    ``EXA_ALL_SCRIPTS.SCRIPT_TEXT``, which is why that change leaves the stored
+    end state untouched.
     """
     connection = module_install_deployed
     source = bucketfs_library_source.source
@@ -289,9 +664,9 @@ def test_install_bucketfs_parity_with_cli(
         # EXA_ALL_SCRIPTS stores the normalised CREATE (a RETURNS ROWCOUNT header)
         # around the verbatim artifact body, so parity is proven by `after ==
         # before` above; here assert the deployed body carries the module function.
-        expected_body = strip_script_terminator(
+        expected_body = split_statements(
             default_artifact_text("cast_shorthand", 1, "cast_shorthand")
-        )
+        )[0]
         assert "function cast_shorthand(sqltext)" in before.script_text
         assert expected_body.splitlines()[-1] in before.script_text
         assert before.modules_row[8] == "library-deployed"
@@ -301,12 +676,23 @@ def test_install_bucketfs_parity_with_cli(
         _purge(connection, module_name="cast_shorthand", version=1, script_name=_CAST_SCRIPT)
 
 
-def test_install_sha_mismatch_aborts_before_write(module_install_deployed, install_tamper_source):
-    """A sha256 mismatch aborts before any DB write — nothing is deployed."""
+@pytest.mark.integration
+def test_sha256_mismatch_aborts_before_write(module_install_deployed, install_tamper_source):
+    """A sha256 mismatch aborts before any DB write — nothing is deployed.
+
+    The message is asserted, not just the raise: a bare ``pytest.raises(Exception)``
+    is satisfied by a connection drop or a fixture fault, which would leave this
+    scenario passing while the integrity gate itself was broken. The resolver's
+    ``sha256_mismatch`` error kind travelling out through MODULE_INSTALL is what
+    proves the abort came from the digest comparison.
+    """
     connection = module_install_deployed
     try:
-        with pytest.raises(Exception):
+        with pytest.raises(Exception) as excinfo:
             _install(connection, install_tamper_source, "broken_module", "ROLE:PREPROC_ADMIN")
+        message = str(excinfo.value)
+        assert "sha256_mismatch" in message
+        assert "broken_module" in message
 
         assert _script_text(connection, _BROKEN_SCRIPT) is None
         rule_count = connection.execute(
@@ -321,6 +707,296 @@ def test_install_sha_mismatch_aborts_before_write(module_install_deployed, insta
         _purge(connection, module_name="broken_module", version=1, script_name=_BROKEN_SCRIPT)
 
 
+@pytest.mark.integration
+def test_composite_installs_all_objects_in_order(module_install_deployed, composite_source):
+    """A composite module's statements execute in file order and every object lands.
+
+    File order is asserted by construction, not by observation: the artifact's
+    VIEW selects from the TABLE an earlier statement creates, so the install can
+    only succeed if the statements ran in order. The rule is registered only after
+    the LAST statement succeeded, which the mid-artifact-failure scenario proves
+    from the other side (a failure leaves no rule at all).
+    """
+    connection = module_install_deployed
+    objects = _declared("composite_ok")
+    scope_value = "PREPROC_TEST_COMPOSITE_ROLE"
+    try:
+        result = _install(connection, composite_source, "composite_ok", f"ROLE:{scope_value}")
+        assert result[0][3] == "installed"
+
+        assert _present(connection, objects) == [obj["name"] for obj in objects]
+
+        rule = connection.execute(
+            "SELECT phase, function_name FROM PREPROC.CONFIG "
+            f"WHERE script_name = '{objects[0]['name']}' AND scope_type = 'ROLE' "
+            f"AND scope_value = '{scope_value}'"
+        ).fetchall()
+        assert len(rule) == 1
+        assert rule[0][0] == "TRANSLATE"
+
+        # The recorded inventory is the undo list reclaim will later use, so it
+        # must carry every object in file order, encoded as 'TYPE|NAME' lines.
+        recorded = connection.execute(
+            "SELECT objects FROM PREPROC.MODULES WHERE name = 'composite_ok' AND version = 1"
+        ).fetchall()[0][0]
+        assert recorded == "\n".join(f"{obj['type']}|{obj['name']}" for obj in objects)
+
+        # The INSERT created nothing, so it consumed no inventory slot; its row
+        # is proof the non-DDL statement really executed.
+        seeded = connection.execute(
+            "SELECT COUNT(*) FROM PREPROC_RT.COMPOSITE_OK_STATE_V1 WHERE k = 'seed'"
+        ).fetchall()[0][0]
+        assert seeded == 1
+    finally:
+        _purge_composite(connection, "composite_ok")
+
+
+@pytest.mark.integration
+def test_preflight_aborts_before_any_ddl(module_install_deployed, composite_source):
+    """An artifact creating an undeclared object fails before any statement runs."""
+    connection = module_install_deployed
+    objects = _declared("undeclared_composite")
+    undeclared = objects[1]
+    try:
+        with pytest.raises(Exception) as excinfo:
+            _install(connection, composite_source, "undeclared_composite", "ROLE:PREPROC_ADMIN")
+        assert undeclared["name"] in str(excinfo.value)
+
+        # No statement of the artifact ran: not even the FIRST one, which is
+        # valid DDL on its own and would have succeeded had execution started.
+        assert _present(connection, objects) == []
+
+        rules = connection.execute(
+            f"SELECT COUNT(*) FROM PREPROC.CONFIG WHERE script_name = '{objects[0]['name']}'"
+        ).fetchall()[0][0]
+        assert rules == 0
+        provenance = connection.execute(
+            "SELECT COUNT(*) FROM PREPROC.MODULES WHERE name = 'undeclared_composite'"
+        ).fetchall()[0][0]
+        assert provenance == 0
+    finally:
+        _purge_composite(connection, "undeclared_composite")
+
+
+@pytest.mark.integration
+def test_over_wide_inventory_aborts_before_write(module_install_deployed, composite_source):
+    """An inventory too wide for PREPROC.MODULES.objects is refused before any DDL.
+
+    The provenance row is written LAST — after every CREATE and after RULE_ENSURE
+    — so an over-wide inventory discovered at MODULE_REGISTER would leave the
+    module live and DISPATCHING with no provenance row: un-retirable and
+    un-reclaimable, the exact inverse of "a partial install is inert". Nothing
+    else in the pipeline would have stopped it; this manifest is contract-valid,
+    so the CLI accepts it too.
+
+    Both the limit and the actual size are asserted, because an operator's only
+    remedy is to split the module or shorten its names and the message is what
+    tells them by how much they are over.
+    """
+    connection = module_install_deployed
+    objects = _declared("wide_composite")
+    try:
+        with pytest.raises(Exception) as excinfo:
+            _install(connection, composite_source, "wide_composite", "ROLE:PREPROC_ADMIN")
+        message = str(excinfo.value)
+        assert str(_OBJECTS_MAX_CHARS) in message
+        assert str(len(encode_objects(objects))) in message
+
+        # Refused during pre-flight: not even the FIRST statement ran, which is
+        # valid DDL on its own and would have succeeded had execution started.
+        assert _present(connection, objects) == []
+
+        rules = connection.execute(
+            f"SELECT COUNT(*) FROM PREPROC.CONFIG WHERE script_name = '{objects[0]['name']}'"
+        ).fetchall()[0][0]
+        assert rules == 0
+        provenance = connection.execute(
+            "SELECT COUNT(*) FROM PREPROC.MODULES WHERE name = 'wide_composite'"
+        ).fetchall()[0][0]
+        assert provenance == 0
+    finally:
+        _purge_composite(connection, "wide_composite")
+
+
+@pytest.mark.integration
+def test_midartifact_failure_compensating_cleanup(module_install_deployed, composite_source):
+    """A failure at statement k drops statements 1..k-1's objects in reverse."""
+    connection = module_install_deployed
+    objects = _declared("broken_composite")
+    created = objects[:3]
+    try:
+        with pytest.raises(Exception) as excinfo:
+            _install(connection, composite_source, "broken_composite", "ROLE:PREPROC_ADMIN")
+        message = str(excinfo.value)
+
+        # The ORIGINAL error leads and is not masked by the cleanup outcome.
+        # Exasol's parse error does not echo the offending type name, so the
+        # database's own diagnostic is what proves the cause survived.
+        assert "statement 4 of 4 failed" in message
+        assert objects[3]["name"] in message
+        assert "syntax error" in message.lower()
+
+        # Cleanup is reported, in reverse creation order.
+        assert "dropped 3 object(s) in reverse" in message
+        reversed_labels = [f"{obj['type']} {obj['name']}" for obj in reversed(created)]
+        assert ", ".join(reversed_labels) in message
+
+        assert _present(connection, objects) == []
+
+        rules = connection.execute(
+            f"SELECT COUNT(*) FROM PREPROC.CONFIG WHERE script_name = '{objects[0]['name']}'"
+        ).fetchall()[0][0]
+        assert rules == 0
+        provenance = connection.execute(
+            "SELECT COUNT(*) FROM PREPROC.MODULES WHERE name = 'broken_composite'"
+        ).fetchall()[0][0]
+        assert provenance == 0
+    finally:
+        _purge_composite(connection, "broken_composite")
+
+
+@pytest.mark.integration
+def test_partial_install_is_inert_no_rule(module_install_deployed, composite_source):
+    """A partial install whose cleanup could not finish is inert, not half-active.
+
+    The squatter table makes the declared SCHEMA un-droppable, so compensating
+    cleanup genuinely fails for one object and the module really is left partially
+    present — the precondition the scenario needs. It must still be INERT: no
+    rule, nothing in the caller's own MY_PIPELINE, and no provenance row.
+    """
+    connection = module_install_deployed
+    objects = _declared("inert_composite")
+    schema_object = objects[1]
+    caller = connection.execute("SELECT CURRENT_USER").fetchall()[0][0]
+    try:
+        connection.execute(f"CREATE SCHEMA IF NOT EXISTS {_INERT_SCHEMA}")
+        connection.execute(f"CREATE OR REPLACE TABLE {_INERT_SQUATTER} (k VARCHAR(64))")
+
+        with pytest.raises(Exception) as excinfo:
+            _install(connection, composite_source, "inert_composite", f"USER:{caller}")
+        message = str(excinfo.value)
+        assert "compensating cleanup could NOT drop" in message
+        assert schema_object["name"] in message
+        assert "inert (no rule was registered)" in message
+
+        # The precondition really held: the schema survived cleanup...
+        assert _object_exists(connection, schema_object)
+        # ...and RESTRICT never destroyed the data inside it.
+        assert connection.execute(f"SELECT COUNT(*) FROM {_INERT_SQUATTER}").fetchall()[0][0] == 0
+
+        rules = connection.execute(
+            f"SELECT COUNT(*) FROM PREPROC.CONFIG WHERE script_name = '{objects[0]['name']}'"
+        ).fetchall()[0][0]
+        assert rules == 0
+        pipeline = connection.execute(
+            "SELECT COUNT(*) FROM PREPROC_RT.MY_PIPELINE "
+            f"WHERE script_name = '{objects[0]['name']}'"
+        ).fetchall()[0][0]
+        assert pipeline == 0
+        provenance = connection.execute(
+            "SELECT COUNT(*) FROM PREPROC.MODULES WHERE name = 'inert_composite'"
+        ).fetchall()[0][0]
+        assert provenance == 0
+
+        # A statement the module would have transformed passes through untouched.
+        assert connection.execute("SELECT 1 AS untransformed").fetchall()[0][0] == 1
+    finally:
+        _purge_composite(connection, "inert_composite")
+        try:
+            connection.execute(f"DROP SCHEMA IF EXISTS {_INERT_SCHEMA} CASCADE")
+        except Exception:
+            pass
+
+
+@pytest.mark.integration
+def test_failed_install_rerun_converges(module_install_deployed, composite_source):
+    """Re-running an install that failed part-way converges rather than colliding.
+
+    The first run fails at the VIEW statement because its base table is absent.
+    Before the second run the base table is created and the entry script is
+    hand-restored with a sentinel body — modelling an object a partial cleanup
+    could not drop. The second run must succeed and must REPLACE the sentinel,
+    which is what "every artifact statement uses CREATE OR REPLACE" buys.
+    """
+    connection = module_install_deployed
+    objects = _declared("rerun_composite")
+    entry = objects[0]["name"]
+    scope_value = "PREPROC_TEST_RERUN_ROLE"
+    sentinel = "-- SENTINEL LEFT BY AN INCOMPLETE COMPENSATING CLEANUP"
+    try:
+        with pytest.raises(Exception) as excinfo:
+            _install(connection, composite_source, "rerun_composite", f"ROLE:{scope_value}")
+        assert "statement 3 of 3 failed" in str(excinfo.value)
+        assert _present(connection, objects) == []
+        assert (
+            connection.execute(
+                f"SELECT COUNT(*) FROM PREPROC.CONFIG WHERE script_name = '{entry}'"
+            ).fetchall()[0][0]
+            == 0
+        )
+
+        connection.execute("OPEN SCHEMA PREPROC_RT")
+        connection.execute(f"CREATE OR REPLACE TABLE {_RERUN_BASE} (k VARCHAR(64))")
+        connection.execute(
+            f"CREATE OR REPLACE LUA SCRIPT {entry}() AS\n{sentinel}\n"
+            "function rerun_composite(sqltext)\n    return sqltext\nend\n"
+        )
+        assert sentinel in _script_text(connection, entry)
+
+        result = _install(connection, composite_source, "rerun_composite", f"ROLE:{scope_value}")
+        assert result[0][3] == "installed"
+        assert _present(connection, objects) == [obj["name"] for obj in objects]
+        assert sentinel not in _script_text(connection, entry)
+
+        rules = connection.execute(
+            f"SELECT COUNT(*) FROM PREPROC.CONFIG WHERE script_name = '{entry}' "
+            f"AND scope_type = 'ROLE' AND scope_value = '{scope_value}'"
+        ).fetchall()[0][0]
+        assert rules == 1
+        provenance = connection.execute(
+            "SELECT COUNT(*) FROM PREPROC.MODULES WHERE name = 'rerun_composite' AND version = 1"
+        ).fetchall()[0][0]
+        assert provenance == 1
+    finally:
+        _purge_composite(connection, "rerun_composite")
+        try:
+            connection.execute(f"DROP TABLE IF EXISTS {_RERUN_BASE}")
+        except Exception:
+            pass
+
+
+@pytest.mark.integration
+def test_out_of_schema_objects_created_and_cleaned(module_install_deployed, composite_source):
+    """An object outside PREPROC_RT is created, and compensating cleanup reaches it."""
+    connection = module_install_deployed
+    objects = _declared("outside_composite")
+    outside = objects[1]
+    assert not outside["name"].startswith("PREPROC_RT.")
+    try:
+        connection.execute(f"CREATE SCHEMA IF NOT EXISTS {_OUTSIDE_SCHEMA}")
+
+        with pytest.raises(Exception) as excinfo:
+            _install(connection, composite_source, "outside_composite", "ROLE:PREPROC_ADMIN")
+        message = str(excinfo.value)
+
+        # Cleanup resolved the object by its declared type and qualified name,
+        # so it reached across the schema boundary.
+        assert "dropped 2 object(s) in reverse" in message
+        assert f"{outside['type']} {outside['name']}" in message
+        assert "compensating cleanup could NOT drop" not in message
+
+        assert _present(connection, objects) == []
+        # The schema the object lived in is NOT the module's, so cleanup left it.
+        assert _object_exists(connection, {"type": "SCHEMA", "name": _OUTSIDE_SCHEMA})
+    finally:
+        _purge_composite(connection, "outside_composite")
+        try:
+            connection.execute(f"DROP SCHEMA IF EXISTS {_OUTSIDE_SCHEMA} CASCADE")
+        except Exception:
+            pass
+
+
+@pytest.mark.integration
 def test_install_self_deployed_register_only(module_install_deployed, install_self_source):
     """A self-deployed module registers rule + provenance without any CREATE."""
     connection = module_install_deployed
@@ -351,6 +1027,7 @@ def test_install_self_deployed_register_only(module_install_deployed, install_se
         _purge(connection, module_name="semantic_views", version=3, script_name=_SELF_SCRIPT)
 
 
+@pytest.mark.integration
 def test_install_scope_activates_rule(module_install_deployed, bucketfs_library_source):
     """The scope argument targets rule activation: the in-scope user resolves it."""
     connection = module_install_deployed
@@ -375,6 +1052,7 @@ def test_install_scope_activates_rule(module_install_deployed, bucketfs_library_
         _purge(connection, module_name="cast_shorthand", version=1, script_name=_CAST_SCRIPT)
 
 
+@pytest.mark.integration
 def test_install_idempotent_reinstall(module_install_deployed, bucketfs_library_source):
     """Re-installing the identical version is idempotent (no duplicate rule/row)."""
     connection = module_install_deployed
@@ -401,6 +1079,7 @@ def test_install_idempotent_reinstall(module_install_deployed, bucketfs_library_
         _purge(connection, module_name="cast_shorthand", version=1, script_name=_CAST_SCRIPT)
 
 
+@pytest.mark.integration
 def test_install_non_admin_rejected(module_install_deployed):
     """A non-admin caller cannot execute MODULE_INSTALL; it is never PUBLIC.
 
@@ -458,6 +1137,7 @@ def test_install_non_admin_rejected(module_install_deployed):
             pass
 
 
+@pytest.mark.integration
 def test_install_https_when_reachable(module_install_deployed):
     """An https source installs when the cluster can reach the host (no toggle).
 
@@ -483,6 +1163,7 @@ def test_install_https_when_reachable(module_install_deployed):
         _purge(connection, module_name="cast_shorthand", version=1, script_name=_CAST_SCRIPT)
 
 
+@pytest.mark.integration
 def test_install_https_no_egress_no_partial_deploy(module_install_deployed):
     """An unreachable https source fails with a network error and deploys nothing."""
     connection = module_install_deployed
@@ -503,6 +1184,7 @@ def test_install_https_no_egress_no_partial_deploy(module_install_deployed):
     assert provenance == 0
 
 
+@pytest.mark.integration
 def test_install_result_set_reports_outcome(module_install_deployed, bucketfs_library_source):
     """The result set reports (module, version, phase, status, library_version)."""
     connection = module_install_deployed
@@ -525,6 +1207,7 @@ def test_install_result_set_reports_outcome(module_install_deployed, bucketfs_li
         _purge(connection, module_name="cast_shorthand", version=1, script_name=_CAST_SCRIPT)
 
 
+@pytest.mark.integration
 def test_install_missing_module_rejected(module_install_deployed, bucketfs_library_source):
     """A module absent from the source is rejected before any write, naming it."""
     connection = module_install_deployed
@@ -538,6 +1221,123 @@ def test_install_missing_module_rejected(module_install_deployed, bucketfs_libra
         "SELECT COUNT(*) FROM PREPROC.MODULES WHERE name = 'no-such-module'"
     ).fetchall()[0][0]
     assert provenance == 0
+
+
+# --- the shared statement-split conformance corpus --------------------------
+#
+# The Lua splitter exists only inside the database, so it is driven the only way
+# it can be: the source extracted verbatim from module_install.lua is deployed as
+# a probe script over a staged corpus. Staging the text CHUNKED and reassembling
+# it inside the probe mirrors the resolver's own VARCHAR(2000000) chunking, so
+# the corpus case that straddles a chunk boundary is split after reassembly
+# exactly as MODULE_INSTALL splits it.
+
+_CORPUS_CHUNK_CHARS = 500000
+
+
+def _sql_text_literal(text):
+    return "'" + text.replace("'", "''") + "'"
+
+
+def _deploy_corpus_probe(connection):
+    connection.execute(
+        f"CREATE OR REPLACE TABLE {CORPUS_TABLE} (case_name VARCHAR(128), "
+        "chunk_index DECIMAL(9,0), chunk_text VARCHAR(2000000))"
+    )
+    connection.execute(
+        f"CREATE OR REPLACE LUA SCRIPT {PROBE_SCRIPT}(case_name) RETURNS TABLE AS\n"
+        + db_probe_body()
+    )
+
+
+def _stage_corpus_case(connection, name, text):
+    """Stage one case as ordered chunks. An empty text stages no row and reads back as ''."""
+    for offset in range(0, len(text), _CORPUS_CHUNK_CHARS):
+        connection.execute(
+            f"INSERT INTO {CORPUS_TABLE} VALUES ({_sql_text_literal(name)}, "
+            f"{offset // _CORPUS_CHUNK_CHARS}, "
+            f"{_sql_text_literal(text[offset : offset + _CORPUS_CHUNK_CHARS])})"
+        )
+    connection.execute("COMMIT")
+
+
+def _run_corpus_probe(connection, case_name):
+    rows = connection.execute(
+        f"EXECUTE SCRIPT {PROBE_SCRIPT}({_sql_text_literal(case_name)})"
+    ).fetchall()
+    return decode_probe_rows(rows)
+
+
+def _drop_corpus_probe(connection):
+    for statement in (
+        f"DROP SCRIPT IF EXISTS {PROBE_SCRIPT}",
+        f"DROP TABLE IF EXISTS {CORPUS_TABLE}",
+    ):
+        try:
+            connection.execute(statement)
+        except Exception:
+            pass
+
+
+@pytest.mark.integration
+def test_python_and_lua_splitters_agree_on_corpus(installed):
+    """Both splitters yield the corpus's expected split for every case, and reject every error case.
+
+    Each side is asserted against the corpus AND against the other: agreeing with
+    the corpus is what pins the grammar, and agreeing with each other is what the
+    byte-identical end-state guarantee between the CLI path and the in-database
+    path actually rests on.
+    """
+    connection = installed
+    cases = load_split_corpus()
+    error_cases = load_split_error_cases()
+    try:
+        _deploy_corpus_probe(connection)
+        for case in [*cases, *error_cases]:
+            _stage_corpus_case(connection, case.name, case.text)
+
+        for case in cases:
+            lua = _run_corpus_probe(connection, case.name)
+            assert lua.error is None, f"{case.name}: {lua.error}"
+            python_statements = split_statements(case.text)
+            assert python_statements == case.statements, case.name
+            assert lua.statements == case.statements, case.name
+            assert lua.statements == python_statements, case.name
+
+        for case in error_cases:
+            lua = _run_corpus_probe(connection, case.name)
+            assert lua.statements is None, f"the Lua splitter must reject {case.name}"
+            assert lua.error, f"the Lua splitter must name why it rejects {case.name}"
+            with pytest.raises(ArtifactSyntaxError):
+                split_statements(case.text)
+    finally:
+        _drop_corpus_probe(connection)
+
+
+def test_lua_splitter_matches_corpus_under_a_local_interpreter(tmp_path):
+    """The Lua splitter reproduces the corpus with no database in the loop.
+
+    The conformance scenario above can only reach the in-database splitter through
+    a database. This runs the very same extracted source through a local Lua
+    interpreter, so a Lua-side grammar regression is caught where no instance is
+    configured. It skips when no interpreter is available (the discipline
+    ``test_module_install_passes_luacheck`` uses for a missing ``luacheck``);
+    ``PREPROC_TEST_LUA`` names one explicitly.
+    """
+    interpreter = lua_interpreter()
+    if interpreter is None:
+        pytest.skip("no Lua interpreter is available; set PREPROC_TEST_LUA to run this")
+    program = write_local_probe(tmp_path)
+
+    for case in load_split_corpus():
+        result = run_local_probe(interpreter, program, case.text)
+        assert result.error is None, f"{case.name}: {result.error}"
+        assert result.statements == case.statements, case.name
+
+    for case in load_split_error_cases():
+        result = run_local_probe(interpreter, program, case.text)
+        assert result.statements is None, f"{case.name} must be rejected"
+        assert result.error, f"{case.name} must be rejected with a message"
 
 
 def test_module_install_passes_luacheck():
