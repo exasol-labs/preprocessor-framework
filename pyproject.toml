@@ -17,6 +17,17 @@ preproc = "preproc.cli:main"
 [tool.hatch.build.targets.wheel]
 packages = ["src/preproc"]
 
+# The DDL, Lua and UDF sources live at the repository root (the layout
+# specs/install/project-bootstrap mandates), outside src/preproc, so the wheel
+# would otherwise ship none of them and every `preproc install` / `preproc
+# bundle` run from an installed copy would fail. Relocated under the package so
+# preproc/resources.py can resolve them relative to the installed module.
+# The sdist keeps sql/ at its root by hatchling's default file selection; the
+# wheel build is what relocates it. Both are pinned by
+# tests/test_packaged_resources.py.
+[tool.hatch.build.targets.wheel.force-include]
+"sql" = "preproc/sql"
+
 [dependency-groups]
 dev = [
     "pytest>=8.0",
@@ -32,4 +43,7 @@ select = ["E", "F", "I", "UP"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = ["integration: requires a live Exasol instance"]
+markers = [
+    "integration: requires a live Exasol instance",
+    "packaging: builds and installs a distribution artifact (slow, no database)",
+]
