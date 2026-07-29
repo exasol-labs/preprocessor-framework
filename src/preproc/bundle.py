@@ -25,8 +25,9 @@ The bundle is structure + code only. It MUST NOT include the activation
 ``ALTER SYSTEM`` statement (a deliberate DBA action) nor any demo seed data
 (a separate seed script).
 
-Path resolution mirrors ``install.py``:
-``<repo>/src/preproc/bundle.py`` → ``../../..`` → ``<repo>``.
+Sources are resolved by ``preproc.resources``, the same way ``install.py``
+resolves them, so the bundle and the CLI install read one identical tree whether
+the framework runs from a source checkout or an installed distribution.
 
 Output is deterministic: identical sources produce byte-for-byte identical
 output, because install files are globbed in sorted filename order and every
@@ -37,43 +38,41 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from preproc import resources
 from preproc.install import _split_statements
 
-_REPO_ROOT = Path(__file__).parent.parent.parent
-_SQL_INSTALL_DIR = _REPO_ROOT / "sql" / "install"
-_MASTER_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "master.lua"
-_DEMO_PING_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "demo_ping_v1.lua"
-_DEMO_TRANSLATE_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "demo_translate_v1.lua"
-_DEMO_AUDIT_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "demo_audit_v1.lua"
-_REFRESH_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "refresh.lua"
-_STATUS_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "status.lua"
-_REFRESH_CORE_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "refresh_core.lua"
-_RULE_ADD_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "rule_add.lua"
-_RULE_DROP_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "rule_drop.lua"
-_RULE_ENABLE_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "rule_enable.lua"
-_RULE_DISABLE_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "rule_disable.lua"
-_RULE_LIST_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "rule_list.lua"
-_SET_MODE_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "set_mode.lua"
-_SET_SELF_DISABLE_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "set_self_disable.lua"
-_SET_SYS_GROUPING_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "set_sys_grouping.lua"
-_CONTROL_SUGAR_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "control_sugar_v1.lua"
-_RULE_ENSURE_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "rule_ensure.lua"
-_MODULE_REGISTER_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "module_register.lua"
-_MODULE_RETIRE_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "module_retire.lua"
-_MODULE_RECLAIM_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "module_reclaim.lua"
-_MODULE_INSTALL_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "module_install.lua"
-_MODULE_CATALOG_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "module_catalog.lua"
-_DEMO_UDF_PATH = _REPO_ROOT / "sql" / "udf" / "demo_sqlglot_transpile_v1.sql"
-_MODULE_RESOLVER_UDF_PATH = _REPO_ROOT / "sql" / "udf" / "module_resolver_v1.sql"
+# Sources this module assembles, named locally so every wrapper below reads as a
+# constant. Where they are is preproc.resources' business, not this module's.
+_SQL_INSTALL_DIR = resources.SQL_INSTALL_DIR
+_MASTER_LUA_PATH = resources.MASTER_LUA_PATH
+_DEMO_PING_LUA_PATH = resources.DEMO_PING_LUA_PATH
+_DEMO_TRANSLATE_LUA_PATH = resources.DEMO_TRANSLATE_LUA_PATH
+_DEMO_AUDIT_LUA_PATH = resources.DEMO_AUDIT_LUA_PATH
+_REFRESH_LUA_PATH = resources.REFRESH_LUA_PATH
+_STATUS_LUA_PATH = resources.STATUS_LUA_PATH
+_REFRESH_CORE_LUA_PATH = resources.REFRESH_CORE_LUA_PATH
+_RULE_ADD_LUA_PATH = resources.RULE_ADD_LUA_PATH
+_RULE_DROP_LUA_PATH = resources.RULE_DROP_LUA_PATH
+_RULE_ENABLE_LUA_PATH = resources.RULE_ENABLE_LUA_PATH
+_RULE_DISABLE_LUA_PATH = resources.RULE_DISABLE_LUA_PATH
+_RULE_LIST_LUA_PATH = resources.RULE_LIST_LUA_PATH
+_SET_MODE_LUA_PATH = resources.SET_MODE_LUA_PATH
+_SET_SELF_DISABLE_LUA_PATH = resources.SET_SELF_DISABLE_LUA_PATH
+_SET_SYS_GROUPING_LUA_PATH = resources.SET_SYS_GROUPING_LUA_PATH
+_CONTROL_SUGAR_LUA_PATH = resources.CONTROL_SUGAR_LUA_PATH
+_RULE_ENSURE_LUA_PATH = resources.RULE_ENSURE_LUA_PATH
+_MODULE_REGISTER_LUA_PATH = resources.MODULE_REGISTER_LUA_PATH
+_MODULE_RETIRE_LUA_PATH = resources.MODULE_RETIRE_LUA_PATH
+_MODULE_RECLAIM_LUA_PATH = resources.MODULE_RECLAIM_LUA_PATH
+_MODULE_INSTALL_LUA_PATH = resources.MODULE_INSTALL_LUA_PATH
+_MODULE_CATALOG_LUA_PATH = resources.MODULE_CATALOG_LUA_PATH
+_DEMO_UDF_PATH = resources.DEMO_SQLGLOT_UDF_PATH
+_MODULE_RESOLVER_UDF_PATH = resources.MODULE_RESOLVER_UDF_PATH
 
 
 def _read_source(path: Path, kind: str) -> str:
     """Read a required source file, raising a helpful error if it is missing."""
-    if not path.exists():
-        raise FileNotFoundError(
-            f"{kind} not found at {path}. Ensure the {path.name} file exists in the repository."
-        )
-    return path.read_text(encoding="utf-8")
+    return resources.require_resource(path, kind).read_text(encoding="utf-8")
 
 
 def _collect_install_statements(skip: frozenset[str] = frozenset()) -> list[str]:
@@ -85,12 +84,8 @@ def _collect_install_statements(skip: frozenset[str] = frozenset()) -> list[str]
     upgrade-only ``25_column_upgrades.sql`` (whose additive ALTERs error on a
     clean database where ``20_tables.sql`` already defines those columns).
     """
-    sql_files = sorted(_SQL_INSTALL_DIR.glob("*.sql"))
-    if not sql_files:
-        raise FileNotFoundError(f"No .sql files found in {_SQL_INSTALL_DIR}")
-
     statements: list[str] = []
-    for sql_file in sql_files:
+    for sql_file in resources.require_install_ddl(_SQL_INSTALL_DIR):
         if sql_file.name in skip:
             continue
         sql_text = sql_file.read_text(encoding="utf-8")

@@ -5,16 +5,10 @@ the MASTER Lua script from sql/lua/master.lua into PREPROC_RT.
 
 Path resolution
 ---------------
-The SQL and Lua sources live at the repository root under sql/ and are NOT
-shipped inside the Python wheel.  The path is resolved relative to this module
-file's location:  <repo>/src/preproc/install.py → ../../..  → <repo>.
-
-This works correctly for:
-  - Development installs (``uv pip install -e .``)
-  - Direct invocations from the repo tree
-
-If the package is ever moved out of the repository (e.g. installed from PyPI),
-the sql/ directory must be included as package data and the path logic updated.
+The SQL and Lua sources live at the repository root under sql/, outside the
+importable package.  ``preproc.resources`` owns their resolution — the packaged
+copy in an installed distribution, the repository tree in a source checkout — so
+this module states only which sources it deploys, never where they are.
 
 Autocommit note
 ---------------
@@ -39,32 +33,35 @@ import sys
 from pathlib import Path
 from typing import Any
 
-_REPO_ROOT = Path(__file__).parent.parent.parent
-_SQL_INSTALL_DIR = _REPO_ROOT / "sql" / "install"
-_MASTER_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "master.lua"
-_DEMO_PING_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "demo_ping_v1.lua"
-_DEMO_TRANSLATE_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "demo_translate_v1.lua"
-_DEMO_AUDIT_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "demo_audit_v1.lua"
-_DEMO_SQLGLOT_UDF_PATH = _REPO_ROOT / "sql" / "udf" / "demo_sqlglot_transpile_v1.sql"
-_REFRESH_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "refresh.lua"
-_STATUS_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "status.lua"
-_REFRESH_CORE_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "refresh_core.lua"
-_RULE_ADD_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "rule_add.lua"
-_RULE_DROP_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "rule_drop.lua"
-_RULE_ENABLE_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "rule_enable.lua"
-_RULE_DISABLE_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "rule_disable.lua"
-_RULE_LIST_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "rule_list.lua"
-_SET_MODE_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "set_mode.lua"
-_SET_SELF_DISABLE_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "set_self_disable.lua"
-_SET_SYS_GROUPING_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "set_sys_grouping.lua"
-_CONTROL_SUGAR_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "control_sugar_v1.lua"
-_RULE_ENSURE_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "rule_ensure.lua"
-_MODULE_REGISTER_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "module_register.lua"
-_MODULE_RETIRE_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "module_retire.lua"
-_MODULE_RECLAIM_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "module_reclaim.lua"
-_MODULE_RESOLVER_UDF_PATH = _REPO_ROOT / "sql" / "udf" / "module_resolver_v1.sql"
-_MODULE_INSTALL_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "module_install.lua"
-_MODULE_CATALOG_LUA_PATH = _REPO_ROOT / "sql" / "lua" / "module_catalog.lua"
+from preproc import resources
+
+# Sources this module deploys, named locally so every call site below reads as a
+# constant. Where they are is preproc.resources' business, not this module's.
+_SQL_INSTALL_DIR = resources.SQL_INSTALL_DIR
+_MASTER_LUA_PATH = resources.MASTER_LUA_PATH
+_DEMO_PING_LUA_PATH = resources.DEMO_PING_LUA_PATH
+_DEMO_TRANSLATE_LUA_PATH = resources.DEMO_TRANSLATE_LUA_PATH
+_DEMO_AUDIT_LUA_PATH = resources.DEMO_AUDIT_LUA_PATH
+_DEMO_SQLGLOT_UDF_PATH = resources.DEMO_SQLGLOT_UDF_PATH
+_REFRESH_LUA_PATH = resources.REFRESH_LUA_PATH
+_STATUS_LUA_PATH = resources.STATUS_LUA_PATH
+_REFRESH_CORE_LUA_PATH = resources.REFRESH_CORE_LUA_PATH
+_RULE_ADD_LUA_PATH = resources.RULE_ADD_LUA_PATH
+_RULE_DROP_LUA_PATH = resources.RULE_DROP_LUA_PATH
+_RULE_ENABLE_LUA_PATH = resources.RULE_ENABLE_LUA_PATH
+_RULE_DISABLE_LUA_PATH = resources.RULE_DISABLE_LUA_PATH
+_RULE_LIST_LUA_PATH = resources.RULE_LIST_LUA_PATH
+_SET_MODE_LUA_PATH = resources.SET_MODE_LUA_PATH
+_SET_SELF_DISABLE_LUA_PATH = resources.SET_SELF_DISABLE_LUA_PATH
+_SET_SYS_GROUPING_LUA_PATH = resources.SET_SYS_GROUPING_LUA_PATH
+_CONTROL_SUGAR_LUA_PATH = resources.CONTROL_SUGAR_LUA_PATH
+_RULE_ENSURE_LUA_PATH = resources.RULE_ENSURE_LUA_PATH
+_MODULE_REGISTER_LUA_PATH = resources.MODULE_REGISTER_LUA_PATH
+_MODULE_RETIRE_LUA_PATH = resources.MODULE_RETIRE_LUA_PATH
+_MODULE_RECLAIM_LUA_PATH = resources.MODULE_RECLAIM_LUA_PATH
+_MODULE_RESOLVER_UDF_PATH = resources.MODULE_RESOLVER_UDF_PATH
+_MODULE_INSTALL_LUA_PATH = resources.MODULE_INSTALL_LUA_PATH
+_MODULE_CATALOG_LUA_PATH = resources.MODULE_CATALOG_LUA_PATH
 
 _TOLERATE_MARKER = "--@tolerate-exists"
 _ALREADY_EXISTS_MSG = "already exists"
@@ -187,10 +184,7 @@ def _deploy_master(connection: Any, verbose: bool) -> None:
         (_DEMO_SQLGLOT_UDF_PATH, "demo_sqlglot_transpile_v1.sql"),
         (_CONTROL_SUGAR_LUA_PATH, "control_sugar_v1.lua"),
     ]:
-        if not path.exists():
-            raise FileNotFoundError(
-                f"{label} not found at {path}. Ensure the file exists in the repository."
-            )
+        resources.require_resource(path, label)
 
     lua_body = _MASTER_LUA_PATH.read_text(encoding="utf-8")
     demo_ping_body = _DEMO_PING_LUA_PATH.read_text(encoding="utf-8")
@@ -301,11 +295,7 @@ def _deploy_admin_scripts(connection: Any, verbose: bool) -> None:
         (_MODULE_CATALOG_LUA_PATH, "module_catalog.lua"),
     ]
     for path, label in required:
-        if not path.exists():
-            raise FileNotFoundError(
-                f"{label} not found at {path}. "
-                f"Ensure the sql/lua/{label} file exists in the repository."
-            )
+        resources.require_resource(path, label)
 
     refresh_core_body = _REFRESH_CORE_LUA_PATH.read_text(encoding="utf-8")
     refresh_body = _REFRESH_LUA_PATH.read_text(encoding="utf-8")
@@ -494,11 +484,7 @@ def run_install(connection: Any, verbose: bool = False) -> None:
         connection: An open pyexasol connection.
         verbose: When True, print each SQL statement before execution.
     """
-    sql_files = sorted(_SQL_INSTALL_DIR.glob("*.sql"))
-    if not sql_files:
-        raise FileNotFoundError(f"No .sql files found in {_SQL_INSTALL_DIR}")
-
-    for sql_file in sql_files:
+    for sql_file in resources.require_install_ddl(_SQL_INSTALL_DIR):
         _apply_sql_file(connection, sql_file, verbose)
 
     _deploy_master(connection, verbose)
