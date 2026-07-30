@@ -36,6 +36,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import pyexasol
+
 from preproc.module.registry import RegistryIndex, generate_index, render_index
 
 # ---------------------------------------------------------------------------
@@ -474,6 +476,32 @@ class _BytesResponse(io.BytesIO):
 
     def __exit__(self, *exc: Any) -> None:
         self.close()
+
+
+# ---------------------------------------------------------------------------
+# Client-name-controlled connections (client_pattern matching tests)
+# ---------------------------------------------------------------------------
+
+
+def connect_with_client_name(client_name: str) -> Any:
+    """Open a pyexasol connection whose reported CLIENT is exactly ``client_name``.
+
+    pyexasol forwards ``client_name`` to the server's ``clientName`` login field,
+    which is what EXA_ALL_SESSIONS.CLIENT exposes -- so this is the only handle for
+    making MASTER's ``current_client`` lookup return a controlled string. Reuses
+    the same env-configured DSN/credentials as the suite (hence the same
+    CURRENT_USER, so RESOLUTION rules seeded under that user apply here too).
+    """
+    kwargs = {
+        "dsn": os.environ["EXASOL_DSN"],
+        "user": os.environ["EXASOL_USER"],
+        "password": os.environ["EXASOL_PASSWORD"],
+        "client_name": client_name,
+    }
+    tls_verify = os.environ.get("EXASOL_TLS_VERIFY", "").lower()
+    if tls_verify in ("0", "false"):
+        kwargs["websocket_sslopt"] = {"cert_reqs": ssl.CERT_NONE}
+    return pyexasol.connect(**kwargs)
 
 
 # ---------------------------------------------------------------------------

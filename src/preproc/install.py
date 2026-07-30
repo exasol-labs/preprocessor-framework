@@ -346,7 +346,8 @@ def _deploy_admin_scripts(connection: Any, verbose: bool) -> None:
     )
     connection.execute(
         f"CREATE OR REPLACE LUA SCRIPT PREPROC.RULE_ADD("
-        f"scope_type, scope_value, phase, script_name, function_name, norefresh) "
+        f"scope_type, scope_value, phase, script_name, function_name, client_pattern, "
+        f"norefresh) "
         f"RETURNS TABLE AS\n{rule_add_body}"
     )
     connection.execute(

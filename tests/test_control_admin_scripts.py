@@ -25,6 +25,7 @@ Shared-state discipline (the connection, CONFIG, and SETTINGS are session-wide)
     teardown so the session is left with a consistent RESOLUTION.
 """
 
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -41,6 +42,9 @@ _EXISTING_FUNCTION = "rebuild"
 _TEST_SCOPE_PREFIX = "TEST_"
 _OPERATOR_CEILING = 9000
 
+# PREPROC.CONFIG.client_pattern is VARCHAR(256) (sql/install/20_tables.sql).
+_CLIENT_PATTERN_MAX_LENGTH = 256
+
 # Canonical CREATE wrappers. Parameter order MUST match the documented Lua
 # parameter order in each script body (and the read-globals luacheck directive).
 # Exasol LUA SCRIPT parameters are declared as bare names without SQL types
@@ -49,7 +53,7 @@ _CONTROL_SCRIPTS = {
     "refresh_core.lua": "CREATE OR REPLACE LUA SCRIPT PREPROC.REFRESH_CORE() AS\n",
     "rule_add.lua": (
         "CREATE OR REPLACE LUA SCRIPT PREPROC.RULE_ADD("
-        "scope_type, scope_value, phase, script_name, function_name, norefresh"
+        "scope_type, scope_value, phase, script_name, function_name, client_pattern, norefresh"
         ") RETURNS TABLE AS\n"
     ),
     "rule_drop.lua": (
@@ -62,6 +66,11 @@ _CONTROL_SCRIPTS = {
         "CREATE OR REPLACE LUA SCRIPT PREPROC.RULE_DISABLE(rule_id, norefresh) RETURNS TABLE AS\n"
     ),
     "rule_list.lua": ("CREATE OR REPLACE LUA SCRIPT PREPROC.RULE_LIST() RETURNS TABLE AS\n"),
+    "rule_ensure.lua": (
+        "CREATE OR REPLACE LUA SCRIPT PREPROC.RULE_ENSURE("
+        "scope_type, scope_value, phase, script_name, function_name, client_pattern, norefresh"
+        ") RETURNS TABLE AS\n"
+    ),
     "set_mode.lua": (
         "CREATE OR REPLACE LUA SCRIPT PREPROC.SET_MODE(mode, norefresh) RETURNS TABLE AS\n"
     ),
@@ -81,6 +90,7 @@ _DEPLOY_ORDER = [
     "rule_enable.lua",
     "rule_disable.lua",
     "rule_list.lua",
+    "rule_ensure.lua",
     "set_mode.lua",
     "set_self_disable.lua",
     "set_sys_grouping.lua",
@@ -166,15 +176,62 @@ def _group_sys_with_dba(connection):
     ).fetchval()
 
 
-def _add_rule(connection, scope_type, scope_value, phase, norefresh=False):
+def _text_literal(value):
+    """Render a Python value as a SQL text literal, or the NULL keyword for None."""
+    if value is None:
+        return "NULL"
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _add_rule(connection, scope_type, scope_value, phase, norefresh=False, client_pattern=None):
     """Run RULE_ADD with a valid existing script target and return the rule_id."""
     flag = "TRUE" if norefresh else "FALSE"
     rows = connection.execute(
         f"EXECUTE SCRIPT PREPROC.RULE_ADD("
         f"'{scope_type}', '{scope_value}', '{phase}', "
-        f"'{_EXISTING_SCRIPT}', '{_EXISTING_FUNCTION}', {flag})"
+        f"'{_EXISTING_SCRIPT}', '{_EXISTING_FUNCTION}', "
+        f"{_text_literal(client_pattern)}, {flag})"
     ).fetchall()
     return rows[0][0]
+
+
+def _client_pattern_of(connection, rule_id):
+    """Read the client_pattern of a single CONFIG row by rule_id."""
+    return connection.execute(
+        f"SELECT client_pattern FROM PREPROC.CONFIG WHERE rule_id = {rule_id}"
+    ).fetchval()
+
+
+def _resolved_client_patterns(connection, user_name):
+    """Read every RESOLUTION client_pattern materialised for one user_name."""
+    return [
+        row[0]
+        for row in connection.execute(
+            f"SELECT client_pattern FROM PREPROC.RESOLUTION WHERE user_name = '{user_name}'"
+        ).fetchall()
+    ]
+
+
+def _ensure_rule(connection, scope_type, scope_value, phase, norefresh=False, client_pattern=None):
+    """Run RULE_ENSURE with a valid existing script target and return (rule_id, created)."""
+    flag = "TRUE" if norefresh else "FALSE"
+    rows = connection.execute(
+        f"EXECUTE SCRIPT PREPROC.RULE_ENSURE("
+        f"'{scope_type}', '{scope_value}', '{phase}', "
+        f"'{_EXISTING_SCRIPT}', '{_EXISTING_FUNCTION}', "
+        f"{_text_literal(client_pattern)}, {flag})"
+    ).fetchall()
+    return rows[0][0], rows[0][1]
+
+
+def _script_param_list(connection, script_name):
+    """Read the catalog CREATE header's parameter list for one deployed script."""
+    script_text = connection.execute(
+        "SELECT script_text FROM EXA_ALL_SCRIPTS"
+        f" WHERE script_schema = 'PREPROC' AND script_name = '{script_name}'"
+    ).fetchval()
+    match = re.search(r"\(([^)]*)\)", script_text)
+    return match.group(1)
 
 
 @pytest.mark.integration
@@ -274,6 +331,196 @@ def test_rule_add_norefresh_skips_refresh(clean_config):
 
 
 @pytest.mark.integration
+def test_rule_add_persists_client_pattern_verbatim(clean_config):
+    """RULE_ADD stores a mixed-case client_pattern byte-for-byte in CONFIG and RESOLUTION.
+
+    The value is matched as a literal substring of a self-reported application
+    name, so case-folding or trimming it would make the rule silently never fire.
+    """
+    connection = clean_config
+    pattern = "DbVisualizer 24.1.5"
+
+    rule_id = _add_rule(connection, "USER", "TEST_CP_VERBATIM", "EXPAND", client_pattern=pattern)
+
+    assert _client_pattern_of(connection, rule_id) == pattern
+    assert _resolved_client_patterns(connection, "TEST_CP_VERBATIM") == [pattern]
+
+
+@pytest.mark.integration
+def test_rule_add_null_client_pattern_means_all_clients(clean_config):
+    """RULE_ADD with a NULL client_pattern persists NULL, the apply-to-all-clients value."""
+    connection = clean_config
+
+    rule_id = _add_rule(connection, "USER", "TEST_CP_NULL", "EXPAND", client_pattern=None)
+
+    assert _client_pattern_of(connection, rule_id) is None
+    assert _resolved_client_patterns(connection, "TEST_CP_NULL") == [None]
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("pattern", [" ", "   ", "\t", " \t "])
+def test_rule_add_rejects_empty_client_pattern(clean_config, pattern):
+    """RULE_ADD rejects a whitespace-only client_pattern and names NULL as the alternative.
+
+    ``string.find(client, "  ", 1, true)`` is a real restriction, but a pattern
+    with no non-whitespace content is an operator mistake that reads in RULE_LIST
+    output as a restriction while conveying nothing. The empty string itself is
+    unreachable through SQL — see
+    ``test_rule_add_empty_string_literal_arrives_as_sql_null``.
+    """
+    connection = clean_config
+    config_before = _config_count(connection)
+    resolution_before = _resolution_count(connection)
+    refresh_before = _last_refresh(connection)
+
+    with pytest.raises(Exception) as excinfo:  # noqa: PT011 - any DB-side rejection is acceptable
+        _add_rule(connection, "USER", "TEST_CP_BLANK", "EXPAND", client_pattern=pattern)
+
+    message = str(excinfo.value)
+    assert "client_pattern" in message
+    assert "NULL" in message
+
+    assert _config_count(connection) == config_before
+    assert _resolution_count(connection) == resolution_before
+    assert _last_refresh(connection) == refresh_before
+
+
+@pytest.mark.integration
+def test_rule_add_empty_string_literal_arrives_as_sql_null(clean_config):
+    """An empty-string client_pattern literal reaches the script as SQL NULL.
+
+    Exasol does not distinguish the empty string from NULL, so ``''`` is already
+    NULL at the EXECUTE SCRIPT boundary and ``client_pattern = ''`` is not
+    storable in the column at all. The validator's empty-string check is
+    therefore defence-in-depth for an in-DB Lua caller; through SQL the engine
+    itself makes the misbehaving value unrepresentable, and the rule means what
+    NULL means.
+    """
+    connection = clean_config
+
+    rule_id = _add_rule(connection, "USER", "TEST_CP_EMPTY", "EXPAND", client_pattern="")
+
+    assert _client_pattern_of(connection, rule_id) is None
+
+
+@pytest.mark.integration
+def test_rule_add_rejects_overlength_client_pattern(clean_config):
+    """RULE_ADD rejects a client_pattern past the column width instead of truncating.
+
+    Truncation is never safe for a substring pattern: clipping
+    ``'DbVisualizer-Prod'`` to ``'DbVisualizer'`` WIDENS the set of clients the
+    rule fires for. The boundary is asserted from both sides so the accepted
+    maximum is stored intact and the first rejected length is one character past
+    it.
+    """
+    connection = clean_config
+    at_limit = "C" * _CLIENT_PATTERN_MAX_LENGTH
+    over_limit = "C" * (_CLIENT_PATTERN_MAX_LENGTH + 1)
+
+    rule_id = _add_rule(connection, "USER", "TEST_CP_ATLIMIT", "EXPAND", client_pattern=at_limit)
+    assert _client_pattern_of(connection, rule_id) == at_limit
+
+    config_before = _config_count(connection)
+    resolution_before = _resolution_count(connection)
+    refresh_before = _last_refresh(connection)
+
+    with pytest.raises(Exception) as excinfo:  # noqa: PT011 - any DB-side rejection is acceptable
+        _add_rule(connection, "USER", "TEST_CP_OVER", "EXPAND", client_pattern=over_limit)
+
+    message = str(excinfo.value)
+    assert "client_pattern" in message
+    assert str(_CLIENT_PATTERN_MAX_LENGTH + 1) in message
+    assert str(_CLIENT_PATTERN_MAX_LENGTH) in message
+
+    assert _config_count(connection) == config_before
+    assert _resolution_count(connection) == resolution_before
+    assert _last_refresh(connection) == refresh_before
+    truncated = connection.execute(
+        "SELECT COUNT(*) FROM PREPROC.CONFIG WHERE scope_value = 'TEST_CP_OVER'"
+    ).fetchval()
+    assert truncated == 0
+
+
+@pytest.mark.integration
+def test_rule_add_client_pattern_validated_before_side_effects(clean_config):
+    """RULE_ADD with both an invalid phase and an invalid client_pattern writes nothing.
+
+    Guards the validate-before-mutate ordering: every validation, client_pattern
+    included, runs before the rule_id allocation and the INSERT, so a rejected
+    call leaves CONFIG, RESOLUTION and last_refresh exactly as they were.
+    """
+    connection = clean_config
+    config_before = _config_count(connection)
+    resolution_before = _resolution_count(connection)
+    refresh_before = _last_refresh(connection)
+
+    with pytest.raises(Exception):  # noqa: PT011 - any DB-side rejection is acceptable
+        _add_rule(connection, "USER", "TEST_CP_BOTHBAD", "NOTAPHASE", client_pattern="   ")
+
+    assert _config_count(connection) == config_before
+    assert _resolution_count(connection) == resolution_before
+    assert _last_refresh(connection) == refresh_before
+
+
+@pytest.mark.integration
+def test_rule_add_parameter_list_matches_rule_ensure(clean_config):
+    """RULE_ADD's catalog parameter list is byte-identical to RULE_ENSURE's.
+
+    The two scripts are documented as differing only in insert-vs-upsert
+    semantics; this reads the deployed CREATE header from the dictionary
+    (rather than trusting the Lua source comments) to confirm the arity and
+    argument order genuinely match.
+    """
+    connection = clean_config
+
+    rule_add_params = _script_param_list(connection, "RULE_ADD")
+    rule_ensure_params = _script_param_list(connection, "RULE_ENSURE")
+
+    assert rule_add_params == rule_ensure_params
+    assert rule_add_params == (
+        "scope_type,scope_value,phase,script_name,function_name,client_pattern,norefresh"
+    )
+
+
+@pytest.mark.integration
+def test_client_pattern_validation_shared_by_rule_add_and_rule_ensure(clean_config):
+    """RULE_ENSURE rejects the same malformed client_pattern RULE_ADD rejects.
+
+    Both writers call the single validator hosted in PREPROC.REFRESH_CORE, so
+    this exercises RULE_ENSURE's copy of the guard (whitespace-only and
+    over-length) rather than re-testing RULE_ADD's, which is already covered by
+    ``test_rule_add_rejects_empty_client_pattern`` and
+    ``test_rule_add_rejects_overlength_client_pattern``.
+    """
+    connection = clean_config
+    config_before = _config_count(connection)
+    resolution_before = _resolution_count(connection)
+    refresh_before = _last_refresh(connection)
+
+    with pytest.raises(Exception) as excinfo:  # noqa: PT011 - any DB-side rejection is acceptable
+        _ensure_rule(connection, "USER", "TEST_ENSURE_CP_BLANK", "EXPAND", client_pattern="   ")
+
+    message = str(excinfo.value)
+    assert "client_pattern" in message
+    assert "NULL" in message
+    assert _config_count(connection) == config_before
+    assert _resolution_count(connection) == resolution_before
+    assert _last_refresh(connection) == refresh_before
+
+    over_limit = "C" * (_CLIENT_PATTERN_MAX_LENGTH + 1)
+    with pytest.raises(Exception) as excinfo:  # noqa: PT011 - any DB-side rejection is acceptable
+        _ensure_rule(connection, "USER", "TEST_ENSURE_CP_OVER", "EXPAND", client_pattern=over_limit)
+
+    message = str(excinfo.value)
+    assert "client_pattern" in message
+    assert str(_CLIENT_PATTERN_MAX_LENGTH + 1) in message
+    assert str(_CLIENT_PATTERN_MAX_LENGTH) in message
+    assert _config_count(connection) == config_before
+    assert _resolution_count(connection) == resolution_before
+    assert _last_refresh(connection) == refresh_before
+
+
+@pytest.mark.integration
 def test_rule_drop_removes_and_refreshes(clean_config):
     """RULE_DROP removes the row, reports one row removed, and refreshes RESOLUTION."""
     connection = clean_config
@@ -329,10 +576,10 @@ def test_rule_enable_flips_and_refreshes(clean_config):
 
 @pytest.mark.integration
 def test_rule_list_returns_rows_readonly(clean_config):
-    """RULE_LIST returns rows ordered by rule_id and has no side effects."""
+    """RULE_LIST returns rule_id-ordered rows with CLIENT_PATTERN, and has no side effects."""
     connection = clean_config
     first = _add_rule(connection, "USER", "TEST_LIST_A", "EXPAND")
-    second = _add_rule(connection, "USER", "TEST_LIST_B", "EXPAND")
+    second = _add_rule(connection, "USER", "TEST_LIST_B", "EXPAND", client_pattern="DbVisualizer")
 
     resolution_before = _resolution_count(connection)
     refresh_before = _last_refresh(connection)
@@ -343,6 +590,12 @@ def test_rule_list_returns_rows_readonly(clean_config):
     assert first in ids
     assert second in ids
     assert ids == sorted(ids), "RULE_LIST must return rows ordered by rule_id ASC"
+
+    by_id = {r[0]: r for r in rows}
+    assert by_id[first][3] is None, (
+        "client_pattern must be NULL when the rule applies to all clients"
+    )
+    assert by_id[second][3] == "DbVisualizer"
 
     assert _resolution_count(connection) == resolution_before
     assert _last_refresh(connection) == refresh_before

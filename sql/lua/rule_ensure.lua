@@ -41,9 +41,10 @@
 --   lowest-rule_id-wins dedup).
 --
 -- Validation order (the invariant that keeps a rejected call side-effect free)
---   phase, then scope_type, then script existence — all BEFORE the match query
---   and any DML, identical to RULE_ADD. Each raises via error() naming the
---   offending value; no COMMIT has occurred, so CONFIG is unchanged on rejection.
+--   phase, then scope_type, then script existence, then client_pattern — all
+--   BEFORE the match query and any DML, identical to RULE_ADD. Each raises via
+--   error() naming the offending value; no COMMIT has occurred, so CONFIG is
+--   unchanged on rejection.
 --
 -- rule_id allocation (only on the insert path)
 --   Identical to RULE_ADD: MAX(rule_id) + 1 over operator space (rule_id < 9000),
@@ -77,6 +78,13 @@ local RESERVED_DEMO_FLOOR = 9000
 
 local VALID_PHASES = {TRANSLATE = true, EXPAND = true, REWRITE = true}
 local VALID_SCOPE_TYPES = {ROLE = true, USER = true}
+
+-- Load the shared module up front, not at the refresh site, because Step 4 needs
+-- its validator BEFORE the match query and any DML. import() only binds the
+-- module's functions and performs no work of its own, so this is
+-- behaviour-neutral -- including on the norefresh path, which loads the module
+-- and never calls rebuild().
+import("PREPROC.REFRESH_CORE", "rc")
 
 -- --- Step 1: validate phase ---------------------------------------------------
 if not VALID_PHASES[phase] then
@@ -112,12 +120,20 @@ if chk_res[1][1] == 0 then
     error("PREPROC.RULE_ENSURE: script not found: " .. tostring(script_name))
 end
 
--- --- Step 4: normalise the client_pattern null-ness ---------------------------
+-- --- Step 4: validate the client_pattern --------------------------------------
+-- The shared guard in PREPROC.REFRESH_CORE, so RULE_ENSURE and RULE_ADD reject
+-- exactly the same patterns: NULL is accepted (apply to all clients), an empty or
+-- whitespace-only pattern is rejected because it would match every client, and an
+-- over-length pattern is rejected rather than truncated. Runs before the match
+-- query and any DML.
+rc.validate_client_pattern(client_pattern)
+
+-- --- Step 5: normalise the client_pattern null-ness ---------------------------
 -- A SQL NULL parameter may arrive as Lua nil or the Exasol `null` sentinel; treat
 -- both as "no pattern" so the match and insert are issued in the correct shape.
 local cp_is_null = (client_pattern == nil or client_pattern == null)
 
--- --- Step 5: look for an existing enabled rule on the natural key --------------
+-- --- Step 6: look for an existing enabled rule on the natural key --------------
 -- MIN(rule_id) yields the lowest matching id, or the `null` sentinel when nothing
 -- matches. client_pattern is compared NULL-safely by issuing the IS-NULL variant
 -- when there is no pattern and the equality variant otherwise.
@@ -156,7 +172,7 @@ if existing_id ~= nil and existing_id ~= null then
     exit({{existing_id, false}}, "rule_id DECIMAL(18,0), created BOOLEAN")
 end
 
--- --- Step 6: allocate a non-colliding rule_id in operator space ---------------
+-- --- Step 7: allocate a non-colliding rule_id in operator space ---------------
 local id_ok, id_res = pquery(
     "SELECT COALESCE(MAX(rule_id), 0) + 1 AS next_id"
         .. " FROM PREPROC.CONFIG WHERE rule_id < :floor",
@@ -173,7 +189,7 @@ if rule_id >= RESERVED_DEMO_FLOOR then
     )
 end
 
--- --- Step 7: insert the enabled rule ------------------------------------------
+-- --- Step 8: insert the enabled rule ------------------------------------------
 -- enabled = TRUE and version = 1 for a freshly inserted rule; client_pattern is
 -- inserted as a NULL literal when absent (bind-safe) or bound otherwise.
 local ins_ok, ins_res
@@ -209,16 +225,15 @@ if not ins_ok then
     error("PREPROC.RULE_ENSURE: insert failed: " .. tostring(ins_res.error_message))
 end
 
--- --- Step 8: refresh (or commit-only under norefresh) -------------------------
+-- --- Step 9: refresh (or commit-only under norefresh) -------------------------
 if norefresh == true then
     local commit_ok, commit_res = pquery("COMMIT")
     if not commit_ok then
         error("PREPROC.RULE_ENSURE: commit failed: " .. tostring(commit_res.error_message))
     end
 else
-    import("PREPROC.REFRESH_CORE", "rc")
     rc.rebuild()
 end
 
--- --- Step 9: report the allocated rule_id -------------------------------------
+-- --- Step 10: report the allocated rule_id ------------------------------------
 exit({{rule_id, true}}, "rule_id DECIMAL(18,0), created BOOLEAN")

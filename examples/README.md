@@ -4,7 +4,9 @@ Ready-to-run preprocessor modules for the framework — **one preprocessor per
 file**. Each file is self-contained: it creates the module script(s) and ends
 with the command that registers the module with the framework (an
 `EXECUTE SCRIPT PREPROC.RULE_ADD(...)` call, with the equivalent `PREPROC ...`
-command-sugar form shown in a trailing comment).
+command-sugar form shown in a trailing comment). Every example passes `NULL`
+for `RULE_ADD`'s `client_pattern` argument — none of these rules is
+client-scoped, so they apply to every client.
 
 ## Prerequisites
 
@@ -28,22 +30,48 @@ statement delimiter (required because Lua/Python bodies contain semicolons).
 
 ## Ergonomics modules have moved
 
-The `cast-shorthand` (`expr::type` → `CAST(expr AS type)`) and
-`trailing-comma` (removes optional trailing commas) modules used to live here
+The `cast_shorthand` (`expr::type` → `CAST(expr AS type)`) and
+`trailing_comma` (removes optional trailing commas) modules used to live here
 as `ergonomics_cast.sql` / `ergonomics_trailing_comma.sql`. They have moved to
 the community module library, [`exasol-labs/preprocessor-library`](https://github.com/exasol-labs/preprocessor-library),
-as the first two modules proving out the `preproc module` ecosystem. Install
-them with:
+as the first two modules proving out the module ecosystem. Install them from SQL,
+with no toolchain at all:
+
+```sql
+PREPROC INSTALL MODULE cast_shorthand FOR ROLE ANALYSTS;
+PREPROC INSTALL MODULE trailing_comma FOR ROLE ANALYSTS;
+```
+
+or with the CLI, which adds `list` / `search` / `update` / `remove` / `sync` /
+`bundle` / `validate`:
 
 ```
-uv run preproc module add cast-shorthand
-uv run preproc module add trailing-comma
+uv run preproc module add cast_shorthand
+uv run preproc module add trailing_comma
 ```
+
+(Module names are `snake_case` identifiers — the old hyphenated spellings
+`cast-shorthand` / `trailing-comma` no longer resolve.)
 
 See [`docs/module-authoring.md`](../docs/module-authoring.md) for the module
 contract and [`docs/operations.md` § Module management](../docs/operations.md#module-management)
-for the `preproc module` CLI (`list` / `search` / `add` / `update` / `remove` /
-`bundle` / `validate` / `sync`).
+for the CLI reference.
+
+## `confd_admin.sql` is superseded by a library module
+
+`confd_admin.sql` below is the original four-object, hand-deployed version of the
+ConfD command surface, kept here as a worked example of a self-registering
+multi-object module. The maintained version is the library's **`confd_control`**
+module — 15 objects, installable in one statement, versioned and reclaimable as a
+unit:
+
+```sql
+PREPROC INSTALL MODULE confd_control FOR ROLE DBA;
+```
+
+Prefer that for anything other than reading the example. See
+[`demo/07_confd_finale.sql`](../demo/07_confd_finale.sql) for a guided run,
+including the ConfD user setup both versions need.
 
 ## Registration scope
 
@@ -51,4 +79,7 @@ Each example registers its rule against a role (`PREPROC_ADMIN` for the demos,
 `DBA` for confd). A user must **hold** that role for the rule to resolve to them
 (`PREPROC.REFRESH` walks the role-grant graph). Edit the trailing `RULE_ADD`
 call to change the scope — e.g. `'USER', 'ALICE'` to bind the module to a single
-user instead of a role.
+user instead of a role. The 6th argument, `client_pattern`, narrows the rule
+further to callers whose reported client name contains that substring; leave
+it `NULL` (as every example does) to apply to all clients regardless of which
+tool connected.

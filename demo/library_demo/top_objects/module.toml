@@ -1,0 +1,13 @@
+name = "top_objects"
+description = "Adds SHOW TOP [n] OBJECTS, ranking the objects the caller can see by raw size."
+phase = "EXPAND"
+script_name = "PREPROC_RT.TOP_OBJECTS_V1"
+function = "top_objects"
+version = 1
+min_framework = "0.7.0"
+sha256 = "a5daae6a30a51bd116e41824237e69828df494960036183be1aa079418cd1dc2"
+deploy_mode = "library-deployed"
+
+[suggested_scope]
+type = "ROLE"
+value = "PREPROC_ADMIN"

@@ -56,6 +56,14 @@
 --   by contrast — they are EXECUTE SCRIPT targets, not live-bound dispatch
 --   modules, so the live-replace hazard does not apply to them.)
 --
+--   PRE-RELEASE EXCEPTION (ADR-038): while the project is pre-first-release there
+--   is no deployed installation, so no session can bind a stale module body and
+--   the hazard the discipline exists to prevent cannot occur. Grammar has
+--   therefore been added to V1 IN PLACE — PREPROC SET SYS_GROUPING, the
+--   module-lifecycle verbs, and the ADD RULE CLIENT clause. That exception
+--   expires at the first release. A POST-release grammar change MUST arrive as
+--   CONTROL_SUGAR_V2 by the discipline above; the exception is not the rule.
+--
 -- -----------------------------------------------------------------------------
 -- 5. Production vs demo  —  why there is NO DEMO_ prefix
 -- -----------------------------------------------------------------------------
@@ -118,6 +126,19 @@
 --   EXECUTE SCRIPT call. Non-mutating commands (LIST RULES, REFRESH, STATUS,
 --   SET SELF_DISABLE) do not take the suffix and never receive the extra arg.
 --
+--   ADD RULE carries a second optional clause, and the two compose in a fixed
+--   order:
+--
+--     PREPROC ADD RULE FOR (ROLE|USER) <v> PHASE <p> SCRIPT <s> FUNCTION <f>
+--                      [CLIENT '<pattern>'] [NOREFRESH]
+--
+--   Because NOREFRESH is stripped BEFORE the arm parses positions, the arm sees
+--   either 11 or 13 words and CLIENT is never read at a shifted index — the two
+--   optional features compose without multiplying the accepted counts. The strip
+--   compares the LAST token to the bare keyword, and the tokenizer keeps a quoted
+--   span WITH its quotes, so CLIENT 'NOREFRESH' is a pattern and not the suffix:
+--   the token 'NOREFRESH' does not equal NOREFRESH.
+--
 -- -----------------------------------------------------------------------------
 -- 10. Quoting semantics  —  captured values follow Exasol identifier rules
 -- -----------------------------------------------------------------------------
@@ -137,8 +158,28 @@
 --       so it is taken literally (quotes stripped if present, case never
 --       changed). The SET MODE value and boolean/rule-id operands are likewise
 --       passed through verbatim — they are not identifiers.
+--     * The ADD RULE CLIENT pattern is the SECOND capture position deliberately
+--       EXEMPT from folding, for the same class of reason as FUNCTION: the value
+--       denotes something outside Exasol's identifier namespace. It is matched as
+--       a literal SUBSTRING against EXA_ALL_SESSIONS.CLIENT — an application name
+--       the connecting tool self-reports in its own casing (DbVisualizer 24.1.5,
+--       DBeaver 23.3.0, PyExasol 2.2.1, EXAplus). Upper-casing it would make
+--       DBVISUALIZER match nothing, and do so SILENTLY: the rule still resolves,
+--       dispatch still evaluates it, it just never fires. Its operand is written
+--       as a SQL STRING LITERAL ('...', doubled '' escaped), not a "..."
+--       delimited identifier, and is re-quoted verbatim for the emitted call.
+--       The KEYWORD is matched case-insensitively like every other keyword —
+--       only the OPERAND's casing is preserved. An EMPTY operand (CLIENT '') is
+--       DECLINED rather than carried, the one decline in this grammar caused by a
+--       value rather than by syntax: Exasol treats '' as NULL, so the emitted
+--       argument would reach PREPROC.RULE_ADD as the null sentinel, skip the
+--       validator that rejects empty patterns, and silently create an all-clients
+--       rule from a command that reads as a restriction. Whitespace-only (' ')
+--       does survive transit as a real value and IS carried through, so the
+--       validator can reject it with its explanatory message.
 --   The tokenizer keeps a "..." or '...' span (including doubled-quote escapes)
---   as a single token, so a quoted identifier or source survives whitespace.
+--   as a single token, so a quoted identifier, source, or client pattern survives
+--   embedded whitespace.
 -- =============================================================================
 
 -- luacheck: globals expand
@@ -255,6 +296,47 @@ local function literal_symbol(token)
     return inner
 end
 
+-- Return the inner value of a '...' SQL string-literal token, or nil when the
+-- token is not one. undelimit() cannot serve here: it knows only the "..."
+-- delimited-IDENTIFIER form, whereas this operand is a string literal whose
+-- escape is a doubled ''.
+--
+-- The closing quote must be PROVEN, not assumed. tokenize() cannot fail: an
+-- unterminated span simply runs to the end of the text and is still returned as a
+-- token, so a token's existence says nothing about its termination. Scanning the
+-- span under the doubled-quote rule is what separates a closed span from an open
+-- one — a shape test like ^'.*'$ would accept ''' (an opening quote plus an
+-- ESCAPED quote and no terminator, which both starts and ends with ') and hand
+-- back a stray quote as the value. nil is returned for an unquoted token, a
+-- missing closing quote, and a token that continues past its closing quote.
+--
+-- The question answered here is purely SYNTACTIC — "is this a well-formed SQL
+-- string literal, and what is its value?" — so an EMPTY literal ('') is reported
+-- faithfully as the empty string: it IS well formed. Whether an empty VALUE is an
+-- acceptable operand is a separate, position-specific question, and each call site
+-- answers it for itself (see the ADD RULE arm's CLIENT capture). Keeping the two
+-- apart is what lets this nil keep its single meaning, "not a string literal."
+local function string_literal(token)
+    if #token < 2 or string.sub(token, 1, 1) ~= "'" then
+        return nil
+    end
+    local n = #token
+    local i = 2
+    while i <= n do
+        if string.sub(token, i, i) ~= "'" then
+            i = i + 1
+        elseif string.sub(token, i + 1, i + 1) == "'" then
+            i = i + 2 -- escaped quote: still inside the span
+        elseif i == n then
+            local inner = string.gsub(string.sub(token, 2, -2), "''", "'")
+            return inner
+        else
+            return nil -- the span closes before the token ends
+        end
+    end
+    return nil -- ran to the end of the token with no closing quote
+end
+
 -- Single-quote a value for use as a string literal in the emitted EXECUTE SCRIPT
 -- call, escaping any embedded single quote by doubling it (SQL standard).
 local function quote(value)
@@ -334,8 +416,43 @@ function expand(sqltext)
     local verb = upper_word(1)
 
     if verb == "ADD" and upper_word(2) == "RULE" then
-        -- PREPROC ADD RULE FOR (ROLE|USER) <v> PHASE <p> SCRIPT <s> FUNCTION <f>
-        if subcommand_count ~= 11 then
+        -- With CLIENT:    PREPROC ADD RULE FOR (ROLE|USER) <v> PHASE <p> SCRIPT <s> FUNCTION <f> CLIENT '<pattern>'  (13 words)
+        -- Without CLIENT: PREPROC ADD RULE FOR (ROLE|USER) <v> PHASE <p> SCRIPT <s> FUNCTION <f>                     (11 words)
+        -- Two accepted counts branching on the keyword at the expected position,
+        -- the shape INSTALL MODULE already established for 8-vs-6 on FROM. The
+        -- trailing NOREFRESH is stripped ABOVE, so the arm only ever sees 11 or 13
+        -- words; and because CLIENT is the LAST clause, the fixed positions below
+        -- (FOR/PHASE/SCRIPT/FUNCTION) never shift between the two forms.
+        local client_literal
+        if subcommand_count == 13 and upper_word(12) == "CLIENT" then
+            -- The pattern is a self-reported client application name matched as a
+            -- literal substring, NOT an Exasol identifier, so it is unwrapped from
+            -- its string-literal quotes and re-quoted with its case untouched (see
+            -- header section 10). A malformed operand declines: emitting a wrong
+            -- pattern would create a rule that silently never fires.
+            local client_pattern = string_literal(word(13))
+            if client_pattern == nil then
+                return nil
+            end
+            -- An EMPTY operand is declined too, even though '' parses as a valid
+            -- string literal. The refusal is about where the value LANDS, not how
+            -- it is written: Exasol treats the empty string as NULL, so an emitted
+            -- '' argument arrives at PREPROC.RULE_ADD as the null sentinel,
+            -- indistinguishable from an omitted clause. The shared validator that
+            -- exists to reject an empty pattern is never reached, and a command
+            -- that READS as a restriction silently creates an all-clients rule.
+            -- Declining here keeps that from being the one silent outcome in a
+            -- grammar where every other malformed input is loud. The test is on the
+            -- UNESCAPED value, so '''' (one apostrophe) is a real pattern and
+            -- passes; whitespace-only survives transit intact and is carried
+            -- through for the validator's explanatory rejection.
+            if client_pattern == "" then
+                return nil
+            end
+            client_literal = quote(client_pattern)
+        elseif subcommand_count == 11 then
+            client_literal = "NULL"
+        else
             return nil
         end
         if upper_word(3) ~= "FOR" then
@@ -364,11 +481,13 @@ function expand(sqltext)
             quote(phase),
             quote(script_name),
             quote(function_name),
+            client_literal, -- between function_name and norefresh, per the deployed parameter order
         }
-        -- Always pass the trailing norefresh slot: the target admin scripts have
-        -- a fixed parameter list and Exasol requires an exact argument count, so
-        -- omitting it ("got N expected N+1") makes the expanded EXECUTE SCRIPT
-        -- fail. NOREFRESH -> true; otherwise NULL (the script then auto-refreshes).
+        -- Always pass BOTH optional slots: the target admin scripts have a fixed
+        -- parameter list and Exasol requires an exact argument count, so omitting
+        -- one ("expected N script parameters but got N-1") makes the expanded
+        -- EXECUTE SCRIPT fail. An absent CLIENT emits NULL (apply to all clients)
+        -- and an absent NOREFRESH emits NULL (the script then auto-refreshes).
         args[#args + 1] = norefresh and "true" or "NULL"
         return execute_script(CONTROL.rule_add, args)
     end

@@ -1,6 +1,12 @@
 # Operations
 
-[← README](../README.md) | [How it works →](how-it-works.md)
+[← README](../README.md) | [How it works →](how-it-works.md) | [Air-gap runbook](air-gap-runbook.md)
+
+> **On a cluster with no outbound internet?** This page documents every surface
+> individually, online and offline. If you want the air-gapped path as one ordered
+> procedure instead — collect artifacts → transfer → deploy → stage in BucketFS →
+> install → verify → roll back — use
+> **[air-gap-runbook.md](air-gap-runbook.md)**.
 
 There are two independent deploy surfaces, covered in different sections
 below: the **engine deploy** — run [`release.sql`](#single-file-deploy-releasesql)
@@ -68,8 +74,17 @@ uv run preproc install --verbose
 | `PREPROC.SET_MODE` | Lua script (set framework mode) |
 | `PREPROC.SET_SELF_DISABLE` | Lua script (set self-disable policy) |
 | `PREPROC.SET_SYS_GROUPING` | Lua script (set SYS role-grouping policy) |
+| `PREPROC.MODULES` | Table (module provenance, one row per deployed module *version*) |
+| `PREPROC.RULE_ENSURE` | Lua script (idempotent rule add — returns an existing rule's id instead of duplicating it) |
+| `PREPROC.MODULE_REGISTER` | Lua script (upsert a `PREPROC.MODULES` provenance row) |
+| `PREPROC.MODULE_RETIRE` | Lua script (mark a module version retired) |
+| `PREPROC.MODULE_RECLAIM` | Lua script (guarded `DROP` of a retired version's objects) |
+| `PREPROC.MODULE_INSTALL` | Lua script (in-database module install orchestrator) |
+| `PREPROC.MODULE_CATALOG` | Lua script (read-only module discovery) |
+| `PREPROC.MODULE_RESOLVER_V1` | Python3 UDF (reads a `bucketfs:`/`https:` source, verifies `sha256`; admin-only, never granted to PUBLIC) |
 | `PREPROC_RT` | Schema (PUBLIC-accessible) |
 | `PREPROC_RT.MY_PIPELINE` | View (definer-rights; scoped to `CURRENT_USER`; exposes `mode`, `self_disable_allowed`, and `profile_hash`) |
+| `PREPROC_RT.INSTALLED_MODULES` | View (definer-rights, PUBLIC-readable; module provenance, unfiltered) |
 | `PREPROC_RT.MASTER` | Lua script (dispatcher; also the source body for retirement stubs) |
 | `PREPROC_RT.DEMO_PING_V1` | Lua script (demo EXPAND module) |
 | `PREPROC_RT.DEMO_TRANSLATE_V1` | Lua script (demo TRANSLATE module) |
@@ -211,8 +226,14 @@ ALTER SYSTEM SET sql_preprocessor_script = NULL;
 To deactivate for a session:
 
 ```sql
-ALTER SESSION SET sql_preprocessor_script = NULL;
+ALTER SESSION SET sql_preprocessor_script = '';
 ```
+
+Both `NULL` and the empty string `''` clear the slot. `''` is the form the
+framework itself issues when a convenience-mode session self-disables (see
+[Session self-optimization](#session-self-optimization)), and it is the form to
+reach for when recovering a session — see
+[Troubleshooting](#troubleshooting).
 
 Note: the framework's own posture is set by `PREPROC.SET_MODE` and stored in
 `PREPROC.SETTINGS.mode` — `'convenience'` (the default) or `'strict'`:
@@ -235,16 +256,28 @@ is unaffected by that flag.)
 `PREPROC_ADMIN` role holders interact with the framework through a set of
 admin scripts deployed in the `PREPROC` schema. These are the sanctioned
 management surface. **Direct DML on `PREPROC.CONFIG` or `PREPROC.RESOLUTION`
-is unsupported** — use the scripts below. The installer seeds one bootstrap
-rule (the `PREPROC_RT.CONTROL_SUGAR_V1` EXPAND rule for `PREPROC_ADMIN`) via
-`sql/install/70_control_sugar_seed.sql`; that insert is the only authorised
+is unsupported** — use the scripts below. The installer seeds **two** bootstrap
+rules via `sql/install/70_control_sugar_seed.sql` — the
+`PREPROC_RT.CONTROL_SUGAR_V1` EXPAND rule scoped to `PREPROC_ADMIN` *and* the
+same rule scoped to `DBA`; those two guarded inserts are the only authorised
 direct-DML bootstrap boundary.
+
+**Why `DBA` as well:** `SYS` and other superusers hold `DBA` but **cannot be
+granted `PREPROC_ADMIN`** (Exasol rejects `GRANT PREPROC_ADMIN TO SYS` with
+`cannot grant roles to SYS`). Since resolution walks the role-grant graph, the
+`DBA`-scoped seed is what lets `SYS` — the most natural first operator — use the
+`PREPROC …` commands out of the box with no extra grant. The sugar confers no
+authority beyond the `EXECUTE SCRIPT PREPROC.*` calls a `DBA` can already make;
+it is pure ergonomics over the admin scripts. The practical consequence worth
+knowing is that **every `DBA` holder gets the command surface by default** — drop
+the `DBA`-scoped rule if your policy requires the sugar to be reachable only by
+explicitly delegated `PREPROC_ADMIN` holders.
 
 ### Admin scripts (PREPROC schema)
 
 | Script | Parameters | Description |
 |---|---|---|
-| `PREPROC.RULE_ADD` | `scope_type, scope_value, phase, script_name, function_name, norefresh` | Insert a new rule; auto-refresh unless `norefresh` is set |
+| `PREPROC.RULE_ADD` | `scope_type, scope_value, phase, script_name, function_name, client_pattern, norefresh` | Insert a new rule; auto-refresh unless `norefresh` is set |
 | `PREPROC.RULE_DROP` | `rule_id, norefresh` | Delete a rule by ID; auto-refresh unless `norefresh` |
 | `PREPROC.RULE_ENABLE` | `rule_id, norefresh` | Enable a disabled rule; auto-refresh unless `norefresh` |
 | `PREPROC.RULE_DISABLE` | `rule_id, norefresh` | Disable a rule without deleting it; auto-refresh unless `norefresh` |
@@ -252,8 +285,21 @@ direct-DML bootstrap boundary.
 | `PREPROC.SET_MODE` | `mode, norefresh` | Set the framework mode (`'convenience'` or `'strict'`); auto-refresh unless `norefresh` |
 | `PREPROC.SET_SELF_DISABLE` | `value` | Allow or disallow user self-disable (`TRUE` / `FALSE`) |
 | `PREPROC.SET_SYS_GROUPING` | `value, norefresh` | Group `SYS` with `DBA` (`TRUE`, default) or isolate it from the entire role closure (`FALSE`); auto-refresh unless `norefresh` |
+| `PREPROC.RULE_ENSURE` | `scope_type, scope_value, phase, script_name, function_name, client_pattern, norefresh` | Idempotent `RULE_ADD`: returns an existing matching rule's id rather than inserting a duplicate |
 | `PREPROC.REFRESH` | — | Rebuild RESOLUTION from CONFIG and current role grants |
 | `PREPROC.STATUS` | — | Report whether RESOLUTION is current or stale |
+
+Module management adds five more, covered in
+[In-database module install](#in-database-module-install) and
+[Module lifecycle](#module-lifecycle):
+
+| Script | Parameters | Description |
+|---|---|---|
+| `PREPROC.MODULE_CATALOG` | `source` | Read-only: list what a source advertises and which are installed |
+| `PREPROC.MODULE_INSTALL` | `source, module_name, scope` | Resolve, verify, deploy, register, refresh — the whole install |
+| `PREPROC.MODULE_REGISTER` | `…provenance fields…` | Upsert a `PREPROC.MODULES` row on the `(name, version)` key |
+| `PREPROC.MODULE_RETIRE` | `name, version` | Mark a version retired in provenance |
+| `PREPROC.MODULE_RECLAIM` | `name, version` | Guarded physical `DROP` of a retired version's objects |
 
 All mutating scripts return a result table confirming the change. All require
 `PREPROC_ADMIN` (or `EXECUTE ANY SCRIPT`, or DBA).
@@ -265,14 +311,15 @@ commands.
 
 ### PREPROC sugar syntax (convenience mode)
 
-When the preprocessor is active and the session user holds `PREPROC_ADMIN`,
-the `PREPROC_RT.CONTROL_SUGAR_V1` EXPAND module intercepts statements that
+When the preprocessor is active and the session user holds `PREPROC_ADMIN` **or
+`DBA`** (both are seeded at install — see above, and note this is what makes the
+sugar work for `SYS`), the `PREPROC_RT.CONTROL_SUGAR_V1` EXPAND module intercepts statements that
 begin with the keyword `PREPROC` and rewrites them as `EXECUTE SCRIPT` calls.
 This gives an interactive shorthand without leaving SQL:
 
 | Sugar statement | Equivalent script call |
 |---|---|
-| `PREPROC ADD RULE FOR (ROLE\|USER) scope_value PHASE phase SCRIPT script_name FUNCTION function_name` | `EXECUTE SCRIPT PREPROC.RULE_ADD(...)` |
+| `PREPROC ADD RULE FOR (ROLE\|USER) scope_value PHASE phase SCRIPT script_name FUNCTION function_name [CLIENT '<pattern>']` | `EXECUTE SCRIPT PREPROC.RULE_ADD(...)` |
 | `PREPROC DROP RULE rule_id` | `EXECUTE SCRIPT PREPROC.RULE_DROP(rule_id, NULL)` |
 | `PREPROC ENABLE RULE rule_id` | `EXECUTE SCRIPT PREPROC.RULE_ENABLE(rule_id, NULL)` |
 | `PREPROC DISABLE RULE rule_id` | `EXECUTE SCRIPT PREPROC.RULE_DISABLE(rule_id, NULL)` |
@@ -282,6 +329,21 @@ This gives an interactive shorthand without leaving SQL:
 | `PREPROC SET MODE mode` | `EXECUTE SCRIPT PREPROC.SET_MODE(mode, NULL)` |
 | `PREPROC SET SELF_DISABLE value` | `EXECUTE SCRIPT PREPROC.SET_SELF_DISABLE(value)` |
 | `PREPROC SET SYS_GROUPING value` | `EXECUTE SCRIPT PREPROC.SET_SYS_GROUPING(value, NULL)` |
+| `PREPROC CATALOG MODULES [FROM 'source']` | `EXECUTE SCRIPT PREPROC.MODULE_CATALOG('source')` |
+| `PREPROC INSTALL MODULE name [FROM 'source'] FOR (ROLE\|USER) value` | `EXECUTE SCRIPT PREPROC.MODULE_INSTALL('source', 'name', 'TYPE:value')` |
+
+On the two module commands the `FROM 'source'` clause is **optional**; omitted,
+it defaults to the public library index pinned to the mutable `latest` tag
+(`https://raw.githubusercontent.com/exasol-labs/preprocessor-library/latest/registry/index.json`).
+That default lives in `control_sugar_v1.lua` as a code constant, not a
+`PREPROC.SETTINGS` row (ADR-051: no settings toggle on the fetch path).
+
+> **Never put a trailing `--` comment on the same line as a `PREPROC …`
+> command.** Most clients send that comment as part of the statement text, and
+> while the sugar module strips *leading* comment lines it does not strip
+> trailing ones — the command is declined and the engine reports a puzzling
+> `syntax error, unexpected …`. `PREPROC STATUS;` works; `PREPROC STATUS; -- check`
+> does not. Ordinary SQL statements are unaffected.
 
 Append `NOREFRESH` to any mutating command to skip the automatic refresh:
 
@@ -291,9 +353,17 @@ PREPROC REFRESH
 ```
 
 The sugar module is a plain EXPAND-phase module. It is only active when the
-preprocessor is running and a `PREPROC_ADMIN`-scoped EXPAND rule points to
-`PREPROC_RT.CONTROL_SUGAR_V1`. The installer seeds exactly this rule. Statements
-that do not start with `PREPROC` are passed through unchanged.
+preprocessor is running and an EXPAND rule resolving to the current user points
+to `PREPROC_RT.CONTROL_SUGAR_V1`. The installer seeds two such rules
+(`PREPROC_ADMIN` and `DBA`). Statements that do not start with `PREPROC` are
+passed through unchanged.
+
+If a `PREPROC …` command comes back as a raw engine `syntax error, unexpected
+IDENTIFIER_PART_`, the sugar is not reaching you. In order of likelihood: the
+preprocessor is not activated for your session; you hold neither `PREPROC_ADMIN`
+nor `DBA`; `PREPROC.REFRESH` has not run since install; or the statement carries
+a trailing `--` comment. Check with `SELECT * FROM PREPROC_RT.MY_PIPELINE;` — an
+empty result means no rules resolve to you.
 
 ### Adding a rule
 
@@ -304,7 +374,7 @@ Use the sugar or call the script directly:
 PREPROC ADD RULE FOR ROLE ANALYSTS PHASE EXPAND SCRIPT PREPROC_RT.MY_MODULE_V1 FUNCTION expand
 
 -- Direct script call:
-EXECUTE SCRIPT PREPROC.RULE_ADD('ROLE', 'ANALYSTS', 'EXPAND', 'PREPROC_RT.MY_MODULE_V1', 'expand', NULL);
+EXECUTE SCRIPT PREPROC.RULE_ADD('ROLE', 'ANALYSTS', 'EXPAND', 'PREPROC_RT.MY_MODULE_V1', 'expand', NULL, NULL);
 ```
 
 Rules take effect after the next `PREPROC.REFRESH` run (automatic unless
@@ -323,6 +393,55 @@ Column reference for `PREPROC.CONFIG`:
 | `function_name` | Exported function name, e.g. `'expand'` |
 | `enabled` | `TRUE` to include; `FALSE` to exclude from next refresh |
 | `version` | Informational integer; no dispatch semantics |
+
+### client_pattern (scoping, not security)
+
+`client_pattern` narrows a rule to sessions connecting from a matching client
+application, on top of the `ROLE`/`USER` scope:
+
+```sql
+-- Sugar:
+PREPROC ADD RULE FOR ROLE DBA PHASE EXPAND
+    SCRIPT PREPROC_RT.DEMO_HELP_V1 FUNCTION help_menu CLIENT 'DbVisualizer';
+
+-- Direct script call:
+EXECUTE SCRIPT PREPROC.RULE_ADD('ROLE', 'DBA', 'EXPAND',
+    'PREPROC_RT.DEMO_HELP_V1', 'help_menu', 'DbVisualizer', NULL);
+```
+
+**This is scoping, not a security boundary.** The client name is self-reported
+by the connecting tool — it is read from `EXA_ALL_SESSIONS.CLIENT`, a value the
+client hands the server on connect and can set to anything it likes. Treat a
+`client_pattern` as a convenience for keeping human-oriented shortcuts (like a
+`HELP` command) out of scheduled or batch sessions, and never as the mechanism
+that withholds a transformation from a principal — that is what `ROLE`/`USER`
+scoping and schema `EXECUTE` grants are for. A user who wants a client-scoped
+rule to stop applying to them can simply connect with a client string that no
+longer matches the pattern.
+
+Matching is a **literal substring** check
+(`string.find(client, pattern, 1, true)`) — not a SQL `LIKE` wildcard and not a
+regular expression. `'DbVisualizer'` matches the reported `'DbVisualizer
+24.1.5'`; it does not support `%`, `_`, or any other pattern syntax. `NULL`
+means "apply to all clients" — the default when the clause or argument is
+omitted, and unchanged behaviour for every rule created before `client_pattern`
+existed.
+
+Discover what a client actually reports before writing a pattern:
+
+```sql
+SELECT CLIENT, DRIVER FROM EXA_ALL_SESSIONS WHERE SESSION_ID = CURRENT_SESSION;
+```
+
+Both `RULE_ADD` and `RULE_ENSURE` validate `client_pattern` through one shared
+check before writing anything: an empty or whitespace-only pattern is rejected
+(it would match every client while reading as a restriction — use `NULL`
+instead), and a pattern longer than the `VARCHAR(256)` column is rejected
+rather than truncated (truncating a substring pattern only ever *widens* the
+set of clients it matches). The sugar's `CLIENT` clause declines an empty
+`CLIENT ''` operand outright, because Exasol collapses `''` to `NULL` before it
+reaches `RULE_ADD`, which would otherwise silently create an all-clients rule
+under a clause that looks like it narrows one.
 
 ### SYS-grouping (break-glass recovery)
 
@@ -475,7 +594,7 @@ to the central library's index,
 | `preproc module search <term>` | No | Filter the registry listing by a substring of name or description |
 | `preproc module add <name> [--scope TYPE:value]` | Yes | Deploy the module's artifact (if `library-deployed`), register its rule via `RULE_ENSURE`, write a provenance row, refresh |
 | `preproc module update <name> [--scope TYPE:value]` | Yes | Deploy the registry's latest version alongside the current one, repoint the rule, refresh, then mark the old version retired |
-| `preproc module remove <name>` | Yes | Drop the module's rule(s), refresh, mark its provenance retired (does not drop the script — see [Reclaim](#reclaiming-a-retired-version)) |
+| `preproc module remove <name>` | Yes | Drop the module's rule(s), refresh, mark its provenance retired (does not drop the script — see [Module lifecycle](#module-lifecycle) step 4, reclaim) |
 | `preproc module bundle <names...> --output <file>` | No | Emit one self-contained offline `.sql` (artifact + `RULE_ENSURE` calls) for hand-carrying to an air-gapped instance |
 | `preproc module validate <name>` | Optional | Static conformance checks always; when a database is configured, also compiles the artifact's `SCRIPT` statements and smoke-tests the entry function inside one disposable schema (never executes the artifact's own statements against a live schema), then drops the disposable schema |
 | `preproc module sync <manifest>` | Yes | Declaratively converge the database to a desired-state TOML file — add missing modules, update changed versions, retire dropped ones, in one pass with a single refresh |
@@ -495,9 +614,14 @@ static `validate` never touch a database.
 and let the CLI fetch, verify, and deploy over the DB connection in one step:
 
 ```bash
-uv run preproc module add cast-shorthand
-uv run preproc module list --registry https://raw.githubusercontent.com/exasol-labs/preprocessor-library/main/registry/index.json
+uv run preproc module add cast_shorthand
+uv run preproc module list --registry https://raw.githubusercontent.com/exasol-labs/preprocessor-library/latest/registry/index.json
 ```
+
+Module names are `snake_case` identifiers (no hyphens) — `cast_shorthand`, not
+`cast-shorthand`. For `<ref>` in a registry URL, `latest` is a mutable tag the
+library's release workflow moves to each `v*` release commit; pin an immutable
+`vX.Y.Z` instead when a build must be reproducible.
 
 **Air-gap** — the database must never reach the network. Run `bundle` on a
 machine with GitHub access to produce a self-contained `.sql` (same
@@ -506,7 +630,7 @@ air-gapped instance, and run it there directly — no CLI, no DB connection,
 needed on that side:
 
 ```bash
-uv run preproc module bundle cast-shorthand trailing-comma --output offline_modules.sql
+uv run preproc module bundle cast_shorthand trailing_comma --output offline_modules.sql
 # hand-carry offline_modules.sql to the air-gapped instance, then run it
 # with EXAplus (a GUI client like DbVisualiser/DBeaver must have parameterized
 # SQL disabled, or it corrupts the `:`-bearing script bodies — see the release.sql
@@ -524,8 +648,9 @@ the read-only `PREPROC_RT.INSTALLED_MODULES` view (PUBLIC-readable, like
 `MY_PIPELINE` — ADR-002):
 
 ```sql
-SELECT name, version, source_repo, source_ref, sha256, script_name,
-       function_name, phase, deploy_mode, status, installed_at, retired_at
+SELECT name, version, source_repo, source_ref, source_url, library_version,
+       sha256, script_name, function_name, phase, deploy_mode, status,
+       installed_at, retired_at, objects
 FROM PREPROC_RT.INSTALLED_MODULES
 ORDER BY name, version;
 ```
@@ -533,6 +658,21 @@ ORDER BY name, version;
 Unlike `MY_PIPELINE`, there is no `CURRENT_USER` filter — provenance is global,
 and one module name can have more than one row: the currently `deployed`
 version and any not-yet-reclaimed `retired` predecessor.
+
+Three columns matter for auditing an install:
+
+| Column | Answers |
+|---|---|
+| `source_url` | the effective source actually fetched from — a `.../latest/...` raw URL, a pinned `vX.Y.Z` URL, or a `bucketfs:` path |
+| `library_version` | the concrete library release the fetched index self-declared, so an install resolved through the mutable `latest` tag is still auditable back to a fixed version |
+| `objects` | the deployed object inventory, as newline-separated `TYPE\|NAME` lines in file order — for a composite module this is every object the artifact created, not just the entry script |
+
+`source_url`, `library_version`, and `sha256` are nullable: a `self-deployed`
+module carries no library `sha256`, and a manual or offline registration may omit
+the source fields. `objects` is NULL for a `self-deployed` module (no artifact
+travels through the registry) or a row written before the column existed, in
+which case `MODULE_RECLAIM` falls back to the single object named by
+`script_name`.
 
 ### Module lifecycle
 
@@ -556,11 +696,59 @@ framework's own profile scripts (generate → retire → reclaim):
    [retire-then-reclaim](how-it-works.md#profile-cleanup-retire-then-reclaim)
    invariant.
 
+### Declarative convergence: the `sync` desired-state file
+
 `preproc module sync <manifest>` drives this whole lifecycle declaratively:
 diff the desired-state TOML against `INSTALLED_MODULES`, then add/update/retire
 whatever differs, in a single convergence pass with exactly one refresh. Re-running
 `sync` against an unchanged desired file is a true no-op (closes BUG-008):
 `RULE_ENSURE` returns the existing rule id rather than duplicating it.
+
+The desired-state file defines one `modules` array. Two spellings are accepted —
+a plain `name@version` string, or a table when you need a scope override:
+
+```toml
+# desired.toml — the modules this database should have, and nothing else
+modules = [
+    "cast_shorthand@1",
+    "trailing_comma@2",
+]
+```
+
+```toml
+# equivalent, with per-module scope overrides
+[[modules]]
+module = "cast_shorthand@1"
+scope  = "ROLE:ANALYSTS"
+
+[[modules]]
+name    = "trailing_comma"
+version = 2
+scope   = { type = "ROLE", value = "ANALYSTS" }
+```
+
+`version` is **required** and is an integer matching the module's `_V<N>`
+generation — `sync` converges to an exact version, never to "latest", which is
+what makes a run reproducible. `scope` is optional (`"ROLE:<name>"` /
+`"USER:<name>"`, or a `{type, value}` table) and overrides the module's
+`suggested_scope`; omitted, the suggestion is used.
+
+The file is **authoritative**: a module currently deployed but absent from
+`modules` is retired (its rule dropped, its provenance marked retired). The
+physical `DROP` is deliberately *not* done — reclaim stays a separate guarded
+admin step, so a `sync` can never strand a live session.
+
+Convergence is safe by ordering: every desired `module@version` is resolved and
+every artifact fully pre-flighted — `sha256`, statement split, and
+declared-vs-derived object inventory — **before any database write**, so an
+unknown module, a tampered artifact, or one whose inventory drifted aborts the
+whole run with the database untouched. Mutations then run with auto-refresh
+suppressed, followed by exactly one `REFRESH`, and only if something actually
+changed CONFIG.
+
+This is the verb to use from CI: commit `desired.toml`, run `sync` on merge, and
+the database converges to the committed state with no imperative add/remove
+scripting.
 
 ### Follow-ons
 
@@ -593,6 +781,10 @@ covers the SQL-only alternative for a DBA who would rather never touch a
 Python toolchain. See [How it works § In-database install
 path](how-it-works.md#in-database-install-path) for the architecture behind
 this section.
+
+> The next three sections cover BucketFS staging as individual reference
+> surfaces. For the same material as one ordered procedure with verified output at
+> every step, see **[air-gap-runbook.md](air-gap-runbook.md)**.
 
 ### Prerequisites: the BucketFS CONNECTION
 
@@ -633,7 +825,7 @@ Note on how BucketFS stores it: BucketFS auto-extracts an uploaded archive
 into a directory on the UDF mount as soon as it lands, rather than leaving the
 compressed file sitting there untouched. You still write the source string
 naming the archive exactly as uploaded —
-`bucketfs:PREPROC_BFS/preproc-lib-0.1.0.tar.gz` — and the resolver
+`bucketfs:PREPROC_BFS/preproc-lib-0.3.0.tar.gz` — and the resolver
 transparently locates and reads the auto-extracted content behind that name;
 this BucketFS-side extraction detail requires no different source syntax and
 no extra operator step.
@@ -645,10 +837,10 @@ Two equivalent forms — a direct script call, or the `PREPROC` sugar
 
 ```sql
 -- Direct script call:
-EXECUTE SCRIPT PREPROC.MODULE_INSTALL('bucketfs:PREPROC_BFS/preproc-lib-0.1.0.tar.gz', 'cast_shorthand', 'ROLE:ANALYSTS');
+EXECUTE SCRIPT PREPROC.MODULE_INSTALL('bucketfs:PREPROC_BFS/preproc-lib-0.3.0.tar.gz', 'cast_shorthand', 'ROLE:ANALYSTS');
 
 -- Sugar:
-PREPROC INSTALL MODULE cast_shorthand FROM 'bucketfs:PREPROC_BFS/preproc-lib-0.1.0.tar.gz' FOR ROLE ANALYSTS;
+PREPROC INSTALL MODULE cast_shorthand FROM 'bucketfs:PREPROC_BFS/preproc-lib-0.3.0.tar.gz' FOR ROLE ANALYSTS;
 ```
 
 The third argument is a `TYPE:value` scope (`TYPE` ∈ `ROLE` | `USER`), the
@@ -667,10 +859,15 @@ Exasol always upper-cases regardless of quoting — `FOR ROLE dba`,
 `EXECUTE SCRIPT` form takes plain string literals and does no folding — pass
 the exact registry key and scope you mean.)
 
-`MODULE_INSTALL` returns a result row reporting the outcome:
+`MODULE_INSTALL` returns a result row reporting the outcome, with five columns
+(verified on 2026.1):
 
-| `module` | `version` | `phase` | `status` |
-|---|---|---|---|
+| `module` | `version` | `phase` | `status` | `library_version` |
+|---|---|---|---|---|
+| `confd_control` | `1` | `EXPAND` | `installed` | `0.3.0` |
+
+`library_version` is the concrete release the resolved index self-declared — the
+audit anchor when the source was a mutable `latest` tag.
 
 `status` is one of:
 
@@ -687,18 +884,70 @@ are already installed:
 
 ```sql
 -- Direct script call:
-EXECUTE SCRIPT PREPROC.MODULE_CATALOG('bucketfs:PREPROC_BFS/preproc-lib-0.1.0.tar.gz');
+EXECUTE SCRIPT PREPROC.MODULE_CATALOG('bucketfs:PREPROC_BFS/preproc-lib-0.3.0.tar.gz');
 
 -- Sugar:
-PREPROC CATALOG MODULES FROM 'bucketfs:PREPROC_BFS/preproc-lib-0.1.0.tar.gz';
+PREPROC CATALOG MODULES FROM 'bucketfs:PREPROC_BFS/preproc-lib-0.3.0.tar.gz';
 ```
 
-Returns one row per module the source's registry index advertises, carrying
-`name`, `version`, `phase`, `deploy_mode`, and an `installed` BOOLEAN column
-(the "installed?" flag — `TRUE` only for a currently `deployed` version; a
-`retired` provenance row does not count). `MODULE_CATALOG` is read-only: it
-never touches `PREPROC.CONFIG`,
+Returns one row per module the source's registry index advertises. The columns,
+in order (verified on 2026.1):
+
+| Column | Notes |
+|---|---|
+| `NAME` | the registry key — match it case-insensitively |
+| `VERSION` | the advertised `_V<N>` generation |
+| `PHASE` | `TRANSLATE` / `EXPAND` / `REWRITE` |
+| `DEPLOY_MODE` | `library-deployed` or `self-deployed` |
+| `INSTALLED` | BOOLEAN — see the caveat below |
+| `OBJECT_COUNT` | how many objects an install would create (`15` for `confd_control`) |
+| `OBJECTS` | the full declared inventory, newline-separated `TYPE\|NAME` in file order |
+
+> **`INSTALLED` reflects provenance, not existence.** It is `TRUE` only when
+> `PREPROC.MODULES` holds a currently `deployed` row for that name — a `retired`
+> row does not count. A module deployed **by hand** (its scripts created directly,
+> its rule added with `RULE_ADD`) reports `INSTALLED = FALSE` even though its
+> objects exist and its rule is live, because nothing ever wrote a provenance row.
+> Confirmed on a live instance. Use `MY_PIPELINE` or `PREPROC LIST RULES` to ask
+> "is this transformation active?"; use `INSTALLED_MODULES` to ask "did the module
+> system install this, and from where?"
+
+`MODULE_CATALOG` is read-only: it never touches `PREPROC.CONFIG`,
 `PREPROC.SETTINGS`, `PREPROC.RESOLUTION`, or `PREPROC.MODULES`.
+
+### Reviewing a composite module before installing
+
+A module's artifact may carry **more than one statement**, and may create
+objects in **any schema the installing admin can write** — not only
+`PREPROC_RT`/`PREPROC`. Installing a `library-deployed` module is therefore
+arbitrary DDL executed under the `PREPROC_ADMIN` boundary, and the library's
+`confd_control` module is a real example: one install creates 15 objects.
+
+What makes that reviewable rather than opaque is that the inventory is
+**declared before install and checked against the artifact**:
+
+- `MODULE_CATALOG`'s `objects` column shows exactly which objects an install
+  would create, before you run it.
+- The install is **refused** if the artifact's actual statements disagree with
+  the manifest's declared `[[objects]]` in either direction — an undeclared
+  object, or a declared one the artifact never creates. This is the same
+  accept/reject discipline applied to `sha256`.
+- Every object carries the module's `_V<N>` suffix, so a v1 and a v2 generation
+  never collide, and `MODULE_RECLAIM` drops a retired version's objects in the
+  reverse of the order the artifact created them.
+
+`min_framework` in a registry entry states the lowest framework release a module
+supports, but **nothing enforces it** — it is advisory metadata carried through
+the manifest and index. Verified on a live 2026.1 instance: a module declaring
+`min_framework = "99.0.0"` installs on framework 0.7.1 and reports `installed`.
+It fails later, at use. Check the module's `min_framework` against your framework
+version yourself.
+
+Worth knowing if you are considering enforcing it: `min_framework` is read **zero
+times** across `module_install.lua`, `module_catalog.lua`, and
+`module_resolver_v1.sql`, and `PREPROC.SETTINGS` carries **no framework version
+column** — so the database currently has no way to know its own version.
+Enforcement needs that value persisted at install time first.
 
 ### HTTPS sources
 
@@ -800,6 +1049,32 @@ This is expected fail-open behaviour. MASTER catches the error via `pcall`,
 skips the rule, and continues. Investigate the module logic directly — deploy a
 test version that surfaces the error explicitly, or check the `PREPROC.CONFIG`
 entry to confirm the script and function names are correct.
+
+**Every admin command fails with `attempt to call a nil value (field 'rebuild')`**
+
+This is the one failure mode that is *not* covered by fail-open, and it has a
+single cause: **an enabled rule points at a script that no longer exists.** A
+module that *throws* fails open cleanly; a module that is *missing* does not,
+because the failed `import` inside dispatch also breaks the `import` the
+framework's own admin scripts rely on. The result is that `PREPROC REFRESH`,
+`ADD RULE`, `DROP RULE`, and `INSTALL MODULE` all fail for every user whose
+resolved pipeline includes that rule. Ordinary user SQL is unaffected.
+
+Recovery — clear the preprocessor for your own session first, so the admin
+scripts can run at all:
+
+```sql
+ALTER SESSION SET sql_preprocessor_script = '';
+EXECUTE SCRIPT PREPROC.RULE_DROP(<dangling_rule_id>, NULL);
+ALTER SESSION SET sql_preprocessor_script = PREPROC_RT.MASTER;
+```
+
+**Never drop a script while an enabled rule still references it.** Drop the rule
+first, then the script, and you will never see this. `PREPROC.MODULE_RECLAIM`
+enforces exactly that ordering for installed modules — it refuses to drop a
+retired version while any enabled `PREPROC.CONFIG` rule or live
+`PREPROC.PROFILES` manifest still references it, which is why reclaim is a
+separate, later admin call rather than part of `remove`.
 
 **RESOLUTION looks stale after a role change**
 

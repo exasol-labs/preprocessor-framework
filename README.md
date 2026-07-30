@@ -40,7 +40,7 @@ core value is being the **sole owner of that one slot** and the
 `MASTER`. Anyone who wants to hook a syntax transform into the slot does so as
 a **module** — a stable, versioned, registry-discoverable unit — rather than
 fighting for the slot directly. See
-[Add a transformation](#add-a-transformation) below.
+[Bring your own preprocessor](#bring-your-own-preprocessor) below.
 
 ## Quick Start
 
@@ -104,39 +104,155 @@ EXECUTE SCRIPT PREPROC.STATUS;     -- resolution current / stale / never-refresh
 EXECUTE SCRIPT PREPROC.RULE_LIST;  -- all configured rules
 ```
 
+Once the preprocessor is active you can use the shorter `PREPROC STATUS;` /
+`PREPROC LIST RULES;` sugar instead. `SYS` works out of the box here: Exasol will
+not let you grant `PREPROC_ADMIN` to `SYS`, so the installer also seeds the
+command surface for `DBA`, which `SYS` holds.
+
+**The one query worth remembering** — "does the preprocessor affect *me*, right
+now?" Any user can ask, no admin rights needed:
+
+```sql
+SELECT * FROM PREPROC_RT.MY_PIPELINE;
+```
+
+Each row is one transformation that will run on your statements, in order. **No
+rows means nothing applies to you** — which is the expected answer for most users,
+and the first thing to check when a module "isn't working" (usually: you don't
+hold the role its rule is scoped to).
+
 You now have a live, empty pipeline. Add transformation modules next.
 
-## Add a transformation
+### Or just run the demo
+
+If you would rather see the whole thing working than read about it,
+**[`demo/`](demo/)** is a guided, runnable suite — every statement verified end
+to end against Exasol 2026.1. It runs entirely at **session scope**, so it never
+touches the system-wide setting.
+
+- **~5 min** — [`demo/video_5min.sql`](demo/video_5min.sql): a 29-statement,
+  six-beat cut. One session, no tab switching.
+- **~20 min** — the technical sell: [`01`](demo/01_administration.sql) (activate
+  + a live fail-open proof), [`02`](demo/02_module_from_github.sql) (install a
+  published module), [`05`](demo/05_own_preprocessor.sql) (write your own in ~20
+  lines).
+- **~45 min** — the full evaluation, all seven files, for a DBA or security
+  reviewer who will ask hard questions.
+
+See [`demo/README.md`](demo/README.md) for the file-by-file map, the throwaway
+Docker recipe, and the prerequisites for the BucketFS and ConfD files.
+
+## Bring your own preprocessor
+
+**This is what the framework is for.** Exasol gives you one
+`sql_preprocessor_script` slot; the framework owns it and multiplexes it, so
+*your* SQL transformation becomes a **module** you register against that slot
+instead of a monolith you have to own and defend. Everything below is about
+getting your own code into that pipeline.
 
 A transformation is a Lua **module** (one phase, one job) bound to a **scope** (a
 role, a user, optionally a client pattern) by a **rule** in `PREPROC.CONFIG`.
 After any rule change you run a **refresh** to rebuild the per-user resolution
 (the SQL sugar in [Administration](#administration) does it for you).
 
-### Run the bundled example
+### The whole contract, in one file
 
-[`examples/demo_ping.sql`](examples/demo_ping.sql) is an example module — one self-contained, self-registering module that creates its script
-and ends with the rule that registers it. Grab it from the repo and run it after
-`release.sql`: it deploys `PREPROC_RT.DEMO_PING_V1` and registers an EXPAND rule.
-Then, for any user holding the rule's role:
+A module is a Lua function that takes the statement text and returns either a
+replacement string or `nil`. That is the entire interface:
+
+```lua
+function my_guard(sqltext)
+    if string.find(string.upper(sqltext), "^%s*DROP%s+TABLE") then
+        return "SELECT 'blocked by my_guard' AS refused"
+    end
+    return nil          -- not my statement: keep scanning
+end
+```
+
+Deploy it and register it — two statements, no toolchain, no manifest:
 
 ```sql
-PING;
-```
-returns
-```
-PONG
+--/
+CREATE OR REPLACE LUA SCRIPT PREPROC_RT.MY_GUARD_V1 AS
+function my_guard(sqltext)
+    ...
+end
+/
+
+PREPROC ADD RULE FOR ROLE DBA PHASE EXPAND
+    SCRIPT PREPROC_RT.MY_GUARD_V1 FUNCTION my_guard;
 ```
 
-The rule is scoped to a role — a user must **hold** that role for it to apply;
-edit the trailing `RULE_ADD` call to change the scope. 
+Now `DROP TABLE …` returns `blocked by my_guard` for every user holding `DBA`.
+That is the complete loop: **write a function → deploy it → add a rule.**
 
-### Install a module from the community library
+[`examples/demo_ping.sql`](examples/demo_ping.sql) is the same thing as a
+copyable file — one self-contained, self-registering module that creates its
+script and ends with the rule that registers it. Run it after `release.sql` and
+`PING;` returns `PONG`. [`demo/05_own_preprocessor.sql`](demo/05_own_preprocessor.sql)
+walks the whole loop in ~20 lines with commentary.
 
-Published modules live in
+Note the rule is scoped to a **role**, and a user must *hold* that role for it to
+apply — scope it to `USER <name>` while you are still testing.
+
+### Then package it, when you're ready
+
+The two statements above are enough forever, for a module you deploy by hand. You
+add a **manifest** (`module.toml`) when you want the module to be *distributable*
+— installable by name, integrity-checked, version-tracked, and reclaimable as a
+unit:
+
+| You want | You need |
+|---|---|
+| A transform running on your own cluster | the two statements above — nothing else |
+| The same transform installable by name, on many clusters | `+ module.toml`, served from a registry index |
+| More than one object (a UDF, a table, a schema) as one unit | `+ an [[objects]] inventory` |
+| Others to install it from the public catalog | `+ a PR to preprocessor-library` |
+
+Read the contract in
+**[docs/module-authoring.md](docs/module-authoring.md)** — the `fn(text)->nil|string`
+signature per phase, the fail-open rules, the "no defensive `pcall`" rule, the
+`module.toml` schema, and the `_V<N>` versioning discipline. Two traps worth
+knowing before you write a line: functions must be **plain top-level globals**
+(a `local` function is invisible to `import`), and `string.gsub` returns **two**
+values — never `return` it directly.
+
+### Host your own module registry
+
+A packaged module does not have to go anywhere near the public library. A
+**registry is just a `registry/index.json` plus the artifacts it points at**, so
+your own internal catalog — private modules, your own versioning, your own
+review process — is a first-class path, not a workaround:
+
+```sql
+-- your own index, served over HTTPS
+PREPROC CATALOG MODULES FROM 'https://git.internal/preproc-modules/raw/v2/registry/index.json';
+PREPROC INSTALL MODULE my_guard
+  FROM 'https://git.internal/preproc-modules/raw/v2/registry/index.json' FOR ROLE DBA;
+
+-- or staged in BucketFS, for a cluster with no egress
+PREPROC INSTALL MODULE my_guard FROM 'bucketfs:MY_BFS/own-lib-2.0.0.tar.gz' FOR ROLE DBA;
+```
+
+Your index declares its own `library_version`, and each install records it
+alongside the effective source URL in `PREPROC_RT.INSTALLED_MODULES` — so your
+internal releases are as auditable as the public library's. The public library is
+simply the default source when you omit `FROM`; nothing about the mechanism is
+specific to it.
+
+For the index format and the tarball layout, see
+[docs/operations.md § Module management](docs/operations.md#module-management)
+and the library's
+[CONTRIBUTING.md](https://github.com/exasol-labs/preprocessor-library/blob/main/CONTRIBUTING.md),
+which documents the same manifest your own registry uses.
+
+### Or start from a ready-made module
+
+If someone has already solved your problem, take theirs.
 [`exasol-labs/preprocessor-library`](https://github.com/exasol-labs/preprocessor-library)
-— an open-source library of preprocessors for you to use. On an internet-connected cluster you install one straight
-from SQL — no CLI, no toolchain. Browse, then install:
+is an open-source catalog of ready-to-use preprocessors — and a useful reference
+for how a packaged module is put together. On an internet-connected cluster you
+install one straight from SQL — no CLI, no toolchain. Browse, then install:
 
 ```sql
 PREPROC CATALOG MODULES;                                   -- list the library (newest release)
@@ -144,15 +260,31 @@ PREPROC INSTALL MODULE cast_shorthand FOR ROLE ANALYSTS;   -- deploy + register 
 ```
 
 With no source given, the framework resolves the public library at its `latest`
-release over HTTPS and records the concrete release it installed. You can also specify a different URL so you can have your own preprocessor library. Supply an
-explicit source to pin a version, use a fork, or install from BucketFS on an
-air-gapped cluster:
+release over HTTPS and records the concrete release it installed. Supply an
+explicit source to pin a version, point at
+[your own registry](#host-your-own-module-registry), use a fork, or install from
+BucketFS on an air-gapped cluster:
 
 ```sql
 PREPROC INSTALL MODULE cast_shorthand
-  FROM 'https://raw.githubusercontent.com/exasol-labs/preprocessor-library/v0.2.0/registry/index.json'
+  FROM 'https://raw.githubusercontent.com/exasol-labs/preprocessor-library/v0.3.0/registry/index.json'
   FOR ROLE ANALYSTS;
 ```
+
+An install is DDL run under `PREPROC_ADMIN`, and a module may ship more than one
+object — the library's `confd_control` installs 15, turning cluster
+administration into `CONTROL DATABASE …` / `CONTROL BUCKETFS …` SQL. So
+`PREPROC CATALOG MODULES` shows each module's full declared object inventory
+before you install, and an install is refused if the artifact disagrees with what
+its manifest declared. Afterwards, `PREPROC_RT.INSTALLED_MODULES` records the
+version, the resolved library release, the effective source URL, the verified
+sha256, and the deployed inventory.
+
+> **`min_framework` is advisory — nothing enforces it.** Verified on 2026.1: a
+> module declaring `min_framework = "99.0.0"` installs cleanly on framework
+> 0.7.1 and reports `installed`. It fails later, at use, not at install. Check a
+> module's `min_framework` against your own framework version yourself —
+> `confd_control` needs **0.7.0+**.
 
 Prefer a toolchain? The `preproc module` CLI does the same from your machine
 (`uv run preproc module add cast_shorthand`) and adds `list` / `search` /
@@ -161,22 +293,20 @@ air-gapped installs. Full reference:
 [docs/operations.md § Module management](docs/operations.md#module-management)
 and [§ In-database module install](docs/operations.md#in-database-module-install).
 
-### Write your own module
+### Sharing what you built
 
-To hook your own syntax transform into Exasol's single preprocessor slot you
-write a **module** — you never fight for the slot directly (see
-[Positioning](#what-it-solves) above). The contract is small: a Lua
-`fn(text) -> nil | string` function, a `module.toml` manifest, and `_V<N>`
-versioning discipline.
-
-- **[docs/module-authoring.md](docs/module-authoring.md)** — the module contract SDK: the function contract, the manifest schema, and versioning.
-- **[examples/demo_ping.sql](examples/demo_ping.sql)** — a complete, minimal, self-registering module to copy from.
-- **[Publish it to the library](https://github.com/exasol-labs/preprocessor-library/blob/main/CONTRIBUTING.md)** — the library's CONTRIBUTING guide walks through adding your module (or registering an external repo) so others can `PREPROC INSTALL MODULE` it.
+If your module is generally useful, publishing it means others can
+`PREPROC INSTALL MODULE` it by name. The library's
+[CONTRIBUTING.md](https://github.com/exasol-labs/preprocessor-library/blob/main/CONTRIBUTING.md)
+walks through both routes: a library-deployed PR (your artifact lives there), or a
+curated `registry/external/` entry (your artifact stays in your own repo and the
+library carries only a pointer). Keeping it internal is equally valid — see
+[Host your own module registry](#host-your-own-module-registry).
 
 ## Administration
 
 Everything you configure at runtime is done from SQL. When the preprocessor is
-active and you hold the `PREPROC_ADMIN` role, the `PREPROC` command sugar manages rules,
+active and you hold `PREPROC_ADMIN` **or `DBA`**, the `PREPROC` command sugar manages rules,
 modules, refresh, status, and mode inline — no `EXECUTE SCRIPT` boilerplate.
 Each command maps to exactly one admin script, so the scripted form
 (`EXECUTE SCRIPT PREPROC.RULE_ADD(...)`) works identically if you prefer it.
@@ -184,13 +314,16 @@ Each command maps to exactly one admin script, so the scripted form
 ### Rules
 
 A rule binds a module (a phase plus a script and its entry function) to a
-**scope**: a `ROLE` or a `USER`, optionally narrowed by a client pattern. A user
-receives a rule when they hold that role (or are that user); the three phases
-always run in the order TRANSLATE → EXPAND → REWRITE.
+**scope**: a `ROLE` or a `USER`, optionally narrowed by a `CLIENT '<pattern>'`
+clause matching the connecting application. A user receives a rule when they
+hold that role (or are that user); the three phases always run in the order
+TRANSLATE → EXPAND → REWRITE.
 
 ```sql
 PREPROC ADD RULE FOR ROLE ANALYSTS PHASE EXPAND SCRIPT PREPROC_RT.MY_MODULE_V1 FUNCTION expand;
 PREPROC ADD RULE FOR USER BOB PHASE TRANSLATE SCRIPT PREPROC_RT.MY_XLATE_V1 FUNCTION translate;
+PREPROC ADD RULE FOR ROLE ANALYSTS PHASE EXPAND SCRIPT PREPROC_RT.MY_MODULE_V1 FUNCTION expand
+    CLIENT 'DbVisualizer';  -- narrow to a client application too (scoping, not security)
 PREPROC LIST RULES;        -- every configured rule and its scope
 PREPROC DISABLE RULE 3;    -- keep the row, stop applying it
 PREPROC ENABLE RULE 3;
@@ -200,7 +333,7 @@ PREPROC DROP RULE 3;       -- remove it
 ### Modules
 
 Install and browse community-library modules from the same surface (see
-[Install a module from the community library](#install-a-module-from-the-community-library)):
+[Or start from a ready-made module](#or-start-from-a-ready-made-module)):
 
 ```sql
 PREPROC CATALOG MODULES;                                   -- browse the library
@@ -234,11 +367,13 @@ reference are in
 
 ## Documentation
 
+- [demo/](demo/) — **start here to see it work**: a guided, runnable demo suite verified against Exasol 2026.1, with 5-minute / 20-minute / 45-minute tracks
 - [docs/how-it-works.md](docs/how-it-works.md) — pipeline architecture, phase semantics, dispatch rules, and module authoring
 - [docs/operations.md](docs/operations.md) — install, activate, add rules, refresh, status, modes, module management, and troubleshooting
+- [docs/air-gap-runbook.md](docs/air-gap-runbook.md) — **no outbound internet?** the whole deploy-and-install procedure in one ordered page, verified on 2026.1
 - [docs/module-authoring.md](docs/module-authoring.md) — the module contract SDK: the `fn(text)->nil|string` function contract, the `module.toml` manifest schema, and versioning discipline
-- [examples/](examples/) — example preprocessor to show how to use the framework
-- [preprocessor-library](https://github.com/exasol-labs/preprocessor-library) — the community module library; browse or install with `preproc module add`
+- [examples/](examples/) — single-file example preprocessors to copy from
+- [preprocessor-library](https://github.com/exasol-labs/preprocessor-library) — the community module library; install with `PREPROC INSTALL MODULE` or `preproc module add`
 
 ## Development
 

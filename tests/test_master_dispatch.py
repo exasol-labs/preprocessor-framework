@@ -47,11 +47,8 @@ All seeding/teardown is funnelled through the ``dispatch_env`` fixture so no tes
 body can leak a rule or leave the preprocessor active.
 """
 
-import os
-import ssl
-
-import pyexasol
 import pytest
+from _dbfixtures import connect_with_client_name
 
 _ACTIVATE = "ALTER SESSION SET sql_preprocessor_script = PREPROC_RT.MASTER"
 _DEACTIVATE = "ALTER SESSION SET sql_preprocessor_script = ''"
@@ -481,27 +478,6 @@ def test_demo_ping_nil_for_non_ping(dispatch_env):
 # --- client_pattern literal-substring semantics -----------------------------
 
 
-def _connect_with_client_name(client_name):
-    """Open a pyexasol connection whose reported CLIENT is exactly ``client_name``.
-
-    pyexasol forwards ``client_name`` to the server's ``clientName`` login field,
-    which is what EXA_ALL_SESSIONS.CLIENT exposes — so this is the only handle for
-    making MASTER's ``current_client`` lookup return a controlled string. Reuses
-    the same env-configured DSN/credentials as the suite (hence the same
-    CURRENT_USER, so RESOLUTION rules seeded under that user apply here too).
-    """
-    kwargs = {
-        "dsn": os.environ["EXASOL_DSN"],
-        "user": os.environ["EXASOL_USER"],
-        "password": os.environ["EXASOL_PASSWORD"],
-        "client_name": client_name,
-    }
-    tls_verify = os.environ.get("EXASOL_TLS_VERIFY", "").lower()
-    if tls_verify in ("0", "false"):
-        kwargs["websocket_sslopt"] = {"cert_reqs": ssl.CERT_NONE}
-    return pyexasol.connect(**kwargs)
-
-
 @pytest.mark.integration
 def test_client_pattern_literal_substring(dispatch_env):
     """client_pattern matches as a literal substring, never as a Lua pattern.
@@ -528,14 +504,14 @@ def test_client_pattern_literal_substring(dispatch_env):
 
     # Negative: the dot is literal, so a client that only matches the Lua pattern
     # must be rejected and the sentinel must pass through untagged.
-    non_match_conn = _connect_with_client_name("EXAXClient")
+    non_match_conn = connect_with_client_name("EXAXClient")
     try:
         assert _probe(non_match_conn) == _SEED
     finally:
         non_match_conn.close()
 
     # Positive: the literal substring "EXA.Client" is present, so the rule fires.
-    match_conn = _connect_with_client_name("v8 EXA.Client 1.0")
+    match_conn = connect_with_client_name("v8 EXA.Client 1.0")
     try:
         assert _probe(match_conn) == f"{_SEED}|M"
     finally:

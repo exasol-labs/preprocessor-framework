@@ -120,7 +120,8 @@ def _script_statements() -> dict[str, str]:
         "STATUS": f"CREATE OR REPLACE LUA SCRIPT PREPROC.STATUS() RETURNS TABLE AS\n"
         f"{_read_source(_STATUS_LUA_PATH, 'status.lua')}",
         "RULE_ADD": f"CREATE OR REPLACE LUA SCRIPT PREPROC.RULE_ADD("
-        f"scope_type, scope_value, phase, script_name, function_name, norefresh) "
+        f"scope_type, scope_value, phase, script_name, function_name, client_pattern, "
+        f"norefresh) "
         f"RETURNS TABLE AS\n{_read_source(_RULE_ADD_LUA_PATH, 'rule_add.lua')}",
         "RULE_DROP": f"CREATE OR REPLACE LUA SCRIPT PREPROC.RULE_DROP(rule_id, norefresh) "
         f"RETURNS TABLE AS\n{_read_source(_RULE_DROP_LUA_PATH, 'rule_drop.lua')}",

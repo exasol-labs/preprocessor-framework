@@ -12,8 +12,9 @@ A module is three things:
 
 1. A Lua entry function `fn(text) -> nil|string`, living in a versioned Lua
    script.
-2. A registration rule (scope, phase, script, function) added through the
-   existing `PREPROC ADD RULE` / `PREPROC.RULE_ADD` surface — see
+2. A registration rule (scope, phase, script, function, optionally a client
+   pattern) added through the existing `PREPROC ADD RULE [CLIENT '<pattern>']`
+   / `PREPROC.RULE_ADD` surface — see
    [Adding a rule](operations.md#adding-a-rule).
 3. A `module.toml` manifest describing the artifact and how it is deployed.
 
@@ -145,6 +146,33 @@ it is not restricted to `PREPROC_RT`/`PREPROC`. Installing a
 inventory is declared before install and surfaced by
 `PREPROC.MODULE_CATALOG`, so an operator sees exactly which objects an
 install would create before running it.
+
+### Object types an artifact may create
+
+The artifact parser derives an object from each statement. It recognises
+**scripts** as `CREATE [OR REPLACE] [<language>] [SCALAR|SET] SCRIPT <name>`,
+where `<language>` is **any identifier** rather than a fixed list — deliberately,
+so a custom Script Language Container registered under an installation-defined
+alias (e.g. `PYTHON3_TE`) is a valid companion object. Hence `LUA SCRIPT`,
+`PYTHON3 SCALAR SCRIPT`, `PYTHON3 SET SCRIPT`, and `PYTHON3_TE SCALAR SCRIPT` are
+all declarable.
+
+Alongside scripts, these non-script types are recognised:
+
+| Type | Name form |
+|---|---|
+| `TABLE`, `VIEW`, `FUNCTION` | schema-qualified |
+| `SCHEMA`, `VIRTUAL SCHEMA`, `CONNECTION` | unqualified — these are not schema-scoped objects |
+
+So a module that needs its own state table, its own schema, or a view over
+something ships them in the same artifact and declares them in `[[objects]]`.
+Verified end to end on 2026.1: a two-object artifact carrying
+`CREATE TABLE … MY_GUARD_AUDIT_V1` followed by
+`CREATE OR REPLACE LUA SCRIPT … MY_GUARD_V1` cataloged as `OBJECT_COUNT = 2`,
+installed both objects, and recorded both in provenance.
+
+`CREATE OR REPLACE`, `CREATE FORCE`, and `CREATE … IF NOT EXISTS` are all
+accepted; those clauses are skipped when deriving the object name.
 
 ## Standard layout
 
@@ -294,9 +322,11 @@ declared object:
 - **`library-deployed`** — the module ships its whole body — every object
   its artifact creates, not only the entry script — in the one `.sql`
   artifact. The manifest MUST declare `sha256` (the hex digest of the whole
-  artifact's bytes, unaffected by how many statements it carries) so the
-  operator's CLI can verify integrity before deploying — the database itself
-  never fetches or verifies anything; the CLI machine is the trust boundary.
+  artifact's bytes, unaffected by how many statements it carries) so whichever
+  side installs can verify integrity before deploying. Both installers verify
+  it: the `preproc module` CLI on the operator machine, and — on the
+  in-database path — the admin-only resolver UDF, which refuses to hand the
+  artifact to `MODULE_INSTALL` on a digest mismatch, so nothing is written.
   Before this contract generalised to a composite artifact, a subsystem
   module with a UDF or a table was silently forced into `self-deployed`,
   where the library could only carry a pointer and never actually deliver
@@ -363,8 +393,24 @@ scenario.
 
 ## Air-gap posture
 
-The manifest carries everything the operator's CLI machine needs to fetch,
-verify, and deploy or register a module. The database itself never fetches
-anything over the network — it only ever receives SQL statements issued by
-the CLI (or hand-carried via an offline bundle). This mirrors the framework's
-own air-gap invariant for `release.sql`.
+The manifest carries everything an installer needs to fetch, verify, and deploy
+or register a module — and it is the same manifest on both install paths, so an
+author writes one module that works for either.
+
+Where the fetching happens differs, and matters for an air-gapped cluster:
+
+- **The `preproc module` CLI** — the database never reaches the network at all.
+  It only receives SQL statements issued by the CLI, or hand-carried in an
+  offline `bundle`. This mirrors the framework's own air-gap invariant for
+  `release.sql`.
+- **The in-database path** (`PREPROC.MODULE_INSTALL`) — the database *does* do
+  the reading, through an admin-only resolver UDF. A `bucketfs:` source is read
+  off the cluster-local mount with **no network egress**, which is what keeps
+  this path air-gap-safe. An `https:` source is the one case that leaves the
+  cluster, and it happens only when an operator supplies an `https:` source —
+  on a no-egress cluster it simply fails the fetch and installs nothing.
+
+Either way the artifact's `sha256` is verified before any object is created, and
+a mismatch aborts before the first write. As a module author you do not need to
+care which path installs you; you need only ensure the declared `sha256` and
+`[[objects]]` inventory are correct, since both are checked on both paths.

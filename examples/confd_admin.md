@@ -34,8 +34,8 @@ result.
    `PREPROC.REFRESH` walks, so the shipped `ROLE DBA` rules will not resolve to
    `SYS`. To drive the commands as `SYS`, register a `USER`-scoped rule instead:
    ```sql
-   EXECUTE SCRIPT PREPROC.RULE_ADD('USER','SYS','EXPAND','PREPROC_RT.CONTROL_DATABASE_V1','expand', NULL);
-   EXECUTE SCRIPT PREPROC.RULE_ADD('USER','SYS','EXPAND','PREPROC_RT.CONTROL_BUCKETFS_V1','expand', NULL);
+   EXECUTE SCRIPT PREPROC.RULE_ADD('USER','SYS','EXPAND','PREPROC_RT.CONTROL_DATABASE_V1','expand', NULL, NULL);
+   EXECUTE SCRIPT PREPROC.RULE_ADD('USER','SYS','EXPAND','PREPROC_RT.CONTROL_BUCKETFS_V1','expand', NULL, NULL);
    ```
 5. Activate the preprocessor for your session:
    ```sql

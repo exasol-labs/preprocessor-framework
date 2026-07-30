@@ -2,12 +2,19 @@
 -- REFRESH_CORE shared resolution rebuild  (PREPROC.REFRESH_CORE)
 -- =============================================================================
 -- Role
---   The single source of truth for the resolution rebuild. Materialises the
---   scoped rules in PREPROC.CONFIG (ROLE- and USER-scoped) into the flat,
---   per-user PREPROC.RESOLUTION table that PREPROC_RT.MY_PIPELINE reads, then
---   stamps PREPROC.SETTINGS and commits once. Transitive nested-role expansion
---   is performed in native Exasol SQL (CONNECT BY); this module only
---   orchestrates: it issues the SQL, owns the transaction, and commits.
+--   Shared logic for PREPROC.REFRESH and the mutating admin scripts. Two
+--   functions live here, both exported, each called from more than one script:
+--
+--     rebuild()                    the resolution rebuild (the bulk of this file)
+--     validate_client_pattern(cp)  the client_pattern write-path guard
+--
+--   rebuild() is the single source of truth for the resolution rebuild. It
+--   materialises the scoped rules in PREPROC.CONFIG (ROLE- and USER-scoped)
+--   into the flat, per-user PREPROC.RESOLUTION table that PREPROC_RT.MY_PIPELINE
+--   reads, then stamps PREPROC.SETTINGS and commits once. Transitive
+--   nested-role expansion is performed in native Exasol SQL (CONNECT BY); this
+--   module only orchestrates: it issues the SQL, owns the transaction, and
+--   commits.
 --
 --   Factored out of refresh.lua so that PREPROC.REFRESH and every mutating
 --   admin script (RULE_ADD/DROP/ENABLE/DISABLE, SET_MODE) run the IDENTICAL
@@ -15,18 +22,31 @@
 --   PREPROC.REFRESH (fragile under Exasol). Callers import this module and
 --   invoke rebuild(); they own their own result reporting (exit()).
 --
+--   validate_client_pattern() is hosted here for the same anti-duplication
+--   reason, not because it has anything to do with the rebuild: RULE_ADD and
+--   RULE_ENSURE both write PREPROC.CONFIG.client_pattern and must reject exactly
+--   the same patterns, both already import this module, and a separate deployed
+--   validator script would add an object to the locked PREPROC schema (plus
+--   resources/install/bundle/release wiring) for a ten-line function. It is pure
+--   input validation, reads no table and writes nothing, so it is safe to call
+--   before any DML -- which is exactly where both writers call it.
+--
 -- Import-loading contract
 --   This script is deployed as a plain importable LUA SCRIPT (no RETURNS TABLE).
---   A caller loads it and runs the rebuild via:
+--   A caller loads it once at the TOP of its body and then uses either export:
 --
 --     import("PREPROC.REFRESH_CORE", "rc")
---     local rows_inserted = rc.rebuild()
+--     rc.validate_client_pattern(client_pattern)   -- before any DML
+--     local rows_inserted = rc.rebuild()           -- after the DML
 --
 --   import() executes this body in the CALLER'S context, so the Exasol globals
---   pquery / error / null are bound. The exported function MUST be declared at
---   top level with plain global function syntax (function rebuild() ... end) so
---   that import() finds it in the module table; a local function would be
---   invisible to the caller.
+--   pquery / error / null are bound. It binds the module's functions and
+--   performs no work of its own, so importing at the top -- ahead of validation
+--   rather than at the point of the rebuild -- costs one module load and changes
+--   no behaviour, including on a NOREFRESH path that never calls rebuild().
+--   EVERY exported function MUST be declared at top level with plain global
+--   function syntax (function rebuild() ... end) so that import() finds it in
+--   the module table; a local function would be invisible to the caller.
 --
 -- Privilege model (invoker rights)
 --   Exasol Lua scripts run with INVOKER rights. Reading EXA_DBA_ROLE_PRIVS /
@@ -125,9 +145,89 @@
 --   differs per caller (REFRESH returns rows_inserted + last_refresh; an admin
 --   script returns its own outcome). On any failure rebuild() raises via error()
 --   so the caller's transaction is left uncommitted up to that point.
+--
+--   validate_client_pattern(cp) returns nothing. It either falls through (the
+--   pattern is acceptable) or raises via error() naming the cause. There is
+--   deliberately no boolean return and no out-parameter, so a caller cannot
+--   accidentally ignore a rejection by dropping the result.
 -- =============================================================================
 
--- luacheck: globals rebuild
+-- luacheck: globals rebuild validate_client_pattern
+
+-- =============================================================================
+-- Shared write-path validation (no table access; safe before any DML)
+-- =============================================================================
+
+-- The declared width of PREPROC.CONFIG.client_pattern (sql/install/20_tables.sql)
+-- and of PREPROC.RESOLUTION.client_pattern, which the rebuild copies it into.
+local CLIENT_PATTERN_MAX_LENGTH = 256
+
+-- validate_client_pattern(cp) -> nothing; raises via error() on a bad pattern.
+--   The single guard for every path that writes PREPROC.CONFIG.client_pattern
+--   (RULE_ADD and RULE_ENSURE), so no supported surface can persist a pattern
+--   another surface would refuse.
+--
+--   Accepted domain
+--     NULL -- meaning "apply to all clients" -- and any pattern that has at
+--     least one non-whitespace character and fits the column. A SQL NULL
+--     parameter reaches a Lua script either as Lua nil or as the Exasol `null`
+--     sentinel depending on how it was bound, so BOTH are accepted.
+--
+--   Why an all-whitespace pattern is rejected rather than coerced
+--     Dispatch matches the pattern as a literal substring, and
+--     string.find(client, "", 1, true) returns 1 -- an empty pattern applies to
+--     EVERY client, exactly what NULL already means, while reading in RULE_LIST
+--     output as a restriction. A rule whose displayed scope contradicts its
+--     behaviour is the failure this rejects; the error therefore names NULL as
+--     the way to say "all clients". (Exasol does not distinguish '' from NULL,
+--     so through SQL an empty literal is already NULL by the time it arrives and
+--     the empty case is unreachable; the check still covers it because an in-DB
+--     Lua caller can pass a genuine "" and because whitespace-only -- '   ',
+--     which Exasol does NOT collapse -- is the same mistake with the same
+--     consequence.)
+--
+--   Why an over-length pattern is rejected rather than truncated
+--     Clipping a SUBSTRING pattern WIDENS the set of clients it matches:
+--     'DbVisualizer-Prod' truncated to the column width could fire for every
+--     DbVisualizer session. Truncation is never the safe default here because it
+--     silently grants the transformation to more sessions than were asked for.
+--
+--   The length is measured in bytes (Lua 5.1 has no character-length function)
+--   against a column width declared in characters. For a multi-byte pattern that
+--   is conservative -- it can reject a value the column would have accepted, but
+--   it can never accept one the column would truncate -- and the column's own
+--   width check remains the backstop. Real client strings ('DbVisualizer 24.1.5',
+--   'DBeaver 23.3.0', 'PyExasol 2.2.1', 'EXAplus') are ASCII, where the two
+--   measures coincide.
+--
+--   cp is normalised through tostring() for the checks only; the caller binds
+--   the ORIGINAL value, so nothing is case-folded, trimmed or rewritten. The
+--   conversion exists so a non-string argument yields a validation error naming
+--   the cause instead of a raw Lua "attempt to get length of a number" error.
+function validate_client_pattern(cp)
+    if cp == nil or cp == null then
+        return
+    end
+    local pattern = tostring(cp)
+    if string.find(pattern, "^%s*$") ~= nil then
+        error(
+            "PREPROC.REFRESH_CORE: invalid client_pattern: an empty or"
+                .. " whitespace-only pattern matches EVERY client; pass NULL to"
+                .. " apply the rule to all clients"
+        )
+    end
+    if #pattern > CLIENT_PATTERN_MAX_LENGTH then
+        error(
+            "PREPROC.REFRESH_CORE: invalid client_pattern: length "
+                .. tostring(#pattern)
+                .. " exceeds the "
+                .. tostring(CLIENT_PATTERN_MAX_LENGTH)
+                .. "-character PREPROC.CONFIG.client_pattern column width;"
+                .. " rejected rather than truncated, because a truncated"
+                .. " substring pattern matches MORE clients than intended"
+        )
+    end
+end
 
 -- State fingerprint over the resolution inputs (the user universe and the full
 -- role-grant graph). Shared verbatim with PREPROC.STATUS so writer and reader

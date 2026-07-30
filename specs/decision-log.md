@@ -1664,3 +1664,117 @@ All-or-nothing is BUILT from four mechanisms rather than delegated to a transact
 ### Consequences
 
 The failure mode of a composite install is a well-defined one: nothing written at all (the common case, caught by pre-flight), or objects created and then dropped, with no rule and no provenance row — inert either way. Correctness depends on the inventory being accurate (ADR-055) and on the CLI and in-DB splitters agreeing, since a split divergence would break the byte-identical end-state parity `module/db-install` guarantees.
+
+---
+
+## ADR-060: RULE_ADD takes client_pattern, rather than the sugar switching to RULE_ENSURE
+
+**Date:** 2026-07-30
+**Plan:** `add-client-scoped-rules`
+**Status:** Accepted
+
+### Context
+
+`PREPROC.CONFIG.client_pattern` was honoured end-to-end by dispatch, resolution, and profile codegen, but no operator-facing surface could SET it: `PREPROC.RULE_ADD`'s parameter list had no such slot, so the `PREPROC ADD RULE` sugar had no clause for it, and the only way to create a client-scoped rule was `PREPROC.RULE_ENSURE`, an upsert built for the module installer's idempotent needs. Exasol Lua scripts have no optional parameters — `EXECUTE SCRIPT` enforces an exact argument count — so any fix that touches `RULE_ADD`'s signature is unavoidably a breaking change for every existing caller.
+
+### Decision
+
+Add `client_pattern` to `PREPROC.RULE_ADD` between `function_name` and `norefresh`, making its parameter list identical to `RULE_ENSURE`'s, and accept the breaking signature change.
+
+### Options Considered
+
+| Option | Verdict |
+|--------|---------|
+| Add `client_pattern` to `RULE_ADD`, accepting a breaking signature change | Chosen — a stale six-argument call raises "got 6 expected 7" immediately and visibly, at the call, with no partial write; loud beats silent |
+| Leave `RULE_ADD` alone and have the sugar emit `RULE_ENSURE` when a `CLIENT` clause is present | Rejected — makes one verb mean two things: `RULE_ADD` allocates and returns a NEW `rule_id` while `RULE_ENSURE` upserts and returns an EXISTING one on a match, so whether the operator got a new rule or silently adopted an existing one would depend on an unrelated clause |
+
+### Consequences
+
+`RULE_ADD` and `RULE_ENSURE` now differ in exactly one dimension — insert vs upsert — which is the distinction they exist to draw. Every in-repo `RULE_ADD` call site needed the extra argument; the migration was enumerated and completed as part of this plan.
+
+---
+
+## ADR-061: The CLIENT operand is a quoted literal, exempt from identifier folding
+
+**Date:** 2026-07-30
+**Plan:** `add-client-scoped-rules`
+**Status:** Accepted
+
+### Context
+
+The `PREPROC ADD RULE` sugar needed a clause to carry a `client_pattern` value. Every other captured value in the grammar (`PHASE`, `SCRIPT`, role/user) follows Exasol identifier folding — unquoted folds to UPPER CASE. But `client_pattern` is matched as a literal substring against `EXA_ALL_SESSIONS.CLIENT`, a self-reported application name measured on Exasol 2026.1 as `DbVisualizer 24.1.5`, `DBeaver 23.3.0`, `PyExasol 2.2.1`, `EXAplus` — mixed-case strings that can contain spaces.
+
+### Decision
+
+`CLIENT` takes a single-quoted literal carried through verbatim: no folding, no trimming, with the quoted span kept as one token so embedded whitespace survives. The keyword itself is matched case-insensitively like every other keyword. This is the second capture position after `FUNCTION` exempt from folding.
+
+### Options Considered
+
+| Option | Verdict |
+|--------|---------|
+| Single-quoted literal, exempt from folding | Chosen — reuses the tokenizer behaviour already proven by `INSTALL MODULE`'s `FROM '<source>'`, and visually marks the value as an opaque external string |
+| Fold to UPPER like every other captured value | Rejected — `DBVISUALIZER` is not a substring of `DbVisualizer 24.1.5`, so a folded pattern matches nothing, SILENTLY: the rule resolves, dispatch evaluates it, and `RULE_LIST` shows a correct-looking rule that never fires |
+| `WHEN CLIENT '<p>'` | Rejected — an extra token for no parse benefit, and breaks the bare-keyword-plus-operand shape of `PHASE`/`SCRIPT`/`FUNCTION` |
+| `FOR CLIENT '<p>'` | Rejected — `FOR` already introduces the scope, so two `FOR` clauses invite reading the second as another scope rather than a narrowing of the first |
+| An unquoted operand | Rejected — could not carry the spaces real client strings contain |
+
+### Consequences
+
+Silent non-matching is worse than a parse error, because the operator sees a correctly-listed rule that does nothing. `CLIENT` joins `FUNCTION` as the grammar's two folding-exempt positions, recorded in the module's quoting-semantics header.
+
+---
+
+## ADR-062: An empty client_pattern is rejected, and an over-length one is rejected rather than truncated
+
+**Date:** 2026-07-30
+**Plan:** `add-client-scoped-rules`
+**Status:** Accepted
+
+### Context
+
+`client_pattern` is matched with `string.find(client, pattern, 1, true)`, a literal substring match. An empty pattern returns a match position of 1 for every client — identical behaviour to NULL ("all clients") — while an over-length pattern exceeds the `PREPROC.CONFIG.client_pattern` column width of `VARCHAR(256)`.
+
+### Decision
+
+Reject an empty or whitespace-only `client_pattern` with a validation error before any mutation, naming NULL as the way to express "all clients". Reject a pattern longer than the column width; never truncate.
+
+### Options Considered
+
+| Option | Verdict |
+|--------|---------|
+| Reject empty/whitespace-only; reject over-length without truncating | Chosen — this framework's failure-mode instinct consistently prefers a loud error over a silent wrong answer |
+| Silently coerce an empty pattern to NULL, or store it and let it mean "always" | Rejected — produces a rule whose displayed scope contradicts its behaviour |
+| Truncate an over-length pattern to the column width | Rejected — clipping a SUBSTRING pattern WIDENS the matched set, so `'DbVisualizer-Prod'` becomes `'DbVisualizer'` and fires for every DbVisualizer session |
+
+### Consequences
+
+Through SQL, Exasol collapses an empty string literal `''` to NULL in transit (`'' IS NULL` returns YES, verified live), so an empty `client_pattern` can never actually reach the validator from a SQL caller — it arrives at `RULE_ADD` already as the NULL sentinel and is accepted as "all clients". Only the whitespace-only half of this guard is reachable and testable through SQL; the empty-string check remains in the validator as defence-in-depth for an in-DB Lua caller that constructs the argument programmatically. This is why the `PREPROC ADD RULE` sugar separately declines an empty `CLIENT ''` operand rather than carrying it through — otherwise the sugar would silently create an all-clients rule from a command that reads as a restriction.
+
+---
+
+## ADR-063: One shared client_pattern validator, hosted in PREPROC.REFRESH_CORE
+
+**Date:** 2026-07-30
+**Plan:** `add-client-scoped-rules`
+**Status:** Accepted
+
+### Context
+
+Once `RULE_ADD` validates `client_pattern`, `RULE_ENSURE` — which already accepted the parameter with no validation — needed the same checks, or the module-installer path could persist a pattern the operator surface would refuse. Exasol Lua's only cross-script sharing mechanism is `import(name, alias)` against a deployed script; there is no build-time textual include.
+
+### Decision
+
+`validate_client_pattern()` is implemented exactly once, exported from `PREPROC.REFRESH_CORE` alongside `rebuild()`, and called from BOTH `rule_add.lua` and `rule_ensure.lua`. Each script's `import("PREPROC.REFRESH_CORE", "rc")` moves to the top of the file so validation precedes any DML.
+
+### Options Considered
+
+| Option | Verdict |
+|--------|---------|
+| Shared validator hosted in `PREPROC.REFRESH_CORE` | Chosen — `REFRESH_CORE` is the sole existing shared module, both writers already import it, and its header already justifies itself as the place logic goes rather than being duplicated |
+| A new deployed `PREPROC.CONTROL_VALIDATE` script | Rejected — needs entries in `resources.py`, `install.py`, `bundle.py`, and `release.sql`, and creates a new object in the locked `PREPROC` schema for a twelve-line function |
+| Duplicate the validator in both files | Rejected — the divergence hazard this framework consistently refuses |
+| Validate only in `RULE_ADD`, treat `RULE_ENSURE` as a follow-on | Rejected — leaves the module-installer path able to persist `client_pattern = ''` |
+
+### Consequences
+
+`REFRESH_CORE`'s stated role widens from "the resolution rebuild" to "shared logic for `PREPROC.REFRESH` and the mutating admin scripts". Moving the import earlier costs a module load on the `NOREFRESH` path and changes no behaviour, since `import()` binds functions and performs no work of its own.

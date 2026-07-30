@@ -351,7 +351,7 @@ def test_profile_regen_on_mutation(clean_profiles):
     user = _current_user(conn)
 
     conn.execute(
-        "EXECUTE SCRIPT PREPROC.RULE_ADD('USER', {u}, 'REWRITE', {sn}, 'mutate_fn', FALSE)",
+        "EXECUTE SCRIPT PREPROC.RULE_ADD('USER', {u}, 'REWRITE', {sn}, 'mutate_fn', NULL, FALSE)",
         {"u": user, "sn": _REAL_SCRIPT},
     )
 

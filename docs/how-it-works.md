@@ -24,9 +24,13 @@ Owned by the `PREPROC_ADMIN` role. Not accessible to PUBLIC. Holds:
 | `PREPROC.RESOLUTION` | Flattened per-user rules (incl. each chain's `profile_hash`) — rebuilt by `REFRESH`, never edited directly |
 | `PREPROC.SETTINGS` | Mode, self-disable flag, last refresh time, state fingerprint |
 | `PREPROC.PROFILES` | Profile manifest registry (`profile_hash` → `manifest`, `created_at`, `orphaned_at`) driving the retire-then-reclaim lifecycle |
+| `PREPROC.MODULES` | Module provenance — one row per deployed module *version*, incl. the resolved `library_version`, effective `source_url`, verified `sha256`, and the deployed `objects` inventory |
 | `PREPROC.REFRESH_CORE` | Importable Lua module: the atomic rebuild + profile codegen + cleanup |
 | `PREPROC.REFRESH` | DB-side Lua script that rebuilds RESOLUTION |
 | `PREPROC.STATUS` | DB-side Lua script that reports staleness |
+| `PREPROC.MODULE_INSTALL` / `MODULE_CATALOG` | The in-database install orchestrator and its read-only discovery counterpart (see [In-database install path](#in-database-install-path)) |
+| `PREPROC.MODULE_REGISTER` / `MODULE_RETIRE` / `MODULE_RECLAIM` | Provenance upsert, retirement, and the guarded physical `DROP` |
+| `PREPROC.MODULE_RESOLVER_V1` | Python3 UDF: reads a `bucketfs:` or `https:` source, verifies `sha256`. Admin-only — never granted to PUBLIC, so BucketFS and network reach exist only behind the admin surface |
 
 **`PREPROC_RT`** (runtime schema, PUBLIC-accessible)
 
@@ -36,6 +40,7 @@ EXECUTE and SELECT on this schema are granted to PUBLIC. Holds:
 |---|---|
 | `PREPROC_RT.MASTER` | The dispatcher preprocessor script — also the single source for every retirement stub (see [session self-optimization](#session-self-optimization-zero-overhead-paths)) |
 | `PREPROC_RT.MY_PIPELINE` | Definer-rights view: current user's resolved pipeline, plus `mode`, `self_disable_allowed`, and `profile_hash` |
+| `PREPROC_RT.INSTALLED_MODULES` | Definer-rights view over `PREPROC.MODULES`. Same PUBLIC-readable bridge pattern as `MY_PIPELINE` but with **no `CURRENT_USER` filter** — provenance is global, so any user can audit what is installed and where it came from |
 | `PREPROC_RT.P_<hash>` | Generated per-chain profile scripts (one per distinct resolved rule chain); the swap target for convenience-mode sessions |
 | `PREPROC_RT.DEMO_PING_V1` | Demo command module (EXPAND phase) |
 | `PREPROC_RT.DEMO_TRANSLATE_V1` | Demo TRANSLATE module |
@@ -165,6 +170,13 @@ identifier as a **literal substring** (`string.find(client, pattern, 1, true)`).
 It is not a Lua regular expression. A NULL pattern matches all clients. Matching
 happens inside MASTER at dispatch time, per rule, per statement.
 
+An operator sets it through the `PREPROC ADD RULE … CLIENT '<pattern>'` sugar
+clause or the `client_pattern` argument of `PREPROC.RULE_ADD` /
+`PREPROC.RULE_ENSURE`, and observes it via `PREPROC.RULE_LIST`'s
+`CLIENT_PATTERN` column — no direct query against `PREPROC.CONFIG` is needed.
+See [Operations § client_pattern](operations.md#client_pattern-scoping-not-security)
+and [§ Adding a rule](operations.md#adding-a-rule).
+
 ## Fail-open safety contract
 
 MASTER enforces three layers of fail-open behaviour:
@@ -282,10 +294,22 @@ therefore splits along that capability line:
   or a structured failure indicator — it never raises.
 - A Lua **orchestrator**, `PREPROC.MODULE_INSTALL`, drives the resolver and
   then re-homes the CLI's five-step `deploy_module` sequence into the
-  database: `OPEN SCHEMA` / `CREATE OR REPLACE` the versioned script,
-  `RULE_ENSURE` the activation rule, `MODULE_REGISTER` the provenance row,
-  and a final `REFRESH`. `PREPROC.MODULE_CATALOG` drives the same resolver
-  read-only, for discovery, without ever reaching the write steps.
+  database: `OPEN SCHEMA`, then **split the artifact and execute every one of
+  its statements in file order** (a composite module's Lua entry script plus
+  each companion UDF, table, or script it ships), `RULE_ENSURE` the activation
+  rule, `MODULE_REGISTER` the provenance row — recording the full deployed
+  `objects` inventory — and a final `REFRESH`. `PREPROC.MODULE_CATALOG` drives
+  the same resolver read-only, for discovery, without ever reaching the write
+  steps.
+
+  The artifact is no longer restricted to one statement: an earlier version of
+  this path installed the whole artifact through a call that accepted only a
+  single statement, which is the sole reason the module contract once demanded
+  one. The installer now splits on the EXAplus block-marker convention
+  (`--/` … `/` around a body containing semicolons, `;` otherwise) and installs
+  each statement in turn, so a subsystem module can ship its UDFs and tables
+  alongside its entry script instead of being forced into `self-deployed`. See
+  [module-authoring.md § The canonical artifact](module-authoring.md#the-canonical-artifact).
 
 This re-homes the sequence rather than vendoring the CLI's Python package
 into a UDF — the end-state is byte-identical to a CLI `preproc module add`:
@@ -330,9 +354,11 @@ non-admin cannot reach BucketFS or the network through this surface either.
 
 ## Module authoring contract
 
-A module is a Lua script in `PREPROC_RT`. Its exported functions are loaded by
-MASTER via `import(script_name, alias)`, which populates a global table.
-Functions must be declared at top level as plain globals:
+A module's **entry script** is a Lua script — conventionally in `PREPROC_RT`,
+though an artifact may create its objects in any schema the installing admin can
+write, and a subsystem module legitimately owns its own. Its exported functions
+are loaded by MASTER via `import(script_name, alias)`, which populates a global
+table. Functions must be declared at top level as plain globals:
 
 ```lua
 function ping(sqltext)   -- correct: visible in module table
