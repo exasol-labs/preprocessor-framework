@@ -3,14 +3,14 @@
 # Five jobs:
 #   lint           — Python ruff + Lua luacheck (always runs, no database)
 #   unit           — pytest -m "not integration" (always green; no database)
-#   test           — full pytest against exasol/docker-db (continue-on-error)
+#   test           — full pytest against a pinned exasol/docker-db (mandatory)
 #   release        — build release.sql and upload it as a per-run artifact
 #   github-release — on a v* tag, publish a GitHub Release with release.sql
 #
-# The docker-db image (exasol/docker-db:latest) can take 5-10 min to start,
-# so the integration job is marked continue-on-error to avoid blocking PRs while
-# the database bootstraps.  The unit job is the mandatory gate; the integration
-# job is informational until the image is warmed in the environment.
+# The docker-db image is PINNED (see the "Start Exasol docker-db" step for why a
+# floating tag made this gate irreproducible). It can take several minutes to
+# start, which is why the job polls for readiness rather than sleeping.
+# Both the unit job and the integration job are mandatory gates.
 
 name: CI
 
@@ -129,18 +129,31 @@ jobs:
 
       # Start the Exasol database container.
       # --privileged is required by docker-db (uses cgroups internally).
-      # Port 8563 is the default Exasol client port. The image tag tracks the
-      # floating latest tag so the integration suite always runs against the
-      # newest docker-db release rather than a stale pinned version.
+      # Port 8563 is the default Exasol client port.
       #
-      # --shm-size=4g (raised from 2g): a Python3 UDF runs in its own VM that
-      # talks to the engine over shared memory, so /dev/shm is the resource the
-      # resolver's error paths were starving on. At 2g the runner produced
-      # "VM error: Internal error: VM crashed" -- the VM being killed rather
-      # than raising -- for the bucketfs error-path tests, while the same suite
-      # in the same order passes against docker-db locally where the container
-      # is uncapped. Deliberately NOT `-m/--memory`: the container is otherwise
-      # uncapped here, so a limit would reduce headroom rather than add it.
+      # The image is PINNED. It used to track the floating `latest` tag, on the
+      # reasoning that the suite should always meet the newest docker-db release.
+      # That made this mandatory gate irreproducible: the same commit passes or
+      # fails depending on when it runs. It bit us on the location-grammar
+      # change, where `latest` failed the five bucketfs error-path tests with
+      # "VM error: Internal error: VM crashed" (the Python UDF VM dying rather
+      # than raising) while the same suite, in the same order, passed against
+      # 2025.1.12 locally: 479 passed, 44 skipped, 0 failed. Note CI also
+      # skipped 10 MORE tests than that local run, so the two images differ in
+      # capability and not merely in resources.
+      #
+      # Bumping this pin is a deliberate, reviewable step. Do NOT float it back
+      # to `latest` without a plan for what a newer-image failure means: a red
+      # gate on a commit that did not touch the DB is indistinguishable from a
+      # real regression. Tracking the newest release is still worth doing — but
+      # as its own scheduled job that may fail loudly, not as the release gate.
+      #
+      # --shm-size=4g (raised from the previous 2g, kept as headroom): a Python3
+      # UDF runs in its own VM that talks to the engine over shared memory, so
+      # /dev/shm is the resource those VMs draw on. This did NOT fix the crash
+      # above — the pin did — so do not read it as the remedy for it.
+      # Deliberately NOT `-m/--memory`: the container is otherwise uncapped
+      # here, so a limit would reduce headroom rather than add it.
       - name: Start Exasol docker-db
         run: |
           docker run -d \
@@ -148,7 +161,7 @@ jobs:
             --privileged \
             --shm-size=4g \
             -p 8563:8563 \
-            exasol/docker-db:latest
+            exasol/docker-db:2025.1.12
 
       # Poll until the database is ready to accept connections.
       # docker-db can take 5-10 minutes on a cold runner; use a generous timeout.
