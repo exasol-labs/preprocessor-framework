@@ -28,10 +28,10 @@ Watch them in order; demo 2 assumes demo 1 was watched, not run.
 
 > **ConfD is deliberately out of both videos.** It is a large enough topic to need
 > its own. The material is still here as reference:
-> [`07_confd_finale.sql`](07_confd_finale.sql) (the `confd_control` module and
-> cluster administration as SQL) and
 > [`08_guarded_module_schema.sql`](08_guarded_module_schema.sql) (re-homing all 15
-> of its objects into a guarded schema, delegating the surface to a non-DBA role).
+> `confd_control` objects into a guarded schema, delegating the surface to a
+> non-DBA role), and [`examples/confd_admin.md`](../examples/confd_admin.md) for
+> the `CONTROL DATABASE` / `CONTROL BUCKETFS` command reference and its setup.
 
 ## Long-form walkthrough
 
@@ -46,8 +46,7 @@ more depth, more explanation per statement.
 | [`04_users_roles_refresh.sql`](04_users_roles_refresh.sql) | Targeting transformations at roles and users, and the refresh contract. | 2 sessions |
 | [`05_own_preprocessor.sql`](05_own_preprocessor.sql) | Write your own preprocessor in ~20 lines. No manifest, no registry, no toolchain. | — |
 | [`06_secure_schemas.sql`](06_secure_schemas.sql) | Preprocessors outside `PREPROC_RT`, and three independent privilege layers. | 3 sessions |
-| [`07_confd_finale.sql`](07_confd_finale.sql) | Cluster administration as SQL via the composite `confd_control` module. | `CONFD_CONNECTION` |
-| [`08_guarded_module_schema.sql`](08_guarded_module_schema.sql) | All 15 `confd_control` objects in a guarded schema, delegated to a non-DBA role. | 07 + a `sed` step |
+| [`08_guarded_module_schema.sql`](08_guarded_module_schema.sql) | All 15 `confd_control` objects in a guarded schema, delegated to a non-DBA role. | `CONFD_CONNECTION` + a `sed` step |
 | [`99_teardown.sql`](99_teardown.sql) | Removes everything, back to a clean framework install. | — |
 
 ## Assumed starting point
@@ -104,7 +103,7 @@ delimiter: a lone `--/` opens a script body, a lone `/` closes it.
    the native form is read off the cluster-local mount with no egress, which is the
    whole point.
 
-### ConfD setup (files 07 and 08 only)
+### ConfD setup (file 08 only)
 
 `confd_control` needs a ConfD user; the database's own `SYS` password will not work.
 From a container/node shell:

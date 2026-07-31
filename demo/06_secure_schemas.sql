@@ -245,5 +245,5 @@ SELECT NAME, OBJECTS FROM PREPROC_RT.INSTALLED_MODULES ORDER BY NAME;
 --   rights (the query) are three separate controls. All three are ordinary Exasol
 --   privileges, auditable with the dictionary views you already use.
 --
--- NEXT: 07_confd_finale.sql - everything so far, applied to something real.
+-- NEXT: 08_guarded_module_schema.sql - everything so far, applied to something real.
 -- =============================================================================

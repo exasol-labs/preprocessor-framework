@@ -157,6 +157,5 @@ Long-form walkthrough of the same material, for hands-on evaluation:
 [`01_administration.sql`](01_administration.sql) …
 [`06_secure_schemas.sql`](06_secure_schemas.sql), plus
 [`README.md`](README.md). ConfD lives in
-[`07_confd_finale.sql`](07_confd_finale.sql) and
 [`08_guarded_module_schema.sql`](08_guarded_module_schema.sql) — deliberately out
 of both videos.

@@ -22,7 +22,8 @@
 --   and one less thing to get wrong.
 --
 -- PREREQUISITES
---   * Files 01-03 have been run, and `CONFD_CONNECTION` exists (see file 07).
+--   * Files 01-03 have been run, and `CONFD_CONNECTION` exists (see the ConfD
+--     setup section in README.md, and examples/confd_admin.md).
 --   * You have the module artifact `confd_control_v1.sql` - from a library
 --     checkout, or from `uv run preproc module bundle confd_control`.
 --   * ONE shell step first (see section 0 below).

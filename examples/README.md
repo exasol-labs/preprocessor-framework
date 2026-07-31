@@ -70,8 +70,8 @@ PREPROC INSTALL MODULE confd_control FOR ROLE DBA;
 ```
 
 Prefer that for anything other than reading the example. See
-[`demo/07_confd_finale.sql`](../demo/07_confd_finale.sql) for a guided run,
-including the ConfD user setup both versions need.
+[`confd_admin.md`](confd_admin.md) for the command reference and the ConfD user
+setup both versions need.
 
 ## Registration scope
 
