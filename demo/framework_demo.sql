@@ -1,11 +1,3 @@
--- ===========================================================================
--- DEMO 1 of 2 - THE FRAMEWORK
--- Narration, timings and the multi-tab choreography: framework_demo.md
---
--- Creates no schema and no table. Needs a clean `release.sql` install and a
--- DBA/SYS connection. Three extra client tabs, opened where marked.
--- ===========================================================================
-
 
 -- [1] ONE SLOT, AND WHAT THE INSTALL GAVE YOU ------------------ 0:00
 
@@ -234,8 +226,6 @@ WHERE  USER_NAME = 'USER_C';
 
 PREPROC REFRESH;
 
-PREPROC STATUS;
-
 SELECT USER_NAME, SCRIPT_NAME FROM PREPROC.RESOLUTION
 WHERE  USER_NAME = 'USER_C';
 
@@ -272,7 +262,7 @@ DROP SCRIPT PREPROC_RT.DEMO_BROKEN_V1;
 
 PREPROC CATALOG MODULES;
 PREPROC CATALOG MODULES FROM 'https://raw.githubusercontent.com/exasol-labs/preprocessor-library/latest/registry/index.json';
-PREPROC CATALOG MODULES FROM 'bucketfs:bfsdefault/default/preproc-lib-0.3.0.tar.gz';
+PREPROC CATALOG MODULES FROM 'bucketfs:bfsdefault/default/preproc-lib-0.3.1.tar.gz';
 
 -- Install one, and hand it straight to an audience that already exists.
 PREPROC INSTALL MODULE cast_shorthand FOR ROLE DEMO_ANALYST;
