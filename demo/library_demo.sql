@@ -59,12 +59,15 @@ CREATE OR REPLACE CONNECTION PREPROC_BFS
 
 GRANT ACCESS ON CONNECTION PREPROC_BFS TO PREPROC_ADMIN;
 
+-- `default` is already public, so this mount is already visible; a
+-- READ-PROTECTED bucket is what this GRANT actually gates.
+
 -- Same catalog command, one different source string.
-PREPROC CATALOG MODULES FROM 'bucketfs:PREPROC_BFS/preproc-lib-0.3.0.tar.gz';
+PREPROC CATALOG MODULES FROM 'bucketfs:bfsdefault/default/preproc-lib-0.3.0.tar.gz';
 
 -- Same install command, one different source string.
 PREPROC INSTALL MODULE trailing_comma
-    FROM 'bucketfs:PREPROC_BFS/preproc-lib-0.3.0.tar.gz'
+    FROM 'bucketfs:bfsdefault/default/preproc-lib-0.3.0.tar.gz'
     FOR ROLE DBA;
 
 -- A trailing comma before FROM: a syntax error everywhere, and the single most

@@ -23,9 +23,13 @@
 -- source_url + library_version are the audit anchor for an install resolved
 -- through a mutable `latest` source: source_url records the effective source the
 -- operator actually fetched from (e.g. a `.../latest/...` raw URL, a pinned
--- `vX.Y.Z` URL, or a `bucketfs:` path), and library_version records the concrete
--- library release the fetched index self-declared — so a `latest` install is
--- auditable back to a fixed release even though the URL's tag keeps moving.
+-- `vX.Y.Z` URL, or a `bucketfs:<service>/<bucket>/<path>` location), and
+-- library_version records the concrete library release the fetched index
+-- self-declared — so a `latest` install is auditable back to a fixed release
+-- even though the URL's tag keeps moving. The column records the value as
+-- given, with no re-parse or migration: a row written under the old
+-- `bucketfs:<CONNECTION>/<path>` form is kept as history and is no longer
+-- resolvable.
 --
 -- objects records the deployed object inventory declared at install time (each
 -- object's type and fully-qualified name), serialised in the form documented on

@@ -14,9 +14,10 @@ Two independent concerns live here:
 
 * **A hermetic harness for the resolver UDF body.** The resolver ships as a
   ``CREATE ... PYTHON3 SET SCRIPT`` in ``sql/udf/module_resolver_v1.sql``. Its
-  Python body is stdlib-only and depends on the runtime only through ``exa`` and
-  the emit/iterate ``ctx`` protocol, so it can be executed off-database against
-  fakes — proving the resolve algorithm deterministically without a cluster.
+  Python body is stdlib-only and depends on the runtime only through the
+  emit/iterate ``ctx`` protocol and the cluster-local BucketFS mount, so it can
+  be executed off-database against a ``ctx`` fake and a rebound ``MOUNT_ROOT``
+  — proving the resolve algorithm deterministically without a cluster.
 """
 
 from __future__ import annotations
@@ -33,7 +34,6 @@ import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import pyexasol
@@ -414,33 +414,31 @@ class FakeEmitCtx:
         return False
 
 
-def make_fake_exa(connections: dict[str, str]) -> Any:
-    """A fake ``exa`` whose ``get_connection`` returns address-only connections."""
-
-    def get_connection(name: str) -> Any:
-        if name not in connections:
-            raise RuntimeError(f"connection {name} does not exist or is not accessible")
-        return SimpleNamespace(address=connections[name], user="", password="", type="password")
-
-    return SimpleNamespace(get_connection=get_connection)
-
-
 def run_resolver_body(
     source: str | None,
     module_name: str | None,
     *,
-    exa: Any = None,
+    mount_root: str | None = None,
     urlopen: Callable[..., Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Execute the resolver UDF body off-database and return emitted rows as dicts.
 
-    ``exa`` supplies ``get_connection`` for the bucketfs path; ``urlopen``, when
-    given, replaces ``urllib.request.urlopen`` for the https path so no real
-    network is touched. The returned rows use ``RESOLVER_COLUMNS`` keys.
+    ``mount_root``, when given, rebinds the body's own ``MOUNT_ROOT`` constant
+    AFTER the ``exec``, so the BucketFS reader still performs its real
+    ``<mount_root>/<service>/<bucket>/<path>`` derivation from the source string
+    -- only the root moves, into a temporary tree. Nothing here stubs the
+    filesystem and nothing lets a source name an absolute path, because either
+    would skip the derivation this seam exists to exercise: a staged release must
+    live at exactly the path the reader derives, and nowhere else.
+
+    ``urlopen``, when given, replaces ``urllib.request.urlopen`` for the https
+    path so no real network is touched. No ``exa`` is bound at all -- the body
+    references it nowhere. The returned rows use ``RESOLVER_COLUMNS`` keys.
     """
     namespace: dict[str, Any] = {}
     exec(compile(resolver_python_body(), str(RESOLVER_SQL_PATH), "exec"), namespace)  # noqa: S102
-    namespace["exa"] = exa if exa is not None else make_fake_exa({})
+    if mount_root is not None:
+        namespace["MOUNT_ROOT"] = mount_root
 
     ctx = FakeEmitCtx(source, module_name)
     if urlopen is not None:
@@ -520,6 +518,7 @@ class BucketFsConfig:
     bucket: str
     write_password: str
     service: str
+    read_password: str | None = None
 
     @property
     def base_url(self) -> str:
@@ -534,6 +533,15 @@ class BucketFsConfig:
         maps 1:1 to the UDF mount ``/buckets/<service>/<bucket>``.
         """
         return f"bucketfs:{self.service}/{self.bucket}"
+
+    def bucketfs_source(self, path: str) -> str:
+        """The location-form module source: ``bucketfs:<service>/<bucket>/<path>``.
+
+        The single choke point for the new source grammar -- every DB-backed test
+        that needs a BucketFS source string builds it here rather than formatting
+        the literal by hand, so the grammar has exactly one place it is spelled.
+        """
+        return f"bucketfs:{self.service}/{self.bucket}/{path}"
 
 
 def bucketfs_config() -> BucketFsConfig | None:
@@ -553,6 +561,43 @@ def bucketfs_config() -> BucketFsConfig | None:
         bucket=os.environ.get("EXASOL_BFS_BUCKET", _DEFAULT_BUCKET),
         write_password=write_password,
         service=os.environ.get("EXASOL_BFS_SERVICE", _DEFAULT_SERVICE),
+    )
+
+
+BFS_PROTECTED_BUCKET_ENV = "EXASOL_BFS_PROTECTED_BUCKET"
+BFS_PROTECTED_READ_PASSWORD_ENV = "EXASOL_BFS_PROTECTED_READ_PASSWORD"
+BFS_PROTECTED_WRITE_PASSWORD_ENV = "EXASOL_BFS_PROTECTED_WRITE_PASSWORD"
+
+
+def bucketfs_protected_config() -> BucketFsConfig | None:
+    """Resolve the read-protected bucket's config from the environment, or ``None``.
+
+    This bucket is provisioned once via ConfD (Task 0.0 of
+    ``change-bucketfs-source-to-location``) -- the suite CONSUMES it, it never
+    creates or drops it, keeping a ``CONFD_CONNECTION`` out of the framework's
+    own test dependencies:
+
+        CONTROL BUCKETFS ADD BUCKET '<bucket>' TO SERVICE '<service>' PRIVATE
+            WITH read_password = '<read-pw>', write_password = '<write-pw>';
+
+    Export ``EXASOL_BFS_PROTECTED_BUCKET``, ``EXASOL_BFS_PROTECTED_READ_PASSWORD``,
+    and ``EXASOL_BFS_PROTECTED_WRITE_PASSWORD`` (alongside the usual
+    ``EXASOL_BFS_HOST``/``EXASOL_BFS_PORT``/``EXASOL_BFS_SERVICE``) to point tests
+    at it; the dependent test skips cleanly when any of the three is unset.
+    """
+    host = os.environ.get("EXASOL_BFS_HOST")
+    bucket = os.environ.get(BFS_PROTECTED_BUCKET_ENV)
+    read_password = os.environ.get(BFS_PROTECTED_READ_PASSWORD_ENV)
+    write_password = os.environ.get(BFS_PROTECTED_WRITE_PASSWORD_ENV)
+    if not host or not bucket or not read_password or not write_password:
+        return None
+    return BucketFsConfig(
+        host=host,
+        port=os.environ.get("EXASOL_BFS_PORT", "2581"),
+        bucket=bucket,
+        write_password=write_password,
+        service=os.environ.get("EXASOL_BFS_SERVICE", _DEFAULT_SERVICE),
+        read_password=read_password,
     )
 
 

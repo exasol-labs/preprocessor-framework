@@ -1,7 +1,13 @@
-"""Integration tests for the two-schema database layout.
+"""Tests for the two-schema database layout.
 
-All tests here require a live Exasol instance (``installed`` fixture) and are
-marked ``integration``. They run idempotently — each assertion query is
+Every test here except the two static-source guards
+(``test_install_ddl_sources_contain_no_create_connection`` and
+``test_no_sql_source_names_a_connection_in_a_bucketfs_path``) requires a live
+Exasol instance (``installed`` fixture) and is marked ``integration``. Those two
+read only the files under ``sql/`` and are deliberately left DB-free and
+unmarked, so they still run in a cluster-less loop.
+
+The integration tests run idempotently — each assertion query is
 read-only except for ``test_my_pipeline_filters_current_user``,
 ``test_layout_idempotent``, ``test_group_sys_with_dba_upgrade_idempotent``,
 ``test_modules_objects_column_widening_is_idempotent``, and
@@ -10,6 +16,7 @@ in ``finally``. The widening test also narrows a column and restores it there, s
 a failure mid-test cannot leave the schema behind for the tests that follow.
 """
 
+import re
 from pathlib import Path
 
 import pytest
@@ -19,6 +26,14 @@ from preproc.module.registry import OBJECTS_MAX_CHARS, decode_objects, encode_ob
 
 _REPO_ROOT = Path(__file__).parent.parent
 _SQL_INSTALL_DIR = _REPO_ROOT / "sql" / "install"
+_SQL_DIR = _REPO_ROOT / "sql"
+
+# A CONNECTION name is conventionally UPPER_SNAKE and may carry digits, so this
+# matches the retired two-segment 'bucketfs:<CONNECTION>/<path>' form without
+# matching a genuine lowercase '<service>/<bucket>' location, an angle-bracketed
+# placeholder, or the bare 'bucketfs:' scheme token -- the same pattern the plan's
+# final doc/code sweep runs across the whole repo.
+_BUCKETFS_CONNECTION_SOURCE = re.compile(r"bucketfs:[A-Z_][A-Z0-9_]*/")
 
 # The width PREPROC.MODULES.objects shipped with before it was widened. Hard-coded
 # on purpose: this is the historical state the widening upgrade has to convert
@@ -615,23 +630,60 @@ def test_indb_objects_admin_only(installed):
     assert {r[0] for r in rows_again} == set(names), "objects missing after re-deploy"
 
 
+def test_install_ddl_sources_contain_no_create_connection():
+    """No install DDL source under ``sql/install/`` contains a CREATE CONNECTION.
+
+    Reads files only, so it carries no ``integration`` mark and no fixture: the
+    operator alone creates the BucketFS CONNECTION, and a ``CREATE CONNECTION``
+    appearing in the framework's own DDL is a defect visible in the source tree
+    long before any cluster is involved. Its live counterpart — that running the
+    installer adds no CONNECTION to the database — is
+    ``test_install_ddl_creates_no_connection``.
+    """
+    offenders = [
+        sql_file.name
+        for sql_file in sorted(_SQL_INSTALL_DIR.glob("*.sql"))
+        if "CREATE CONNECTION" in sql_file.read_text(encoding="utf-8").upper()
+    ]
+    assert offenders == [], f"install DDL sources creating a CONNECTION object: {offenders}"
+
+
+def test_no_sql_source_names_a_connection_in_a_bucketfs_path():
+    """No framework artefact under ``sql/`` names a CONNECTION on a bucketfs source path.
+
+    The anti-regression guard for change-bucketfs-source-to-location: a
+    ``bucketfs:`` source is the location ``bucketfs:<service>/<bucket>/<path>``,
+    never the retired ``bucketfs:<CONNECTION>/<path>``, and the two forms are
+    grammatically identical, so a stale literal cannot be caught by the resolver —
+    only by reading the text. DB-free and unmarked on purpose: it is pure file
+    text, and a cluster-less developer loop is exactly the environment in which a
+    stale literal gets reintroduced — gating it behind ``installed``, where it
+    first shipped, meant it never ran there at all.
+
+    Covers the static half of the ``install/schema-layout`` DELTA:NEW scenario "The
+    BucketFS CONNECTION is a credential grant the framework never creates and never
+    names" — specifically that the CONNECTION's name appears in no framework
+    surface, the DDL, the Lua scripts, and the resolver UDF included.
+    """
+    offenders = []
+    for path in sorted((*_SQL_DIR.rglob("*.sql"), *_SQL_DIR.rglob("*.lua"))):
+        match = _BUCKETFS_CONNECTION_SOURCE.search(path.read_text(encoding="utf-8"))
+        if match is not None:
+            offenders.append(f"{path.relative_to(_REPO_ROOT)}: {match.group(0)}")
+    assert offenders == [], f"CONNECTION names on bucketfs source paths: {offenders}"
+
+
 @pytest.mark.integration
 def test_install_ddl_creates_no_connection(installed):
-    """The install DDL never creates a BucketFS (or any) CONNECTION object.
+    """Running the idempotent installer adds no CONNECTION object to the database.
 
-    Covers the ``install/schema-layout`` DELTA:NEW scenario "The BucketFS source
-    is an operator-created CONNECTION, not a framework object": the framework's
-    own DDL sources under ``sql/install/`` must contain no ``CREATE CONNECTION``
-    statement, and running the idempotent installer again must not add any new
-    CONNECTION object to the database — the operator alone creates the BucketFS
-    CONNECTION the in-database installer resolves by name.
+    The live half of the ``install/schema-layout`` DELTA:NEW scenario "The BucketFS
+    CONNECTION is a credential grant the framework never creates and never names":
+    the operator alone creates the BucketFS CONNECTION, which the resolver reads as
+    a plain location and never by name (change-bucketfs-source-to-location). The two
+    static source-tree halves are the DB-free tests above, and stay above so a
+    cluster-less run still executes them.
     """
-    for sql_file in sorted(_SQL_INSTALL_DIR.glob("*.sql")):
-        text = sql_file.read_text(encoding="utf-8").upper()
-        assert "CREATE CONNECTION" not in text, (
-            f"{sql_file.name} must not create a CONNECTION object"
-        )
-
     before = {
         r[0]
         for r in installed.execute("SELECT CONNECTION_NAME FROM EXA_DBA_CONNECTIONS").fetchall()

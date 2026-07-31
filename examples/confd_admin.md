@@ -122,9 +122,16 @@ single-quoted.
 | `CONTROL BUCKETFS DELETE SERVICE '<name>'` | `bucketfs_delete` | mutating | ◻️ |
 | `CONTROL BUCKETFS ADD SERVICE '<name>' WITH <options>` | `bucketfs_add` | mutating | ◻️ |
 | `CONTROL BUCKETFS MODIFY SERVICE '<name>' WITH <options>` | `bucketfs_modify` | mutating | ◻️ |
-| `CONTROL BUCKETFS ADD BUCKET '<bucket>' TO SERVICE '<svc>' [PUBLIC\|PRIVATE] [WITH <options>]` | `bucket_add` | mutating | ◻️ |
+| `CONTROL BUCKETFS ADD BUCKET '<bucket>' TO SERVICE '<svc>' [PUBLIC\|PRIVATE] [WITH <options>]` | `bucket_add` | mutating | ✅ |
 | `CONTROL BUCKETFS MODIFY BUCKET '<bucket>' IN SERVICE '<svc>' [PUBLIC\|PRIVATE] [WITH <options>]` | `bucket_modify` | mutating | ◻️ |
 | `CONTROL BUCKETFS DELETE BUCKET '<bucket>' FROM SERVICE '<svc>'` | `bucket_delete` | mutating | ◻️ |
+
+`bucket_add` was additionally exercised end-to-end on 2026-07-31 as Task 0.0
+of the `change-bucketfs-source-to-location` plan (see that plan's decision
+log, Design Decision [1], for the run evidence — recorded permanently in
+`specs/decision-log.md` once the plan is merged), creating the `PRIVATE`
+bucket `preproc-protected` on service `bfsdefault` via the `CONTROL BUCKETFS
+ADD BUCKET … PRIVATE WITH read_password = …, write_password = …` sugar.
 
 `WITH key = value [, …]` options map 1:1 to the documented ConfD parameter names:
 - **service**: `http_port`, `https_port`, `owner` (`'user group'`), `sync_period`,

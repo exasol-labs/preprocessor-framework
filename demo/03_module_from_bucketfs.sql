@@ -31,10 +31,13 @@ ALTER SESSION SET sql_preprocessor_script = PREPROC_RT.MASTER;
 -- -----------------------------------------------------------------------------
 -- 1. THE ONE THING THE OPERATOR OWNS: A BUCKETFS CONNECTION
 -- -----------------------------------------------------------------------------
--- The framework never creates this and never hardcodes its name. A CONNECTION
--- object is the privilege boundary for BucketFS access: whoever holds ACCESS on
--- it can read that bucket, and nobody else can - including through this
--- framework.
+-- The framework never creates this, and it never even sees its name - no
+-- source string this framework consumes carries a CONNECTION name. On a
+-- READ-PROTECTED bucket, a CONNECTION object is the privilege boundary for
+-- BucketFS access: whoever holds ACCESS on it can read that bucket, and
+-- nobody else can - including through this framework. (`default`, used
+-- below, is Exasol's always-public bucket, so that boundary does not apply
+-- to it here - see the note after the GRANT.)
 --
 -- Use the NATIVE BucketFS address `bucketfs:<service>/<bucket>`, NOT an
 -- https://...:2581/... URL. The native form is read off the cluster-local mount:
@@ -46,9 +49,14 @@ CREATE OR REPLACE CONNECTION PREPROC_BFS
 
 GRANT ACCESS ON CONNECTION PREPROC_BFS TO PREPROC_ADMIN;
 
--- Worth saying out loud: the resolver UDF that reads this connection lives in the
--- locked `PREPROC` schema and is never granted to PUBLIC. There is no path by
--- which an ordinary user reaches BucketFS - or the network - through the
+-- `default` is Exasol's always-public bucket, so its mount is already visible
+-- with or without this grant. On a READ-PROTECTED bucket, this GRANT is what
+-- makes the mount appear at all - that is the case this step exists for.
+
+-- Worth saying out loud: the resolver UDF that reads the mount this grant makes
+-- visible - by location, never through the CONNECTION object itself - lives in
+-- the locked `PREPROC` schema and is never granted to PUBLIC. There is no path
+-- by which an ordinary user reaches BucketFS - or the network - through the
 -- framework. The admin surface is the only door.
 
 
@@ -59,7 +67,7 @@ GRANT ACCESS ON CONNECTION PREPROC_BFS TO PREPROC_ADMIN;
 -- an uploaded archive on arrival; you still name the archive exactly as you
 -- uploaded it and the resolver finds the extracted content behind that name.
 
-PREPROC CATALOG MODULES FROM 'bucketfs:PREPROC_BFS/preproc-lib-0.3.0.tar.gz';
+PREPROC CATALOG MODULES FROM 'bucketfs:bfsdefault/default/preproc-lib-0.3.0.tar.gz';
 
 -- Two things to point at in this result:
 --
@@ -85,7 +93,7 @@ PREPROC CATALOG MODULES FROM 'bucketfs:PREPROC_BFS/preproc-lib-0.3.0.tar.gz';
 -- provenance, refresh - is the same code path.
 
 PREPROC INSTALL MODULE trailing_comma
-    FROM 'bucketfs:PREPROC_BFS/preproc-lib-0.3.0.tar.gz'
+    FROM 'bucketfs:bfsdefault/default/preproc-lib-0.3.0.tar.gz'
     FOR ROLE DBA;
 
 -- A trailing comma before FROM is a syntax error in every SQL dialect, and the

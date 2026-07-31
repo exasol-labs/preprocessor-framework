@@ -17,6 +17,11 @@ than inherited: pre-flight validation before the first DDL, compensating
 cleanup of the objects already created when a later statement fails, idempotent
 re-run, and rule registration last so a partially installed module is inert.
 
+This delta changes the `source` argument's BucketFS grammar: a `bucketfs:`
+source is now the plain location `bucketfs:<service>/<bucket>/<path>` and never
+names a CONNECTION object. The install sequence, atomicity construction, and
+end-state parity contract are otherwise unchanged.
+
 ## Background
 
 * `PREPROC.MODULE_INSTALL` is an unversioned `CREATE OR REPLACE LUA SCRIPT`
@@ -30,25 +35,36 @@ re-run, and rule registration last so a partially installed module is inert.
   and is a single `TYPE:value` where `TYPE` ∈ {`ROLE`, `USER`}. `scope` targets
   RULE ACTIVATION — which users or roles receive the transform — NOT install
   permission; it maps onto `PREPROC.RULE_ENSURE(scope_type, scope_value, ...)`.
+* A `bucketfs:` source is the BucketFS LOCATION
+  `bucketfs:<service>/<bucket>/<path>` (for example
+  `bucketfs:bfsdefault/default/preproc-lib-0.3.0.tar.gz`). It NEVER names a
+  CONNECTION object, and `MODULE_INSTALL` passes it to the resolver UDF verbatim
+  — the installer neither parses nor rewrites the source. A malformed BucketFS
+  source is a resolver `bad_source` error and therefore aborts at step 1, before
+  any DB write, exactly like every other resolver failure.
 * Security posture, accurate to the framework's rights model (ADR-001): Exasol
   has NO definer-rights Lua scripts — invoker rights are why the two-schema
   view-bridge exists. `MODULE_INSTALL` therefore runs with INVOKER rights, and
   the caller MUST hold the `PREPROC_ADMIN` role, which confers ownership of
-  `PREPROC` / `PREPROC_RT`, the `CREATE SCRIPT` system privilege, and — once the
-  operator grants it — ACCESS on the BucketFS CONNECTION. This is exactly the
-  boundary `PREPROC.REFRESH` / `REFRESH_CORE` already require to `CREATE OR
-  REPLACE` the `PREPROC_RT.P_<hash>` profile scripts at refresh time, proving a
-  Lua admin script can CREATE scripts at runtime under this role. The "delegated
-  admin" is a `PREPROC_ADMIN` grantee, NOT a DBA. A caller lacking the role fails
-  at the first privileged access. The resolver UDFs are admin-only (in `PREPROC`,
-  never PUBLIC), so a non-admin cannot use the DB's readers to reach
+  `PREPROC` / `PREPROC_RT` and the `CREATE SCRIPT` system privilege. For a
+  READ-PROTECTED BucketFS bucket the caller must additionally have been granted a
+  CONNECTION pointing at that bucket with its read password, which is what makes
+  Exasol mount the bucket into the UDF container — the grant is the access
+  boundary, even though the source string never names the CONNECTION. This is
+  exactly the boundary `PREPROC.REFRESH` / `REFRESH_CORE` already require to
+  `CREATE OR REPLACE` the `PREPROC_RT.P_<hash>` profile scripts at refresh time,
+  proving a Lua admin script can CREATE scripts at runtime under this role. The
+  "delegated admin" is a `PREPROC_ADMIN` grantee, NOT a DBA. A caller lacking the
+  role fails at the first privileged access. The resolver UDFs are admin-only (in
+  `PREPROC`, never PUBLIC), so a non-admin cannot use the DB's readers to reach
   BucketFS/network.
 * The install sequence mirrors `deploy_module` in a fixed order that preserves
   the CLI's "leave the DB consistent on failure" invariant:
   1. Resolve + verify via the resolver UDF. Any failure — `sha256` mismatch,
      an artifact whose object inventory disagrees with the index entry's
      declared inventory, module not found, an unreachable HTTPS host / network
-     error, unreadable source — MUST abort HERE, BEFORE any DB write.
+     error, a malformed source, an unreadable source — MUST abort HERE, BEFORE
+     any DB write.
   2. **Pre-flight.** Reassemble the artifact, split it into statements, and
      validate the full statement list AND the declared object inventory BEFORE
      executing the first statement. A statement the splitter cannot classify, a
@@ -109,6 +125,10 @@ re-run, and rule registration last so a partially installed module is inert.
   `registered-only` for a self-deployed module). `library_version` echoes the
   concrete release the resolved index declared (NULL when it carried none), so
   the operator sees which release a `latest` install landed on.
+* The `source_url` recorded in `PREPROC.MODULES` is the effective source string
+  as supplied. For a BucketFS install that is now the location form, so an
+  audited provenance row names the service, bucket, and release path directly
+  rather than an operator-chosen CONNECTION name whose target could later change.
 * An `https:` source is fetched over the network whenever the scheme is `https:`
   — there is NO settings toggle. Activation is implicit: the operator opts in by
   writing an `https://` source and by the cluster being open to the host. If the
@@ -121,12 +141,28 @@ re-run, and rule registration last so a partially installed module is inert.
 
 ### Scenario: Installs a library-deployed module from a BucketFS source, end-state byte-identical to a CLI install
 
-* *GIVEN* an installed framework and an operator-created BucketFS CONNECTION staging `preproc-lib-0.1.0.tar.gz` with `cast_shorthand` version 1
-* *AND* a caller holding `PREPROC_ADMIN` with ACCESS on the CONNECTION
-* *WHEN* the caller runs `EXECUTE SCRIPT PREPROC.MODULE_INSTALL('bucketfs:PREPROC_BFS/preproc-lib-0.1.0.tar.gz', 'cast_shorthand', 'ROLE:ANALYSTS')`
+* *GIVEN* an installed framework and a BucketFS bucket `default` on service `bfsdefault` staging `preproc-lib-0.1.0.tar.gz` with `cast_shorthand` version 1
+* *AND* a caller holding `PREPROC_ADMIN` for whom that bucket is mounted
+* *WHEN* the caller runs `EXECUTE SCRIPT PREPROC.MODULE_INSTALL('bucketfs:bfsdefault/default/preproc-lib-0.1.0.tar.gz', 'cast_shorthand', 'ROLE:ANALYSTS')`
 * *THEN* the script MUST create `PREPROC_RT.CAST_SHORTHAND_V1`, register the TRANSLATE rule at `ROLE ANALYSTS` via `PREPROC.RULE_ENSURE`, and write a `PREPROC.MODULES` provenance row for the deployed version
 * *AND* a subsequent in-scope statement MUST be transformed by the module
-* *AND* the resulting objects, rule, and provenance row MUST match the end-state of a CLI `preproc module add cast_shorthand`, the single-statement artifact having taken the same split-then-execute path as a composite one
+* *AND* the resulting objects, rule, and provenance row — whose `source_url` MUST be the location source exactly as supplied — MUST match the end-state of a CLI `preproc module add cast_shorthand`, the single-statement artifact having taken the same split-then-execute path as a composite one
+
+### Scenario: A malformed BucketFS source aborts before any database write
+
+* *GIVEN* an installed framework
+* *WHEN* the caller runs `MODULE_INSTALL` with the pre-delta two-segment source `bucketfs:PREPROC_BFS/preproc-lib-0.1.0.tar.gz`
+* *THEN* the script MUST fail with the resolver's `bad_source` error naming the expected `bucketfs:<service>/<bucket>/<path>` shape
+* *AND* the script MUST NOT create a script, a `PREPROC.CONFIG` rule, or a `PREPROC.MODULES` row
+* *AND* the script MUST NOT attempt to resolve the first segment as a CONNECTION object
+
+### Scenario: An unreadable BucketFS location surfaces the credential prerequisite to the installer
+
+* *GIVEN* a well-formed BucketFS location for which no release is present on the caller's UDF mount
+* *WHEN* the caller runs `MODULE_INSTALL` with that source
+* *THEN* the script MUST fail with the resolver's `source_unreadable` error
+* *AND* the reported message MUST name both probed paths and MUST state the `CONNECTION TO 'bucketfs:<service>/<bucket>' IDENTIFIED BY '<read-password>'` grant prerequisite
+* *AND* the script MUST NOT create a script, a `PREPROC.CONFIG` rule, or a `PREPROC.MODULES` row
 
 ### Scenario: A sha256 mismatch aborts before any database write
 

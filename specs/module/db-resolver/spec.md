@@ -14,6 +14,14 @@ The resolver's single-`CREATE`-statement structural check is generalised to an
 object-inventory check, and the ordering between chunk reassembly and
 statement splitting is pinned explicitly.
 
+This delta replaces the BucketFS source grammar with a plain BucketFS LOCATION.
+A `bucketfs:` source is now `bucketfs:<service>/<bucket>/<path>` — the first
+segment is ALWAYS the BucketFS service, the second ALWAYS the bucket, the
+remainder the release path — and it NEVER names an Exasol CONNECTION object.
+`exa.get_connection` leaves the BucketFS path entirely: credentials are resolved
+by the database, not by the resolver. This is a BREAKING grammar change, taken
+deliberately while the project is pre-1.0.
+
 ## Background
 
 * Exasol Lua scripts have NO filesystem, BucketFS, or network access (mission
@@ -23,36 +31,69 @@ statement splitting is pinned explicitly.
   NEVER granted to PUBLIC. This is a deliberate departure from the PUBLIC UDF
   placement of `PREPROC_RT.DEMO_SQLGLOT_TRANSPILE_V1`, because the resolver
   reaches BucketFS/network and must never be invokable by an ordinary user.
-* The source string carries a scheme: `bucketfs:<CONNECTION_NAME>/<path>/preproc-lib-<ver>.tar.gz`
-  names an operator-created Exasol CONNECTION object (the framework never creates
-  it) and is read natively; a value beginning `https://` is a pinned GitHub raw
-  source. The `<CONNECTION_NAME>` is resolved via `exa.get_connection(name)`; no
-  connection name is hardcoded.
-* The CONNECTION's address MUST be the native Exasol BucketFS form
-  `bucketfs:<service>/<bucket>` (the string the Exasol docs prescribe, e.g.
-  `CREATE CONNECTION … TO 'bucketfs:bfsdefault/bucket1' IDENTIFIED BY '<readpw>'`) —
-  no host, no port. It maps 1:1 to the cluster-local UDF mount
-  `/buckets/<service>/<bucket>`; an address already given as an absolute
-  `/buckets/…` path is accepted verbatim. Any other address (an `https://…:2581/…`
-  URL, a bare host) is a `source_unreadable` error: the database reaches BucketFS
-  natively and never needs a host or port, and the service name is taken from the
-  address rather than guessed by scanning `/buckets`. Read access is governed by
-  Exasol's BucketFS access rights — the granted CONNECTION and its read password —
-  not by the resolver.
-* The BucketFS reader reads the whole-library release tarball natively through
-  the cluster-local BucketFS mount (`/buckets/<service>/<bucket>/...`, mapped
-  directly from the CONNECTION's `bucketfs:<service>/<bucket>` address) using
-  Python `tarfile`, reads `registry/index.json` from
-  within the tarball, selects the requested module's latest entry, and reads that
-  module's artifact member. A BucketFS read performs NO network egress — the file
-  is cluster-replicated and read locally.
+* The source string carries a scheme. A value beginning `bucketfs:` is a
+  BucketFS LOCATION and is read natively; a value beginning `https://` is a
+  pinned GitHub raw source.
+* A BucketFS source has EXACTLY the shape
+  `bucketfs:<service>/<bucket>/<release-path>` — for example
+  `bucketfs:bfsdefault/default/preproc-lib-0.3.0.tar.gz`. The first path segment
+  is ALWAYS the BucketFS service name, the second ALWAYS the bucket, and every
+  remaining segment (one or more) is the release path inside that bucket. The
+  service and bucket map 1:1 to the cluster-local UDF mount
+  `/buckets/<service>/<bucket>`, so the resolver derives the mount path from the
+  SOURCE alone and reads the release off it.
+* The source string NEVER names an Exasol CONNECTION object, and the resolver
+  performs NO `exa.get_connection` call on the BucketFS path. Credentials are
+  resolved by the database: the operator creates a CONNECTION
+  `TO 'bucketfs:<service>/<bucket>' IDENTIFIED BY '<read-password>'` (the name
+  is arbitrary and is never referenced by the framework) and grants it to the
+  installing admin; Exasol then mounts that read-protected bucket into the UDF
+  container for that caller. The CONNECTION is still an operator prerequisite —
+  it is simply not part of the source grammar.
+* Because the mount path comes from the source, the resolver has no CONNECTION
+  address to interpret: the address-form rules that previously governed a
+  BucketFS CONNECTION (native `bucketfs:<service>/<bucket>` only, an absolute
+  `/buckets/…` accepted verbatim, an `https://…:2581/…` URL rejected) no longer
+  apply to the resolver at all. They remain an operator concern when creating
+  the CONNECTION, enforced by Exasol rather than by this UDF.
+* A BucketFS source with fewer than three non-empty segments — notably the
+  pre-delta two-segment form `bucketfs:PREPROC_BFS/preproc-lib-0.3.0.tar.gz` —
+  is MALFORMED and is a `bad_source` error naming the expected
+  `bucketfs:<service>/<bucket>/<path>` shape. There is NO heuristic that tries
+  to tell a service name from a connection name, and NO fallback to a CONNECTION
+  lookup: the two forms are grammatically indistinguishable, so accepting both
+  would make the meaning of a source depend on database state. This is a
+  deliberate hard break (ADR-065).
+* Every segment of a BucketFS source MUST be a plain path segment. A segment
+  that is empty, `.`, or `..` is a `bad_source` error, so a source can never
+  address a mount outside `/buckets/<service>/<bucket>`.
+* The BucketFS reader reads the whole-library release natively through the
+  cluster-local mount using Python `tarfile`, reads `registry/index.json` from
+  within the release, selects the requested module's latest entry, and reads that
+  module's artifact member. BucketFS AUTO-EXTRACTS an uploaded archive and
+  presents it on the UDF mount as a DIRECTORY at the extension-less path, so the
+  reader probes BOTH `/buckets/<service>/<bucket>/<release-path>` (a raw tarball
+  file) AND the same path with its archive extension stripped (the auto-extracted
+  directory). A BucketFS read performs NO network egress — the file is
+  cluster-replicated and read locally.
+* When NEITHER probe finds a release, the resolver reports ONE
+  `source_unreadable` error. It cannot distinguish "no such bucket" from "bucket
+  not granted to this caller", because an unmounted bucket and an absent file are
+  the same observation on the filesystem, so there is no second error kind and no
+  separate bucket-existence probe. The message MUST name the tarball path it
+  probed, the auto-extracted directory path it probed, AND state that a
+  read-protected bucket is only mounted for a caller granted a
+  `CONNECTION TO 'bucketfs:<service>/<bucket>' IDENTIFIED BY '<read-password>'`,
+  with the service and bucket interpolated from the source — so the operator sees
+  the credential prerequisite in the one message they will actually read.
 * The HTTPS reader performs `urllib` GETs of `registry/index.json` and the
   artifact from the pinned source. It runs whenever the source uses the `https:`
   scheme — there is NO settings toggle gating it. Activation is implicit: the
   operator opts in by writing an `https://` source and by the cluster being open
   to the host. On a cluster with no outbound egress the GET simply fails; the
   resolver signals that network failure and returns no usable artifact, so the
-  orchestrator aborts before any DB write.
+  orchestrator aborts before any DB write. The HTTPS path is UNCHANGED by this
+  delta.
 * `sha256` verification is MANDATORY for a library-deployed module: the resolver
   computes the digest over the artifact bytes and compares it to the index
   entry's declared `sha256`, exactly as `manifest.verify_artifact_sha256` does. A
@@ -94,17 +135,64 @@ statement splitting is pinned explicitly.
   every failure path — including an artifact whose object inventory does not
   match the entry's declaration — returns a structured error indicator and no
   usable artifact body, so the orchestrator aborts BEFORE any DB write.
+* The cluster-local mount root `/buckets` is a single named constant in the UDF
+  body. Production never varies it; the off-database test harness rebinds it to a
+  temporary directory so the whole `<service>/<bucket>/<path>` derivation is
+  exercised offline. This replaces the pre-delta harness seam, which was the fake
+  `exa.get_connection` the resolver no longer calls.
 
 ## Scenarios
 
 ### Scenario: Resolves a library-deployed module from a BucketFS-staged tarball
 
-* *GIVEN* an operator-created CONNECTION naming a BucketFS location that holds `preproc-lib-0.1.0.tar.gz` whose index lists `cast_shorthand` version 1
-* *AND* a caller holding `PREPROC_ADMIN` with ACCESS on that CONNECTION
-* *WHEN* the resolver is invoked with source `bucketfs:PREPROC_BFS/preproc-lib-0.1.0.tar.gz` and module `cast_shorthand`
+* *GIVEN* a BucketFS bucket `default` on service `bfsdefault` holding `preproc-lib-0.1.0.tar.gz` whose index lists `cast_shorthand` version 1
+* *AND* a caller holding `PREPROC_ADMIN` for whom that bucket is mounted at `/buckets/bfsdefault/default`
+* *WHEN* the resolver is invoked with source `bucketfs:bfsdefault/default/preproc-lib-0.1.0.tar.gz` and module `cast_shorthand`
 * *THEN* the resolver MUST return the artifact text of the `PREPROC_RT.CAST_SHORTHAND_V1` CREATE statement
 * *AND* the resolver MUST return the entry metadata (`phase`, `script_name`, `function`, `deploy_mode`, `sha256`, suggested scope, source)
-* *AND* the resolver MUST perform no network egress
+* *AND* the resolver MUST derive the mount path from the source's first two segments alone, performing no network egress
+
+### Scenario: A BucketFS source is the location, never a CONNECTION name
+
+* *GIVEN* a resolvable BucketFS location `bucketfs:bfsdefault/default/preproc-lib-0.1.0.tar.gz`
+* *WHEN* the resolver resolves any module from it
+* *THEN* the resolver MUST NOT call `exa.get_connection` on the BucketFS path
+* *AND* the resolver MUST NOT read any CONNECTION address
+* *AND* the resolved artifact and metadata MUST be identical to what the pre-delta connection-named form returned for the same staged release
+
+### Scenario: A two-segment BucketFS source is malformed
+
+* *GIVEN* the pre-delta source form `bucketfs:PREPROC_BFS/preproc-lib-0.1.0.tar.gz`, which carries only a first segment and a release path
+* *WHEN* the resolver is invoked with that source
+* *THEN* the resolver MUST signal a `bad_source` failure
+* *AND* the message MUST name the expected `bucketfs:<service>/<bucket>/<path>` shape
+* *AND* the resolver MUST NOT attempt a CONNECTION lookup as a fallback
+* *AND* the resolver MUST NOT return artifact text
+
+### Scenario: A BucketFS source segment that escapes the bucket is malformed
+
+* *GIVEN* a BucketFS source whose release path contains an empty, `.`, or `..` segment (for example `bucketfs:bfsdefault/default/../other/lib.tar.gz`)
+* *WHEN* the resolver is invoked with that source
+* *THEN* the resolver MUST signal a `bad_source` failure
+* *AND* the resolver MUST NOT open any path outside `/buckets/<service>/<bucket>`
+
+### Scenario: An unreadable BucketFS location names both probed paths and the credential prerequisite
+
+* *GIVEN* a well-formed source `bucketfs:bfsdefault/default/preproc-lib-0.1.0.tar.gz` for which no release is present on the UDF mount — whether because the bucket holds no such file or because the bucket is read-protected and not mounted for this caller
+* *WHEN* the resolver is invoked with that source
+* *THEN* the resolver MUST signal exactly one `source_unreadable` failure — there MUST NOT be a second error kind distinguishing the two causes, and the resolver MUST NOT perform a separate bucket-existence probe
+* *AND* the message MUST name BOTH probed paths — `/buckets/bfsdefault/default/preproc-lib-0.1.0.tar.gz` as the tarball and `/buckets/bfsdefault/default/preproc-lib-0.1.0` as the auto-extracted directory
+* *AND* the message MUST state that a read-protected bucket is only mounted for a caller granted a `CONNECTION TO 'bucketfs:bfsdefault/default' IDENTIFIED BY '<read-password>'`, with the service and bucket taken from the source
+* *AND* the resolver MUST NOT return artifact text
+
+### Scenario: A read-protected bucket is readable through a granted CONNECTION the source never names
+
+* *GIVEN* a READ-PROTECTED BucketFS bucket holding a release, and a live Exasol instance
+* *AND* an operator-created CONNECTION `TO 'bucketfs:<service>/<bucket>' IDENTIFIED BY '<read-password>'` whose name appears nowhere in the source string
+* *WHEN* the caller is granted ACCESS on that CONNECTION and invokes the resolver with `bucketfs:<service>/<bucket>/<release-path>`
+* *THEN* the resolver MUST resolve the module, proving Exasol mounts the read-protected bucket for a grantee without the UDF naming the CONNECTION
+* *AND* WHEN the grant is revoked and the resolver is invoked again with the same source, the resolver MUST signal `source_unreadable`
+* *AND* this scenario MUST be verified against a read-protected bucket, NOT the publicly readable `default` bucket, because a public bucket is mounted regardless of any grant and would satisfy the first outcome vacuously
 
 ### Scenario: A sha256 mismatch is a hard failure with no usable artifact
 

@@ -39,6 +39,7 @@ from pathlib import Path
 import pytest
 from _corpus import load_split_corpus, load_split_error_cases
 from _dbfixtures import (
+    BucketFsConfig,
     bucketfs_config,
     bucketfs_delete,
     bucketfs_put,
@@ -404,7 +405,7 @@ def _stage(connection, conn_name, bucket_path, specs, *, probe, tamper=None, obj
 
     connection.execute(f"CREATE OR REPLACE CONNECTION {conn_name} TO '{config.bucketfs_address}'")
     connection.execute(f"GRANT ACCESS ON CONNECTION {conn_name} TO PREPROC_ADMIN")
-    source = f"bucketfs:{conn_name}/{bucket_path}"
+    source = config.bucketfs_source(bucket_path)
 
     if not wait_until_ok(connection, source, probe):
         _drop_source(connection, config, conn_name, bucket_path)
@@ -1117,11 +1118,13 @@ def test_install_non_admin_rejected(module_install_deployed):
             if prev_pw is not None:
                 os.environ["EXASOL_PASSWORD"] = prev_pw
 
+        source = BucketFsConfig(
+            host="", port="", bucket="default", write_password="", service="bfsdefault"
+        ).bucketfs_source("preproc-lib-0.1.0.tar.gz")
         with pytest.raises(Exception):
             other.execute(
                 "EXECUTE SCRIPT PREPROC.MODULE_INSTALL("
-                "'bucketfs:PREPROC_TEST_BFS/preproc-lib-0.1.0.tar.gz', "
-                "'cast_shorthand', 'ROLE:PREPROC_ADMIN')"
+                f"'{source}', 'cast_shorthand', 'ROLE:PREPROC_ADMIN')"
             )
 
         provenance = admin.execute(
@@ -1135,6 +1138,59 @@ def test_install_non_admin_rejected(module_install_deployed):
             admin.execute(f"DROP USER {non_admin} CASCADE")
         except Exception:
             pass
+
+
+@pytest.mark.integration
+def test_install_malformed_bucketfs_source_aborts_before_write(module_install_deployed):
+    """A malformed (two-segment) bucketfs source aborts before any database write.
+
+    'bucketfs:PREPROC_BFS/preproc-lib-0.1.0.tar.gz' is the pre-delta, two-segment
+    form under deliberate rejection here -- not a literal left behind by oversight.
+    """
+    connection = module_install_deployed
+    source = "bucketfs:PREPROC_BFS/preproc-lib-0.1.0.tar.gz"
+
+    with pytest.raises(Exception) as excinfo:
+        _install(connection, source, "cast_shorthand", "ROLE:PREPROC_ADMIN")
+    assert "bucketfs:<service>/<bucket>/<path>" in str(excinfo.value)
+
+    assert _script_text(connection, _CAST_SCRIPT) is None
+    rule_count = connection.execute(
+        f"SELECT COUNT(*) FROM PREPROC.CONFIG WHERE script_name = '{_CAST_SCRIPT}'"
+    ).fetchall()[0][0]
+    assert rule_count == 0
+    provenance = connection.execute(
+        "SELECT COUNT(*) FROM PREPROC.MODULES WHERE name = 'cast_shorthand'"
+    ).fetchall()[0][0]
+    assert provenance == 0
+
+
+@pytest.mark.integration
+def test_install_unreadable_location_reports_credential_hint(module_install_deployed):
+    """An unreadable-but-well-formed location surfaces the credential hint, no write.
+
+    Targets a release absent from the always-public ``default`` bucket, so the
+    failure is purely "no such release" -- proving the installer surfaces the
+    resolver's full ``source_unreadable`` message, including the CONNECTION
+    grant prerequisite, with no staged fixture needed.
+    """
+    connection = module_install_deployed
+    config = BucketFsConfig(
+        host="", port="", bucket="default", write_password="", service="bfsdefault"
+    )
+    source = config.bucketfs_source("no-such-release.tar.gz")
+
+    with pytest.raises(Exception) as excinfo:
+        _install(connection, source, "cast_shorthand", "ROLE:PREPROC_ADMIN")
+    message = str(excinfo.value)
+    assert "source_unreadable" in message
+    assert "CONNECTION TO 'bucketfs:bfsdefault/default' IDENTIFIED BY" in message
+
+    assert _script_text(connection, _CAST_SCRIPT) is None
+    provenance = connection.execute(
+        "SELECT COUNT(*) FROM PREPROC.MODULES WHERE name = 'cast_shorthand'"
+    ).fetchall()[0][0]
+    assert provenance == 0
 
 
 @pytest.mark.integration

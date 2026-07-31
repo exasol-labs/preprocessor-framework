@@ -600,8 +600,10 @@ function expand(sqltext)
         local source_literal, for_index
         if subcommand_count == 8 and upper_word(4) == "FROM" then
             -- The FROM source is single-quoted verbatim in the command text; carry
-            -- that token through unchanged so a bucketfs:/https: source survives
-            -- intact. Require the well-formed quoted shape or fail open.
+            -- that token through unchanged as an opaque quoted span, so a
+            -- bucketfs: location's extra `/` separators (or an https: URL's)
+            -- cannot affect parsing. Require the well-formed quoted shape or
+            -- fail open.
             source_literal = word(5)
             if not source_literal:match("^'.*'$") then
                 return nil

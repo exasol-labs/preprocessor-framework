@@ -13,7 +13,8 @@
 --
 -- Parameters (declared in the CREATE OR REPLACE LUA SCRIPT header, deployed by
 -- install.py / bundle.py -- not in this body)
---   source   VARCHAR(2000)  bucketfs:CONN/path or https://.../registry/index.json
+--   source   VARCHAR(2000)  bucketfs:<service>/<bucket>/<path> or
+--                           https://.../registry/index.json
 --   The parameter is directly accessible as the Lua variable of the same name.
 --
 -- Drives the resolver in index-metadata-only mode

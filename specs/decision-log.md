@@ -1778,3 +1778,122 @@ Once `RULE_ADD` validates `client_pattern`, `RULE_ENSURE` — which already acce
 ### Consequences
 
 `REFRESH_CORE`'s stated role widens from "the resolution rebuild" to "shared logic for `PREPROC.REFRESH` and the mutating admin scripts". Moving the import earlier costs a module load on the `NOREFRESH` path and changes no behaviour, since `import()` binds functions and performs no work of its own.
+
+---
+
+## ADR-064: A BucketFS source is a location; the CONNECTION becomes a credential grant that is never named
+
+**Date:** 2026-07-31
+**Plan:** `change-bucketfs-source-to-location`
+**Status:** Accepted
+
+### Context
+
+The resolver's BucketFS reader treated the first segment of a `bucketfs:` source as an Exasol CONNECTION name, called `exa.get_connection(name)`, and mapped the returned address to the UDF mount. This gave `bucketfs:` two different meanings depending on where an operator typed it — a bucket in `CREATE CONNECTION … TO`, a CONNECTION-plus-path in a module source — a dual meaning the framework's own docs had to stop and explain (`docs/air-gap-runbook.md`) and that a persona study recorded as a comprehension failure. It also made `PREPROC.MODULES.source_url` provenance depend on a mutable indirection: a CONNECTION can be dropped and recreated against a different bucket, silently re-targeting every historical row.
+
+The design rests on the premise that Exasol mounts a read-protected bucket at `/buckets/<service>/<bucket>` for any session whose user holds a granted CONNECTION pointing at that bucket with the correct read password, without the UDF ever naming that CONNECTION. This was unverified at planning time and could not be verified against the framework's existing test bucket, which is publicly readable and therefore mounted regardless of any grant. It was verified live (2026-07-31, Exasol Personal `2026.1.0`) against a dedicated read-protected bucket (`bfsdefault/preproc-protected`) and a dedicated non-superuser probe identity: granted → the mount and its contents were visible; revoked (same session, no reconnect) → `FileNotFoundError` on the bucket directory. `/proc/mounts` showed each accessible bucket as an individual read-only bind mount, added and removed by the grant.
+
+**Correction (2026-07-31):** the initial evidence write-up claimed `SYS` read the protected bucket with "no CONNECTION to it in existence at all," which overstates `SYS`'s reach. Re-probing showed the mount requires the CONNECTION *object* to exist; `SYS` bypasses only the *grant*, not the object's existence. The premise itself — a read-protected bucket is mounted only for a caller granted a CONNECTION to it — is unaffected by the correction.
+
+### Decision
+
+A `bucketfs:` source is parsed as the plain location `bucketfs:<service>/<bucket>/<release-path>`. The resolver derives the UDF mount directly from the source's own first two segments and performs no `exa.get_connection` call and no CONNECTION-address interpretation. The operator still creates a CONNECTION `TO 'bucketfs:<service>/<bucket>' IDENTIFIED BY '<read-password>'` and is granted it; that grant — not its name — is what makes Exasol mount the bucket into the UDF container. `_mount_base` is deleted.
+
+### Options Considered
+
+| Option | Verdict |
+|--------|---------|
+| Source is the plain location; the CONNECTION is a credential grant, never named | Chosen — removes the dual meaning of `bucketfs:` and the mutable-indirection hazard on provenance, at the cost of one hard break |
+| Keep the CONNECTION-named form | Rejected — preserves the dual meaning the docs and a persona study both flag as a comprehension failure |
+| Support both forms | Rejected — the two forms are grammatically identical, so no parser can tell them apart safely |
+| Introduce a distinct `bucketfsloc:` scheme | Rejected — unambiguous, but leaves two schemes to document forever and lets the worse form keep the better name |
+
+### Consequences
+
+`exa.get_connection` and every error it owned (`connection '<NAME>' is not accessible`, unsupported CONNECTION address) are gone from the BucketFS path. `PREPROC.MODULES.source_url` now names the service, bucket, and release path directly, an audit-stable record independent of any CONNECTION's later fate. Existing provenance rows keep the old CONNECTION-named form as an unresolvable historical record; no data migration is performed.
+
+---
+
+## ADR-065: The old two-segment form is a hard break, not a compatibility case
+
+**Date:** 2026-07-31
+**Plan:** `change-bucketfs-source-to-location`
+**Status:** Accepted
+
+### Context
+
+A `bucketfs:` source under the old form (`bucketfs:<CONNECTION_NAME>/<path>`) and the new location form (`bucketfs:<service>/<bucket>/<path>`) are grammatically indistinguishable — both are `bucketfs:X/…`. Once the CONNECTION indirection is retired (ADR-064), a two-segment source has to be treated either as a legacy reference to reject or as a deliberately shorter valid form; the two forms cannot both be accepted without making a source's meaning depend on database state.
+
+### Decision
+
+A `bucketfs:` source with fewer than three non-empty segments is a `bad_source` error naming the expected `bucketfs:<service>/<bucket>/<path>` shape. Segments that are empty, `.`, or `..` are likewise `bad_source`, so a source can never address a path outside its own bucket. No heuristic probe, no CONNECTION fallback, no deprecation window.
+
+### Options Considered
+
+| Option | Verdict |
+|--------|---------|
+| Hard break: reject the two-segment form outright | Chosen — the project is pre-1.0 (0.7.1) with no external installed base, so a loud break costs one edit per source string and buys an unambiguous grammar |
+| Probe `/buckets/<seg1>` and fall back to a CONNECTION lookup | Rejected — makes a source's meaning depend on database state; a bucket coincidentally named like a CONNECTION would silently resolve the wrong release |
+| Deprecation window with a warning row | Rejected — requires keeping the ambiguous dual parse for the whole window, the very thing being retired |
+| Accept the old form as a permanent alias | Rejected — the two forms are grammatically identical; no parser can distinguish them |
+
+### Consequences
+
+A pre-delta two-segment source now fails loudly with `bad_source` instead of being silently reinterpreted, eliminating the worst-case outcome on this path — a legitimate-but-wrong module installing because the `sha256` and inventory checks would both still pass against the wrong target. Every existing operator-facing source literal in the repo and its docs moved to the three-segment form.
+
+---
+
+## ADR-066: One `source_unreadable` kind, carrying the credential prerequisite in its message
+
+**Date:** 2026-07-31
+**Plan:** `change-bucketfs-source-to-location`
+**Status:** Accepted
+
+### Context
+
+When neither the tarball probe nor the auto-extracted-directory probe finds a release, the resolver cannot distinguish "no such bucket" from "bucket not mounted because the caller lacks a granted CONNECTION with the correct read password" — an unmounted bucket and an absent file are the same observation on the filesystem. Live verification (Task 0.1) confirmed `os.path.isdir('/buckets/<service>')` returns `True` even when a specific bucket beneath it is unmounted, so a service-level existence probe would not distinguish the important case either.
+
+### Decision
+
+The resolver reports exactly one `source_unreadable` error when neither probe finds a release. Its message names the tarball path probed, the auto-extracted directory path probed, and states that a read-protected bucket is only mounted for a caller granted a `CONNECTION TO 'bucketfs:<service>/<bucket>' IDENTIFIED BY '<read-password>'`, with service and bucket interpolated from the source. No second error kind, no separate bucket-existence probe.
+
+### Options Considered
+
+| Option | Verdict |
+|--------|---------|
+| One `source_unreadable` kind with a credential hint | Chosen — delivers the diagnostic value a second kind would carry, without claiming to know which cause applies |
+| A distinct `bucket_not_granted` error kind | Rejected — the resolver observes one thing (the path is not there) and cannot tell an unmounted bucket from an absent file |
+| Probe `os.path.isdir('/buckets/<service>')` first | Rejected — distinguishes some cases but not the important one; a mounted service holding an unmounted read-protected bucket is indistinguishable from a typo'd bucket name, confirmed on live evidence |
+
+### Consequences
+
+The single error message now names both probed paths and the grant prerequisite, making the auto-extract mount behavior (the tarball file does not exist on the mount; only the extension-stripped directory does) visible to the operator in the one message they will actually read. No new error kind exists for a caller to branch on.
+
+---
+
+## ADR-067: The offline resolver harness moves from a faked `exa` to a rebindable mount-root constant
+
+**Date:** 2026-07-31
+**Plan:** `change-bucketfs-source-to-location`
+**Status:** Accepted
+
+### Context
+
+Removing `exa.get_connection` removes the offline test harness's existing seam — a faked `exa` module injected into the exec'd UDF namespace. That seam had a defect: because the faked CONNECTION address was an absolute filesystem path, the offline suite exercised only `_mount_base`'s `address.startswith('/')` branch, so the `bucketfs:<service>/<bucket>` → `/buckets/<service>/<bucket>` mapping had no offline coverage at all.
+
+### Decision
+
+The cluster-local mount root is a module-level `MOUNT_ROOT = '/buckets'` constant in the UDF body; production never varies it. `tests/_dbfixtures.run_resolver_body` gains a `mount_root` parameter that rebinds `namespace["MOUNT_ROOT"]` after the `exec`, replacing the `exa` parameter and `make_fake_exa`, both of which become dead once the resolver stops calling `exa`.
+
+### Options Considered
+
+| Option | Verdict |
+|--------|---------|
+| `MOUNT_ROOT` module constant, rebound by the harness | Chosen — one production line, no production behavior change, and exercises the real `<service>/<bucket>` derivation instead of bypassing it |
+| Monkeypatch `os.path.isfile`/`isdir` | Rejected — couples every test to the reader's exact call sequence, so an internal refactor breaks tests that should not care about it |
+| Fake the whole `os` module in the exec'd namespace | Rejected — same objection as above, larger surface |
+| Make the BucketFS tests live-only | Rejected — would push ~35 currently hermetic tests onto a cluster |
+
+### Consequences
+
+`make_fake_exa` and the `exa=` parameter of `run_resolver_body` are removed as dead code. The offline suite now genuinely exercises the service/bucket/path derivation rather than an absolute-path bypass, at the cost of one rebindable constant in the production UDF body.

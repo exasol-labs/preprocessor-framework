@@ -13,6 +13,13 @@ holds the original rule/refresh/settings/mode sugar verbs) — both are scenario
 of the one physical `CONTROL_SUGAR_V1` module, split here by subject matter
 rather than by deployment unit.
 
+This delta changes NO grammar. The BucketFS source string carried by `FROM
+'<source>'` is now the plain location `bucketfs:<service>/<bucket>/<path>`
+instead of `bucketfs:<CONNECTION>/<path>`, which the sugar carries through
+verbatim exactly as before — the delta records that the longer, multi-slash
+source survives tokenisation and pass-through unchanged, so a grammar regression
+cannot hide behind the new form.
+
 ## Background
 
 * The convenience module is a production dispatched EXPAND module: it lives in
@@ -32,6 +39,12 @@ rather than by deployment unit.
   `bucketfs:` or `https:` source survives intact), and the `FOR (ROLE|USER) <x>`
   clause folded into a single `TYPE:value` scope string. `CATALOG MODULES FROM
   '<source>'` maps to `PREPROC.MODULE_CATALOG('<source>')`.
+* The source token is OPAQUE to the sugar: it is a single-quoted span the
+  tokenizer keeps as one token and the arm re-emits unchanged, so the number of
+  `/` separators inside it is irrelevant to parsing. A BucketFS LOCATION source
+  (`bucketfs:<service>/<bucket>/<path>`) therefore needs no grammar change, and
+  the sugar MUST NOT parse, validate, or rewrite the source — source validity is
+  the resolver's contract, reported as `bad_source`.
 * The `FROM '<source>'` clause is OPTIONAL on both verbs. When it is omitted the
   source defaults to a built-in constant — the public Exasol Labs library index
   pinned to the mutable `latest` tag
@@ -40,7 +53,8 @@ rather than by deployment unit.
   CATALOG MODULES` with no source and get the newest published release. Supplying
   an explicit `FROM` overrides the default for a fork, a pinned `vX.Y.Z` tag, or a
   `bucketfs:` source. The default is a code constant, not a `PREPROC.SETTINGS`
-  row, in keeping with ADR-051 (no settings toggle on the fetch path).
+  row, in keeping with ADR-051 (no settings toggle on the fetch path). The
+  default is an `https:` source and is UNAFFECTED by this delta.
 * Captured values follow Exasol identifier quoting semantics (the same rules
   `control/command-sugar` documents): the module name is an object-name
   identifier — an UNQUOTED token folds to UPPER CASE, a `"..."`-delimited token
@@ -62,18 +76,32 @@ rather than by deployment unit.
 ### Scenario: INSTALL MODULE command expands to a MODULE_INSTALL execute-script call
 
 * *GIVEN* the convenience module is deployed and the caller holds the convenience EXPAND rule under an active preprocessor
-* *WHEN* the caller submits `PREPROC INSTALL MODULE "cast_shorthand" FROM 'bucketfs:PREPROC_BFS/preproc-lib-0.1.0.tar.gz' FOR ROLE PREPROC_ADMIN`
-* *THEN* the module MUST return exactly one `EXECUTE SCRIPT PREPROC.MODULE_INSTALL('bucketfs:PREPROC_BFS/preproc-lib-0.1.0.tar.gz', 'cast_shorthand', 'ROLE:PREPROC_ADMIN')` statement
-* *AND* the `FROM` source MUST be carried single-quoted exactly as written
+* *WHEN* the caller submits `PREPROC INSTALL MODULE "cast_shorthand" FROM 'bucketfs:bfsdefault/default/preproc-lib-0.1.0.tar.gz' FOR ROLE PREPROC_ADMIN`
+* *THEN* the module MUST return exactly one `EXECUTE SCRIPT PREPROC.MODULE_INSTALL('bucketfs:bfsdefault/default/preproc-lib-0.1.0.tar.gz', 'cast_shorthand', 'ROLE:PREPROC_ADMIN')` statement
+* *AND* the `FROM` source MUST be carried single-quoted exactly as written, every `/` separator included
 * *AND* the `"..."`-delimited module name MUST be carried verbatim
 * *AND* the returned text MUST be a single statement
 
 ### Scenario: A FOR USER scope threads a USER-typed scope argument
 
 * *GIVEN* the convenience module is deployed and active for the caller
-* *WHEN* the caller submits `PREPROC INSTALL MODULE "cast_shorthand" FROM 'bucketfs:PREPROC_BFS/preproc-lib-0.1.0.tar.gz' FOR USER BOB`
+* *WHEN* the caller submits `PREPROC INSTALL MODULE "cast_shorthand" FROM 'bucketfs:bfsdefault/default/preproc-lib-0.1.0.tar.gz' FOR USER BOB`
 * *THEN* the module MUST return exactly one `EXECUTE SCRIPT PREPROC.MODULE_INSTALL(...)` statement whose scope argument is `'USER:BOB'`
 * *AND* the scope `TYPE` MUST be matched case-insensitively against `ROLE` and `USER`
+
+### Scenario: CATALOG MODULES command expands to a MODULE_CATALOG execute-script call
+
+* *GIVEN* the convenience module is deployed and active for the caller
+* *WHEN* the caller submits `PREPROC CATALOG MODULES FROM 'bucketfs:bfsdefault/default/preproc-lib-0.1.0.tar.gz'`
+* *THEN* the module MUST return exactly one `EXECUTE SCRIPT PREPROC.MODULE_CATALOG('bucketfs:bfsdefault/default/preproc-lib-0.1.0.tar.gz')` statement
+
+### Scenario: The source token stays opaque however many path segments it carries
+
+* *GIVEN* the convenience module is deployed and active for the caller
+* *WHEN* the caller submits `INSTALL MODULE` or `CATALOG MODULES` with a deeply nested BucketFS location such as `'bucketfs:bfsdefault/default/releases/2026/preproc-lib-0.4.0.tar.gz'`
+* *THEN* the emitted source argument MUST be byte-identical to the token as written
+* *AND* the token count the arm sees MUST be unchanged by the extra `/` separators, because the tokenizer splits on whitespace and keeps a quoted span as one token
+* *AND* the module MUST NOT parse, validate, or rewrite the source — a malformed source MUST reach the resolver and be reported there as `bad_source`, never declined by the sugar
 
 ### Scenario: Captured values follow Exasol identifier quoting semantics
 
@@ -81,12 +109,6 @@ rather than by deployment unit.
 * *WHEN* the caller submits an `INSTALL MODULE` command with an UNQUOTED module name and a `FOR ROLE`/`FOR USER` value in any case (for example `PREPROC INSTALL MODULE cast_mod FROM 'https://h/registry/index.json' FOR ROLE dba`)
 * *THEN* the unquoted module name MUST be folded to UPPER CASE (`'CAST_MOD'`) — the regular-identifier rule (the resolver then matches it case-insensitively against the registry key)
 * *AND* the role/user value MUST be folded to UPPER CASE (`'ROLE:DBA'`) whether it was written unquoted or `"..."`-delimited, matching how Exasol upper-cases users and roles
-
-### Scenario: CATALOG MODULES command expands to a MODULE_CATALOG execute-script call
-
-* *GIVEN* the convenience module is deployed and active for the caller
-* *WHEN* the caller submits `PREPROC CATALOG MODULES FROM 'bucketfs:PREPROC_BFS/preproc-lib-0.1.0.tar.gz'`
-* *THEN* the module MUST return exactly one `EXECUTE SCRIPT PREPROC.MODULE_CATALOG('bucketfs:PREPROC_BFS/preproc-lib-0.1.0.tar.gz')` statement
 
 ### Scenario: INSTALL MODULE without a FROM clause defaults to the Exasol Labs library at latest
 

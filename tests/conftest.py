@@ -84,7 +84,11 @@ def bucketfs_library_source(resolver_deployed):
     the ``db`` fixture) when BucketFS write is not configured — BucketFS reads are
     public but writes need ``EXASOL_BFS_WRITE_PASSWORD`` (a distinct secret). The
     operator-side CONNECTION is created by the TEST, never the framework, and
-    ACCESS is granted to PREPROC_ADMIN (parity with the documented setup).
+    ACCESS is granted to PREPROC_ADMIN (parity with the documented setup) — but
+    the ``source`` string built below never names that CONNECTION. It is the
+    plain BucketFS location ``bucketfs:<service>/<bucket>/<path>``, built through
+    ``BucketFsConfig.bucketfs_source``: the CONNECTION stays purely a credential
+    grant, demonstrated here by keeping it while the source no longer needs it.
     """
     connection = resolver_deployed
     config = bucketfs_config()
@@ -105,7 +109,7 @@ def bucketfs_library_source(resolver_deployed):
         f"CREATE OR REPLACE CONNECTION {_TEST_CONNECTION} TO '{config.bucketfs_address}'"
     )
     connection.execute(f"GRANT ACCESS ON CONNECTION {_TEST_CONNECTION} TO PREPROC_ADMIN")
-    source = f"bucketfs:{_TEST_CONNECTION}/{_RELEASE_BUCKET_PATH}"
+    source = config.bucketfs_source(_RELEASE_BUCKET_PATH)
 
     if not wait_until_ok(connection, source, "cast_shorthand"):
         _drop_bucketfs_source(connection, config)

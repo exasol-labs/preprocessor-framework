@@ -184,12 +184,11 @@ end
 -- symbol) and `DbVisualizer` keeps its casing (a self-reported client name) --
 -- neither is folded the way an object name or a role would be.
 PREPROC ADD RULE FOR ROLE DBA PHASE EXPAND
-    SCRIPT PREPROC_RT.DEMO_HELP_V1 FUNCTION help_menu CLIENT 'DbVisualizer';
+    SCRIPT PREPROC_RT.DEMO_HELP_V1 FUNCTION help_menu CLIENT 'dbvis';
 
 -- One rule now carries a pattern; every other rule has NULL, meaning "always".
 PREPROC LIST RULES;
 
--- In THIS tab (DbVisualizer), the command exists:
 HELP;
 
 -- =============================================================================
@@ -272,6 +271,8 @@ DROP SCRIPT PREPROC_RT.DEMO_BROKEN_V1;
 -- [8] YOU DO NOT HAVE TO WRITE THEM YOURSELF ----------------- 8:00
 
 PREPROC CATALOG MODULES;
+PREPROC CATALOG MODULES FROM 'https://raw.githubusercontent.com/exasol-labs/preprocessor-library/latest/registry/index.json';
+PREPROC CATALOG MODULES FROM 'bucketfs:bfsdefault/default/preproc-lib-0.3.0.tar.gz';
 
 -- Install one, and hand it straight to an audience that already exists.
 PREPROC INSTALL MODULE cast_shorthand FOR ROLE DEMO_ANALYST;

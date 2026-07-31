@@ -16,16 +16,26 @@
 --   PREPROC schema carries no PUBLIC EXECUTE grant.
 --
 -- Sources
---   bucketfs:<CONNECTION>/<path>/preproc-lib-<ver>.tar.gz
---       An operator-created Exasol CONNECTION (the framework never creates it)
---       names a BucketFS bucket. The CONNECTION's address MUST be the native
---       Exasol BucketFS form 'bucketfs:<service>/<bucket>' (the same string the
---       Exasol docs use, e.g. CREATE CONNECTION ... TO 'bucketfs:bfsdefault/b1'
---       IDENTIFIED BY '<readpw>'): NO host, NO port. exa.get_connection(name)
---       returns that address and it maps 1:1 to the cluster-local UDF mount
---       (/buckets/<service>/<bucket>/...); the release is read NATIVELY off that
---       mount. Read access is governed by Exasol's own BucketFS access rights --
---       the granted CONNECTION and its read password -- not by this script.
+--   bucketfs:<service>/<bucket>/preproc-lib-<ver>.tar.gz
+--       A plain BucketFS LOCATION. The first path segment is ALWAYS the BucketFS
+--       service, the second ALWAYS the bucket, and the remaining one-or-more
+--       segments the release path inside that bucket. Service and bucket map 1:1
+--       to the cluster-local UDF mount /buckets/<service>/<bucket>, so the mount
+--       is derived from the SOURCE ALONE and the release is read NATIVELY off it.
+--       A source NEVER names an Exasol CONNECTION and this script performs NO
+--       CONNECTION lookup and reads NO CONNECTION address.
+--       Read access remains Exasol's own, not this script's: a read-protected
+--       bucket is mounted into this container only for a caller holding ACCESS on
+--       an operator-created CONNECTION TO 'bucketfs:<service>/<bucket>'
+--       IDENTIFIED BY '<readpw>' (the framework never creates that CONNECTION and
+--       never references its NAME -- the name is arbitrary). Verified live
+--       2026-07-31 in both directions: granting ACCESS adds the bucket's bind
+--       mount, revoking it removes the mount again, which is why an unreadable
+--       bucket surfaces as an ABSENT path rather than a permission error.
+--       A source with fewer than three segments -- notably the superseded
+--       bucketfs:<CONNECTION>/<path> form -- or with any segment that is empty,
+--       '.', or '..' is a bad_source error, with no fallback to the old form
+--       (see _parse_bucketfs_location for why).
 --       BucketFS AUTO-EXTRACTS an uploaded archive and presents it on the UDF
 --       mount as a DIRECTORY at the extension-less path (verified live), so the
 --       release is normally read as extracted files; a raw tarball file is also
@@ -605,30 +615,76 @@ def _make_reader(source):
 
 _ARCHIVE_EXTENSIONS = ('.tar.gz', '.tar.bz2', '.tar.xz', '.tgz', '.tar', '.zip')
 
+# The cluster-local root under which Exasol mounts every bucket the CALLING
+# SESSION may read, one bucket per bind mount, as '<MOUNT_ROOT>/<service>/<bucket>'
+# (confirmed against /proc/mounts on the live instance). Production never varies
+# it; it exists as a named module-level constant only because the offline harness
+# rebinds it after exec'ing this body to drive the real <service>/<bucket>/<path>
+# derivation against a temporary tree, so it must stay a module-scope lookup
+# performed when the reader RUNS -- never inlined, never captured in a default
+# argument.
+MOUNT_ROOT = '/buckets'
+
+
+def _parse_bucketfs_location(source):
+    """Split a bucketfs: source into its (service, bucket, release_path) parts.
+
+    Pure text: this function touches no filesystem and derives no mount path, so a
+    malformed source is refused BEFORE anything is probed. That ordering is why the
+    grammar lives here rather than interleaved with _bucketfs_reader's probes.
+
+    The first segment is ALWAYS the service and the second ALWAYS the bucket, so
+    the superseded two-segment 'bucketfs:<CONNECTION>/<path>' form is malformed
+    here, with no fallback: the two forms are grammatically identical, so probing
+    one and falling back to the other would make a source's meaning depend on
+    database state and could silently resolve a DIFFERENT release than intended.
+    Every segment must also be a plain name -- the mount base is now built from
+    operator-supplied text, so rejecting an empty, '.', or '..' segment is what
+    keeps a source unable to address anything outside its own bucket.
+
+    Raises:
+        _BadSource: if the source carries fewer than three path segments, or any
+            segment is empty, '.', or '..'.
+    """
+    segments = source[len('bucketfs:'):].split('/')
+    if len(segments) < 3:
+        raise _BadSource(
+            'malformed bucketfs source (expected bucketfs:<service>/<bucket>/<path>): %r'
+            % source)
+    for segment in segments:
+        if not segment or segment in ('.', '..'):
+            raise _BadSource(
+                'malformed bucketfs source: segment %r is empty or a path traversal, and '
+                'every segment of bucketfs:<service>/<bucket>/<path> must be a plain '
+                'name: %r' % (segment, source))
+    return segments[0], segments[1], '/'.join(segments[2:])
+
 
 def _bucketfs_reader(source):
-    rest = source[len('bucketfs:'):]
-    conn_name, sep, member_root = rest.partition('/')
-    if not conn_name or not sep or not member_root:
-        raise _BadSource('malformed bucketfs source (expected bucketfs:CONN/path): %r' % source)
-    try:
-        connection = exa.get_connection(conn_name)
-    except Exception as exc:
-        raise _SourceUnreadable('connection %r is not accessible: %s' % (conn_name, exc))
-    mount_base = _mount_base(connection.address).rstrip('/')
-    archive_path = mount_base + '/' + member_root
-    extracted_dir = mount_base + '/' + _strip_archive_extension(member_root)
+    service, bucket, release_path = _parse_bucketfs_location(source)
+    mount_base = MOUNT_ROOT + '/' + service + '/' + bucket
+    archive_path = mount_base + '/' + release_path
+    extracted_dir = mount_base + '/' + _strip_archive_extension(release_path)
     # BucketFS auto-extracts an uploaded archive and presents it on the UDF mount
     # as a DIRECTORY at the extension-less path (verified on the live instance),
     # so the extracted-directory case is the common one; a raw tarball file is
     # also supported for buckets that do not auto-extract.
     if os.path.isfile(archive_path):
-        return _tarball_reader(archive_path, member_root)
+        return _tarball_reader(archive_path, release_path)
     if os.path.isdir(extracted_dir):
         return _directory_reader(extracted_dir)
+    # ONE error kind, carrying the credential prerequisite in its message. The
+    # filesystem cannot tell an unmounted bucket from an absent file -- and a
+    # service-level probe distinguishes nothing, since '<MOUNT_ROOT>/<service>' is
+    # present even when the bucket is not (verified live) -- so a second error
+    # kind would have to guess at the cause. The hint names the READ PASSWORD as
+    # well as the grant because a CONNECTION carrying the wrong password leaves
+    # the bucket just as unmounted as no grant at all.
     raise _SourceUnreadable(
-        'no BucketFS release at %s (tarball) nor %s (auto-extracted)'
-        % (archive_path, extracted_dir))
+        'no BucketFS release at %s (tarball) nor %s (auto-extracted). '
+        "A read-protected bucket is only mounted for a caller granted a CONNECTION "
+        "TO 'bucketfs:%s/%s' IDENTIFIED BY '<read-password>'."
+        % (archive_path, extracted_dir, service, bucket))
 
 
 def _strip_archive_extension(name):
@@ -668,35 +724,6 @@ def _directory_reader(extracted_dir):
             raise _SourceUnreadable('cannot read %r from %s: %s' % (member, extracted_dir, exc))
 
     return read
-
-
-def _mount_base(address):
-    """Map a BucketFS CONNECTION address to its cluster-local UDF mount path.
-
-    The CONNECTION's address is the native Exasol BucketFS form
-    'bucketfs:<service>/<bucket>[/subpath]' (no host, no port -- the same string
-    the Exasol docs use), which maps 1:1 to the UDF mount
-    '/buckets/<service>/<bucket>[/subpath]'. An address that is already an
-    absolute '/buckets/...' mount path is accepted verbatim; anything else
-    (an https:// URL, a bare host) is rejected -- the database reaches BucketFS
-    natively and never needs a host or port.
-    """
-    if not address:
-        raise _SourceUnreadable('connection address is empty')
-    if address.startswith('/'):
-        return address.rstrip('/')
-    if address.startswith('bucketfs:'):
-        rest = address[len('bucketfs:'):].lstrip('/')
-        segments = [segment for segment in rest.split('/') if segment]
-        if len(segments) < 2:
-            raise _SourceUnreadable(
-                "malformed BucketFS connection address %r "
-                "(expected 'bucketfs:<service>/<bucket>')" % address)
-        return '/buckets/' + '/'.join(segments)
-    raise _SourceUnreadable(
-        "unsupported BucketFS connection address %r "
-        "(expected the native 'bucketfs:<service>/<bucket>' form, no host/port)"
-        % address)
 
 
 def _https_reader(source):

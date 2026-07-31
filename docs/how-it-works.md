@@ -330,10 +330,12 @@ writing optimistically and rolling back.
 
 ### Air-gap safety
 
-A BucketFS read is cluster-local: the resolver reads the CONNECTION-mounted
-file through the filesystem the UDF already runs on, performing no network
-egress. This is what makes the BucketFS-staged path air-gap-safe even though
-it is now a UDF, not the CLI, doing the reading. An `https:` source is the
+A BucketFS read is cluster-local: the resolver reads the source's
+`bucketfs:<service>/<bucket>/<path>` location directly off the filesystem the
+UDF already runs on — the same mount a granted CONNECTION makes visible for a
+read-protected bucket — performing no network egress. This is what makes the
+BucketFS-staged path air-gap-safe even though it is now a UDF, not the CLI,
+doing the reading. An `https:` source is the
 one path that does leave the cluster, and it is used only when the operator
 supplies an `https:` source — no settings toggle exists to gate it — so a
 no-egress cluster simply fails the GET rather than silently falling back to

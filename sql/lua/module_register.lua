@@ -38,7 +38,7 @@
 --   phase           VARCHAR(32)   'TRANSLATE', 'EXPAND', or 'REWRITE'
 --   deploy_mode     VARCHAR(32)   deployment mode (stored verbatim)
 --   source_url      VARCHAR(2000) effective source fetched from (the mutable-tag
---                                 or pinned URL, or bucketfs: path), or SQL NULL
+--                                 or pinned URL, or bucketfs: location), or SQL NULL
 --   library_version VARCHAR(64)   concrete library release the index declared
 --                                 (audits a `latest` install), or SQL NULL
 --   objects       VARCHAR(200000) deployed object inventory as newline-separated

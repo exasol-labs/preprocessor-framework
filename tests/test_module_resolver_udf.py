@@ -1,11 +1,13 @@
 """Hermetic tests for the resolver UDF body (``sql/udf/module_resolver_v1.sql``).
 
 The resolver's Python body is stdlib-only and reaches the runtime only through
-``exa.get_connection`` and the emit/iterate ``ctx`` protocol, so it runs
-off-database against fakes. These tests exercise every resolve path — BucketFS
-tarball read, https fetch, sha256 verification, self-deployed skip, latest-
-version select, chunking, and the never-raise error signalling — deterministically
-and with no cluster or network. The live counterparts live in
+the emit/iterate ``ctx`` protocol and the cluster-local BucketFS mount, so it
+runs off-database against a ``ctx`` fake and a ``MOUNT_ROOT`` pointed at a
+``tmp_path`` tree. These tests exercise every resolve path — the BucketFS
+location grammar and its ``<service>/<bucket>/<path>`` derivation, tarball and
+auto-extracted reads, https fetch, sha256 verification, self-deployed skip,
+latest-version select, chunking, and the never-raise error signalling —
+deterministically and with no cluster or network. The live counterparts live in
 ``tests/test_db_resolver.py``.
 """
 
@@ -13,20 +15,23 @@ from __future__ import annotations
 
 import hashlib
 import tarfile
+import types
 import urllib.error
 from pathlib import Path
 
 import pytest
 from _dbfixtures import (
     EMITS_CHUNK_CHARS,
+    RESOLVER_COLUMNS,
     RESOLVER_SQL_PATH,
+    FakeEmitCtx,
     build_library_tarball,
     composite_library_module,
     composite_object_specs,
     default_artifact_text,
     fake_http_directory,
     library_module,
-    make_fake_exa,
+    resolver_python_body,
     run_resolver_body,
     self_deployed_module,
     standard_library_specs,
@@ -44,16 +49,30 @@ _SPLITTER_END = "# END ARTIFACT SPLITTER"
 _TARBALL_NAME = "preproc-lib-0.1.0.tar.gz"
 _EXTRACTED_DIR = "preproc-lib-0.1.0"
 
+# The staged tree's service and bucket. Deliberately not interchangeable: they
+# are different names, so a reader that transposed or dropped either segment
+# derives a path that does not exist -- see
+# test_service_and_bucket_are_not_interchangeable.
+_SERVICE = "bfsdefault"
+_BUCKET = "preproc-protected"
+
 
 def _stage_local(tmp_path: Path, specs, *, mode="extracted", **kwargs):
-    """Stage a release under a fake bucket root; return (source, exa, built).
+    """Stage a release on a fake BucketFS mount; return (source, mount_root, built).
+
+    The release is written at ``<mount_root>/<service>/<bucket>/`` and NOWHERE
+    else -- exactly the path the resolver derives from the returned source. That
+    is what keeps the seam honest: a reader that dropped a segment, transposed
+    service and bucket, or took its path from anywhere but the source finds
+    nothing and reports ``source_unreadable`` instead of quietly passing.
 
     ``mode="extracted"`` mirrors BucketFS's live behaviour — an uploaded archive
     is auto-extracted to the extension-less directory and the raw archive is not
     present on the mount. ``mode="tarball"`` leaves the raw ``.tar.gz`` file, for
     buckets that do not auto-extract.
     """
-    bucket_root = tmp_path / "buckets"
+    mount_root = tmp_path / "buckets"
+    bucket_root = mount_root / _SERVICE / _BUCKET
     bucket_root.mkdir(parents=True, exist_ok=True)
     tgz = bucket_root / _TARBALL_NAME
     built = build_library_tarball(tgz, specs, **kwargs)
@@ -61,9 +80,8 @@ def _stage_local(tmp_path: Path, specs, *, mode="extracted", **kwargs):
         with tarfile.open(tgz, "r:gz") as tar:
             tar.extractall(bucket_root / _EXTRACTED_DIR, filter="data")
         tgz.unlink()
-    source = f"bucketfs:LIB/{_TARBALL_NAME}"
-    exa = make_fake_exa({"LIB": str(bucket_root)})
-    return source, exa, built
+    source = f"bucketfs:{_SERVICE}/{_BUCKET}/{_TARBALL_NAME}"
+    return source, str(mount_root), built
 
 
 def _ok_rows(rows):
@@ -81,9 +99,9 @@ def _error_row(rows):
 
 def test_bucketfs_library_deployed_resolves(tmp_path):
     """A library-deployed module reads its artifact + metadata from the auto-extracted release."""
-    source, exa, _ = _stage_local(tmp_path, standard_library_specs())
+    source, mount_root, _ = _stage_local(tmp_path, standard_library_specs())
 
-    rows = _ok_rows(run_resolver_body(source, "cast_shorthand", exa=exa))
+    rows = _ok_rows(run_resolver_body(source, "cast_shorthand", mount_root=mount_root))
 
     assert len(rows) == 1
     row = rows[0]
@@ -102,9 +120,9 @@ def test_bucketfs_library_deployed_resolves(tmp_path):
 
 def test_bucketfs_raw_tarball_file_resolves(tmp_path):
     """A bucket that does NOT auto-extract keeps the raw .tar.gz; tarfile reads it."""
-    source, exa, _ = _stage_local(tmp_path, standard_library_specs(), mode="tarball")
+    source, mount_root, _ = _stage_local(tmp_path, standard_library_specs(), mode="tarball")
 
-    rows = _ok_rows(run_resolver_body(source, "cast_shorthand", exa=exa))
+    rows = _ok_rows(run_resolver_body(source, "cast_shorthand", mount_root=mount_root))
 
     assert rows[0]["script_name"] == "PREPROC_RT.CAST_SHORTHAND_V1"
     assert rows[0]["artifact_chunk"] == default_artifact_text("cast_shorthand", 1, "cast_shorthand")
@@ -112,11 +130,11 @@ def test_bucketfs_raw_tarball_file_resolves(tmp_path):
 
 def test_sha256_mismatch_is_hard_failure(tmp_path):
     """A tampered artifact hashes to a different digest — no usable artifact is returned."""
-    source, exa, _ = _stage_local(
+    source, mount_root, _ = _stage_local(
         tmp_path, standard_library_specs(), tamper={"cast_shorthand": b"\n-- tampered\n"}
     )
 
-    row = _error_row(run_resolver_body(source, "cast_shorthand", exa=exa))
+    row = _error_row(run_resolver_body(source, "cast_shorthand", mount_root=mount_root))
 
     assert row["error_kind"] == "sha256_mismatch"
     assert row["artifact_chunk"] is None
@@ -142,9 +160,9 @@ def test_script_name_mismatch_is_hard_failure(tmp_path):
             "cast_shorthand", version=1, function="cast_shorthand", artifact_text=impostor
         )
     ]
-    source, exa, _ = _stage_local(tmp_path, specs)
+    source, mount_root, _ = _stage_local(tmp_path, specs)
 
-    row = _error_row(run_resolver_body(source, "cast_shorthand", exa=exa))
+    row = _error_row(run_resolver_body(source, "cast_shorthand", mount_root=mount_root))
 
     assert row["error_kind"] == "artifact_invalid"
     assert row["artifact_chunk"] is None
@@ -162,9 +180,9 @@ def test_artifact_without_create_is_hard_failure(tmp_path):
             artifact_text="-- not a script at all\n",
         )
     ]
-    source, exa, _ = _stage_local(tmp_path, specs)
+    source, mount_root, _ = _stage_local(tmp_path, specs)
 
-    row = _error_row(run_resolver_body(source, "cast_shorthand", exa=exa))
+    row = _error_row(run_resolver_body(source, "cast_shorthand", mount_root=mount_root))
 
     assert row["error_kind"] == "artifact_invalid"
     assert row["artifact_chunk"] is None
@@ -178,9 +196,9 @@ def test_self_deployed_returns_metadata_only(tmp_path):
             "semantic_views", version=3, phase="EXPAND", source=("exasol/semantic_views", "v3.0.0")
         )
     ]
-    source, exa, _ = _stage_local(tmp_path, specs)
+    source, mount_root, _ = _stage_local(tmp_path, specs)
 
-    rows = _ok_rows(run_resolver_body(source, "semantic_views", exa=exa))
+    rows = _ok_rows(run_resolver_body(source, "semantic_views", mount_root=mount_root))
 
     assert len(rows) == 1
     row = rows[0]
@@ -201,9 +219,11 @@ def test_library_version_is_surfaced_on_every_row(tmp_path):
     This is what lets an install resolved through a mutable `latest` source
     record the concrete release it actually got.
     """
-    source, exa, _ = _stage_local(tmp_path, standard_library_specs(), library_version="0.2.0")
+    source, mount_root, _ = _stage_local(
+        tmp_path, standard_library_specs(), library_version="0.2.0"
+    )
 
-    rows = _ok_rows(run_resolver_body(source, "cast_shorthand", exa=exa))
+    rows = _ok_rows(run_resolver_body(source, "cast_shorthand", mount_root=mount_root))
 
     assert rows
     assert all(row["library_version"] == "0.2.0" for row in rows)
@@ -211,9 +231,9 @@ def test_library_version_is_surfaced_on_every_row(tmp_path):
 
 def test_library_version_absent_is_null(tmp_path):
     """An index with no library_version surfaces NULL — older indexes still resolve."""
-    source, exa, _ = _stage_local(tmp_path, standard_library_specs())
+    source, mount_root, _ = _stage_local(tmp_path, standard_library_specs())
 
-    rows = _ok_rows(run_resolver_body(source, "cast_shorthand", exa=exa))
+    rows = _ok_rows(run_resolver_body(source, "cast_shorthand", mount_root=mount_root))
 
     assert rows
     assert all(row["library_version"] is None for row in rows)
@@ -221,9 +241,9 @@ def test_library_version_absent_is_null(tmp_path):
 
 def test_module_not_found_is_signalled(tmp_path):
     """A module absent from the index yields a not-found signal, not an artifact."""
-    source, exa, _ = _stage_local(tmp_path, standard_library_specs())
+    source, mount_root, _ = _stage_local(tmp_path, standard_library_specs())
 
-    row = _error_row(run_resolver_body(source, "no-such-module", exa=exa))
+    row = _error_row(run_resolver_body(source, "no-such-module", mount_root=mount_root))
 
     assert row["error_kind"] == "not_found"
     assert "no-such-module" in row["error_message"]
@@ -233,10 +253,10 @@ def test_module_not_found_is_signalled(tmp_path):
 def test_module_name_matched_case_insensitively(tmp_path):
     """A module name resolves regardless of case — the sugar folds an unquoted name
     to UPPER while registry keys are lower_snake_case, so matching ignores case."""
-    source, exa, _ = _stage_local(tmp_path, standard_library_specs())
+    source, mount_root, _ = _stage_local(tmp_path, standard_library_specs())
 
     for queried in ("cast_shorthand", "CAST_SHORTHAND", "Cast_Shorthand"):
-        rows = _ok_rows(run_resolver_body(source, queried, exa=exa))
+        rows = _ok_rows(run_resolver_body(source, queried, mount_root=mount_root))
         assert rows[0]["name"] == "cast_shorthand"
         assert rows[0]["script_name"] == "PREPROC_RT.CAST_SHORTHAND_V1"
 
@@ -247,9 +267,9 @@ def test_latest_version_is_selected(tmp_path):
         library_module("cast_shorthand", version=1, function="cast_shorthand"),
         library_module("cast_shorthand", version=2, function="cast_shorthand"),
     ]
-    source, exa, _ = _stage_local(tmp_path, specs)
+    source, mount_root, _ = _stage_local(tmp_path, specs)
 
-    rows = _ok_rows(run_resolver_body(source, "cast_shorthand", exa=exa))
+    rows = _ok_rows(run_resolver_body(source, "cast_shorthand", mount_root=mount_root))
 
     assert rows[0]["version"] == 2
     assert rows[0]["script_name"] == "PREPROC_RT.CAST_SHORTHAND_V2"
@@ -261,9 +281,9 @@ def test_large_artifact_is_chunked_in_order(tmp_path):
         "-- " + "x" * (EMITS_CHUNK_CHARS + 500)
     )
     specs = [library_module("big_module", version=1, function="big_module", artifact_text=big_text)]
-    source, exa, _ = _stage_local(tmp_path, specs)
+    source, mount_root, _ = _stage_local(tmp_path, specs)
 
-    rows = _ok_rows(run_resolver_body(source, "big_module", exa=exa))
+    rows = _ok_rows(run_resolver_body(source, "big_module", mount_root=mount_root))
 
     assert len(rows) >= 2
     assert {row["chunk_count"] for row in rows} == {len(rows)}
@@ -310,10 +330,274 @@ def test_unsupported_scheme_is_rejected(tmp_path):
     assert row["error_kind"] == "bad_source"
 
 
-def test_missing_connection_is_signalled(tmp_path):
-    """A bucketfs source naming an inaccessible connection is signalled, not raised."""
+# ---------------------------------------------------------------------------
+# The BucketFS location grammar: bucketfs:<service>/<bucket>/<path>.
+#
+# A source names a LOCATION and nothing else -- no CONNECTION is read, and the
+# mount path is derived from the source's own segments. These tests own the two
+# claims that are negatives (no CONNECTION lookup, no filesystem touch before the
+# parse) and therefore need instruments rather than plain assertions.
+# ---------------------------------------------------------------------------
+
+
+def _resolver_namespace(mount_root: str | None = None) -> dict:
+    """Exec the resolver body and return its module namespace.
+
+    For the tests whose claim is about that namespace itself -- what is bound in
+    it, and what the body does with a name rebound in it. Every other test goes
+    through ``run_resolver_body``, which is this plus the ``urlopen`` swap.
+    """
+    namespace: dict = {}
+    exec(compile(resolver_python_body(), str(RESOLVER_SQL_PATH), "exec"), namespace)  # noqa: S102
+    if mount_root is not None:
+        namespace["MOUNT_ROOT"] = mount_root
+    return namespace
+
+
+def _emit_rows(namespace: dict, source: str, module_name: str) -> list[dict]:
+    ctx = FakeEmitCtx(source, module_name)
+    namespace["run"](ctx)
+    return [dict(zip(RESOLVER_COLUMNS, row)) for row in ctx.rows]
+
+
+def _reachable_names(code: types.CodeType) -> set[str]:
+    """Every name the compiled body can look up, nested functions included."""
+    names = set(code.co_names)
+    for const in code.co_consts:
+        if isinstance(const, types.CodeType):
+            names |= _reachable_names(const)
+    return names
+
+
+class _FilesystemTouched(Exception):
+    """Raised by the tripwire the instant the resolver reaches for ``os``."""
+
+
+class _FilesystemTripwire:
+    """An ``os`` stand-in that records every attribute touch and then refuses it.
+
+    Stubbing ``os`` is exactly what the mount-root seam exists to avoid, with one
+    exception: asserting the ABSENCE of filesystem calls cannot be done with the
+    real ``os``, and absence is the whole content of "a malformed source is
+    refused before any probe". So this fakes no results -- it makes any touch
+    observable twice over, as a non-empty ``touches`` list and as an ``error`` row
+    where a ``bad_source`` row was expected.
+
+    ``test_filesystem_tripwire_fires_on_a_well_formed_source`` is the positive
+    control: without it an empty ``touches`` list would prove nothing.
+    """
+
+    def __init__(self) -> None:
+        self.touches: list[str] = []
+
+    def __getattr__(self, name: str):
+        self.touches.append(name)
+        raise _FilesystemTouched(f"the resolver touched os.{name}")
+
+
+def _run_with_filesystem_tripwire(
+    source: str, module_name: str, *, mount_root: str
+) -> tuple[list[dict], list[str]]:
+    """Run the resolver body with ``os`` replaced by the tripwire; return (rows, touches)."""
+    namespace = _resolver_namespace(mount_root)
+    tripwire = _FilesystemTripwire()
+    namespace["os"] = tripwire
+    return _emit_rows(namespace, source, module_name), tripwire.touches
+
+
+def _mount_root_without_bucket(tmp_path: Path) -> str:
+    """A mount root where the SERVICE is present but the named bucket is not.
+
+    The live shape of BOTH an ungranted read-protected bucket and a typo'd bucket
+    name (verified on the instance): ``<root>/<service>`` is there, the bucket
+    under it is not. The filesystem cannot tell those two causes apart, which is
+    why a single ``source_unreadable`` covers them.
+    """
+    (tmp_path / "buckets" / _SERVICE).mkdir(parents=True)
+    return str(tmp_path / "buckets")
+
+
+def test_bucketfs_path_makes_no_connection_lookup(tmp_path):
+    """A BucketFS release resolves in a namespace with no ``exa`` bound at all.
+
+    The claim is a negative, so it is made twice from different directions.
+    Statically: the compiled body cannot look up the name ``exa`` anywhere, so no
+    code path -- taken or not, BucketFS or https -- can reach a CONNECTION.
+    Dynamically: the resolve that succeeds below runs in a namespace where ``exa``
+    is provably unbound, and a surviving lookup would surface as an ``error`` row
+    through the never-raise catch-all rather than as a crash. Asserting on the
+    same namespace the resolve uses is what keeps this from being a happy path
+    that a re-bound ``exa`` could quietly satisfy.
+    """
+    assert "exa" not in _reachable_names(compile(resolver_python_body(), "<resolver>", "exec"))
+
+    source, mount_root, _ = _stage_local(tmp_path, standard_library_specs())
+    namespace = _resolver_namespace(mount_root)
+    assert "exa" not in namespace
+
+    rows = _ok_rows(_emit_rows(namespace, source, "cast_shorthand"))
+
+    assert rows[0]["script_name"] == "PREPROC_RT.CAST_SHORTHAND_V1"
+
+
+def test_service_and_bucket_are_not_interchangeable(tmp_path):
+    """The first segment is the service and the second the bucket, in that order.
+
+    The staged release exists at ``<root>/bfsdefault/preproc-protected`` only, so
+    naming those same two segments the other way round must NOT find it. What this
+    pins that the resolving tests cannot: that the derived path follows the
+    source's segment order, so a reader that searched, globbed, or tried the other
+    order as a fallback is caught -- and the message proves the path it probed was
+    built from the source's segments as given.
+    """
+    source, mount_root, _ = _stage_local(tmp_path, standard_library_specs())
+    _ok_rows(run_resolver_body(source, "cast_shorthand", mount_root=mount_root))
+
+    transposed = f"bucketfs:{_BUCKET}/{_SERVICE}/{_TARBALL_NAME}"
+    row = _error_row(run_resolver_body(transposed, "cast_shorthand", mount_root=mount_root))
+
+    assert row["error_kind"] == "source_unreadable"
+    assert f"{mount_root}/{_BUCKET}/{_SERVICE}/{_TARBALL_NAME}" in row["error_message"]
+
+
+def test_filesystem_tripwire_fires_on_a_well_formed_source(tmp_path):
+    """The positive control for the tripwire: a well-formed source DOES touch ``os``.
+
+    The two ``bad_source`` tests below assert an empty touch list. That is only
+    evidence if the instrument fires when a probe does happen -- otherwise a
+    tripwire wired to nothing would pass them both.
+    """
+    _, touches = _run_with_filesystem_tripwire(
+        f"bucketfs:{_SERVICE}/{_BUCKET}/{_TARBALL_NAME}",
+        "cast_shorthand",
+        mount_root=str(tmp_path),
+    )
+
+    assert touches, "the tripwire observed no os access on a well-formed source"
+
+
+_TOO_FEW_SEGMENT_SOURCES = {
+    # An all-caps first segment because that is what the superseded form actually
+    # carried -- an Exasol CONNECTION name. This literal is a DELIBERATE remnant of
+    # the old grammar, kept because the test asserts its rejection: a sweep for
+    # stale `bucketfs:<CONNECTION>/<path>` literals should leave it alone.
+    "legacy_connection_form": "bucketfs:PREPROC_BFS/preproc-lib-0.1.0.tar.gz",
+    "one_segment": "bucketfs:preproc-lib-0.1.0.tar.gz",
+    "scheme_only": "bucketfs:",
+}
+
+
+@pytest.mark.parametrize(
+    "source", list(_TOO_FEW_SEGMENT_SOURCES.values()), ids=list(_TOO_FEW_SEGMENT_SOURCES)
+)
+def test_two_segment_source_is_bad_source(tmp_path, source):
+    """A source carrying fewer than three segments is malformed, and probes nothing.
+
+    The headline case is the superseded ``bucketfs:<CONNECTION>/<path>`` form: the
+    two forms are grammatically identical, so there is no fallback to fall back to
+    -- probing one and then the other would make a source's meaning depend on
+    database state. The message therefore names the shape that would have worked
+    and quotes the source back.
+
+    Rejection must also precede any filesystem call, which is what the empty touch
+    list asserts (see ``test_filesystem_tripwire_fires_on_a_well_formed_source``
+    for why an empty list is evidence). A parse that ran interleaved with the
+    probes could still emit ``bad_source`` while having already stat'd a path
+    derived from an unvalidated segment.
+    """
+    rows, touches = _run_with_filesystem_tripwire(
+        source, "cast_shorthand", mount_root=str(tmp_path)
+    )
+
+    row = _error_row(rows)
+    assert row["error_kind"] == "bad_source"
+    assert "bucketfs:<service>/<bucket>/<path>" in row["error_message"]
+    assert source in row["error_message"]
+    assert touches == []
+
+
+_BAD_SEGMENT_SOURCES = {
+    "empty_bucket": (f"bucketfs:{_SERVICE}//{_TARBALL_NAME}", ""),
+    "empty_release_segment": (f"bucketfs:{_SERVICE}/{_BUCKET}//{_TARBALL_NAME}", ""),
+    "trailing_slash": (f"bucketfs:{_SERVICE}/{_BUCKET}/{_TARBALL_NAME}/", ""),
+    "leading_slash": (f"bucketfs:/buckets/{_SERVICE}/{_BUCKET}/{_TARBALL_NAME}", ""),
+    "dot_as_bucket": (f"bucketfs:{_SERVICE}/./{_TARBALL_NAME}", "."),
+    "dot_mid_path": (f"bucketfs:{_SERVICE}/{_BUCKET}/./{_TARBALL_NAME}", "."),
+    "dotdot_escapes_bucket": (f"bucketfs:{_SERVICE}/{_BUCKET}/../other/{_TARBALL_NAME}", ".."),
+    "dotdot_escapes_service": (
+        f"bucketfs:{_SERVICE}/{_BUCKET}/../../other-service/b/{_TARBALL_NAME}",
+        "..",
+    ),
+    "dotdot_as_service": (f"bucketfs:../{_SERVICE}/{_BUCKET}/{_TARBALL_NAME}", ".."),
+}
+
+
+@pytest.mark.parametrize(
+    ("source", "offending"), list(_BAD_SEGMENT_SOURCES.values()), ids=list(_BAD_SEGMENT_SOURCES)
+)
+def test_traversal_segment_is_bad_source(tmp_path, source, offending):
+    """An empty, ``.`` or ``..`` segment is malformed wherever it appears.
+
+    The mount base is now built from operator-supplied text, so this is what keeps
+    a source unable to address anything outside its own bucket -- and the empty
+    touch list is the stronger half of that claim: nothing outside the bucket is
+    merely *not opened*, it is never even reached. ``leading_slash`` is the shape
+    that matters most for the regression: the deleted ``_mount_base`` accepted an
+    absolute ``/buckets/…`` path verbatim, and that form must now be refused like
+    any other empty first segment.
+    """
+    rows, touches = _run_with_filesystem_tripwire(
+        source, "cast_shorthand", mount_root=str(tmp_path)
+    )
+
+    row = _error_row(rows)
+    assert row["error_kind"] == "bad_source"
+    assert f"segment {offending!r}" in row["error_message"]
+    assert "empty or a path traversal" in row["error_message"]
+    assert source in row["error_message"]
+    assert touches == []
+
+
+def test_unreadable_location_message_names_paths_and_grant(tmp_path):
+    """A failed probe names both probed paths AND the credential prerequisite.
+
+    One error kind carries all three elements because the filesystem cannot say
+    which cause applies, which makes the message the operator's whole diagnostic
+    -- so each element is asserted separately. The paths are matched WITH their
+    labels on purpose: the auto-extracted directory is a prefix of the tarball
+    path, so a bare substring check for it would pass on a message that named only
+    the tarball.
+    """
+    mount_root = _mount_root_without_bucket(tmp_path)
+    source = f"bucketfs:{_SERVICE}/{_BUCKET}/{_TARBALL_NAME}"
+
+    row = _error_row(run_resolver_body(source, "cast_shorthand", mount_root=mount_root))
+
+    assert row["error_kind"] == "source_unreadable"
+    mount_base = f"{mount_root}/{_SERVICE}/{_BUCKET}"
+    assert f"{mount_base}/{_TARBALL_NAME} (tarball)" in row["error_message"]
+    assert f"{mount_base}/{_EXTRACTED_DIR} (auto-extracted)" in row["error_message"]
+    assert (
+        f"CONNECTION TO 'bucketfs:{_SERVICE}/{_BUCKET}' IDENTIFIED BY '<read-password>'"
+        in row["error_message"]
+    )
+
+
+_UNMOUNTED_SOURCE = f"bucketfs:{_SERVICE}/nosuchbucket/lib.tar.gz"
+
+
+def test_unmounted_location_is_signalled(tmp_path):
+    """A well-formed location whose bucket is not mounted is signalled, not raised.
+
+    Retargeted from the deleted ``exa.get_connection`` failure: a BucketFS source
+    no longer names a CONNECTION, so the only remaining "cannot get at it" case is
+    an absent mount, and the never-raise contract must still turn it into one
+    structured ERROR row rather than an exception escaping the UDF.
+    """
     row = _error_row(
-        run_resolver_body("bucketfs:NOPE/lib.tar.gz", "cast_shorthand", exa=make_fake_exa({}))
+        run_resolver_body(
+            _UNMOUNTED_SOURCE, "cast_shorthand", mount_root=_mount_root_without_bucket(tmp_path)
+        )
     )
     assert row["error_kind"] == "source_unreadable"
     assert row["artifact_chunk"] is None
@@ -329,9 +613,9 @@ def test_list_all_sentinel_emits_one_metadata_row_per_module(tmp_path):
     member is read and no sha256 is verified, even for a library-deployed entry
     that has one.
     """
-    source, exa, _ = _stage_local(tmp_path, standard_library_specs())
+    source, mount_root, _ = _stage_local(tmp_path, standard_library_specs())
 
-    rows = _ok_rows(run_resolver_body(source, "*", exa=exa))
+    rows = _ok_rows(run_resolver_body(source, "*", mount_root=mount_root))
 
     assert len(rows) == 2
     by_name = {row["name"]: row for row in rows}
@@ -347,7 +631,9 @@ def test_list_all_sentinel_emits_one_metadata_row_per_module(tmp_path):
 
 def test_list_all_sentinel_propagates_index_read_errors(tmp_path):
     """A source whose index cannot be read still signals a single ERROR row in list mode."""
-    row = _error_row(run_resolver_body("bucketfs:NOPE/lib.tar.gz", "*", exa=make_fake_exa({})))
+    row = _error_row(
+        run_resolver_body(_UNMOUNTED_SOURCE, "*", mount_root=_mount_root_without_bucket(tmp_path))
+    )
     assert row["error_kind"] == "source_unreadable"
     assert row["artifact_chunk"] is None
 
@@ -457,9 +743,9 @@ def test_composite_module_inventory_is_verified_and_emitted(tmp_path):
     ``registry.encode_objects``'s wire format.
     """
     specs = [composite_library_module("subsystem_mod", version=1)]
-    source, exa, _ = _stage_local(tmp_path, specs)
+    source, mount_root, _ = _stage_local(tmp_path, specs)
 
-    rows = _ok_rows(run_resolver_body(source, "subsystem_mod", exa=exa))
+    rows = _ok_rows(run_resolver_body(source, "subsystem_mod", mount_root=mount_root))
 
     assert len(rows) == 1
     expected = composite_object_specs("subsystem_mod", 1)
@@ -470,9 +756,11 @@ def test_composite_inventory_undeclared_object_is_hard_failure(tmp_path):
     """An object the artifact creates but the entry does not declare is a hard failure."""
     specs = [composite_library_module("subsystem_mod", version=1)]
     declared = composite_object_specs("subsystem_mod", 1)[:-1]  # drop HELPER_B
-    source, exa, _ = _stage_local(tmp_path, specs, objects_override={"subsystem_mod": declared})
+    source, mount_root, _ = _stage_local(
+        tmp_path, specs, objects_override={"subsystem_mod": declared}
+    )
 
-    row = _error_row(run_resolver_body(source, "subsystem_mod", exa=exa))
+    row = _error_row(run_resolver_body(source, "subsystem_mod", mount_root=mount_root))
 
     assert row["error_kind"] == "artifact_invalid"
     assert row["artifact_chunk"] is None
@@ -488,9 +776,11 @@ def test_composite_inventory_missing_declared_object_is_hard_failure(tmp_path):
         *composite_object_specs("subsystem_mod", 1),
         {"type": "TABLE", "name": "PREPROC_RT.SUBSYSTEM_MOD_PHANTOM_V1"},
     ]
-    source, exa, _ = _stage_local(tmp_path, specs, objects_override={"subsystem_mod": declared})
+    source, mount_root, _ = _stage_local(
+        tmp_path, specs, objects_override={"subsystem_mod": declared}
+    )
 
-    row = _error_row(run_resolver_body(source, "subsystem_mod", exa=exa))
+    row = _error_row(run_resolver_body(source, "subsystem_mod", mount_root=mount_root))
 
     assert row["error_kind"] == "artifact_invalid"
     assert row["artifact_chunk"] is None
@@ -505,9 +795,9 @@ def test_schema_version_1_entry_derives_single_object_inventory(tmp_path):
     the entry's script_name -- exactly the pre-composite check -- and that
     single-object inventory is what gets emitted.
     """
-    source, exa, _ = _stage_local(tmp_path, standard_library_specs(), schema_version=1)
+    source, mount_root, _ = _stage_local(tmp_path, standard_library_specs(), schema_version=1)
 
-    rows = _ok_rows(run_resolver_body(source, "cast_shorthand", exa=exa))
+    rows = _ok_rows(run_resolver_body(source, "cast_shorthand", mount_root=mount_root))
 
     assert len(rows) == 1
     assert rows[0]["script_name"] == "PREPROC_RT.CAST_SHORTHAND_V1"
@@ -523,9 +813,9 @@ def test_self_deployed_objects_column_is_null(tmp_path):
             "semantic_views", version=3, phase="EXPAND", source=("exasol/semantic_views", "v3.0.0")
         )
     ]
-    source, exa, _ = _stage_local(tmp_path, specs)
+    source, mount_root, _ = _stage_local(tmp_path, specs)
 
-    rows = _ok_rows(run_resolver_body(source, "semantic_views", exa=exa))
+    rows = _ok_rows(run_resolver_body(source, "semantic_views", mount_root=mount_root))
 
     assert rows[0]["objects"] is None
 
@@ -539,9 +829,9 @@ def test_list_all_reports_declared_objects_including_v1_fallback(tmp_path):
     module/db-catalog's pre-install review contract.
     """
     specs = [*standard_library_specs(), composite_library_module("subsystem_mod", version=1)]
-    source, exa, _ = _stage_local(tmp_path, specs, schema_version=1)
+    source, mount_root, _ = _stage_local(tmp_path, specs, schema_version=1)
 
-    rows = _ok_rows(run_resolver_body(source, "*", exa=exa))
+    rows = _ok_rows(run_resolver_body(source, "*", mount_root=mount_root))
 
     by_name = {row["name"]: row for row in rows}
     assert by_name["cast_shorthand"]["objects"] == encode_objects(
@@ -644,9 +934,11 @@ def test_object_without_version_suffix_is_hard_failure(tmp_path):
             ),
         )
     ]
-    source, exa, _ = _stage_local(tmp_path, specs, objects_override={"shared_mod": hand_edited})
+    source, mount_root, _ = _stage_local(
+        tmp_path, specs, objects_override={"shared_mod": hand_edited}
+    )
 
-    row = _error_row(run_resolver_body(source, "shared_mod", exa=exa))
+    row = _error_row(run_resolver_body(source, "shared_mod", mount_root=mount_root))
 
     assert row["error_kind"] == "artifact_invalid"
     assert row["artifact_chunk"] is None
@@ -682,9 +974,11 @@ def test_object_with_another_generations_suffix_is_hard_failure(tmp_path):
             ),
         )
     ]
-    source, exa, _ = _stage_local(tmp_path, specs, objects_override={"crossgen_mod": hand_edited})
+    source, mount_root, _ = _stage_local(
+        tmp_path, specs, objects_override={"crossgen_mod": hand_edited}
+    )
 
-    row = _error_row(run_resolver_body(source, "crossgen_mod", exa=exa))
+    row = _error_row(run_resolver_body(source, "crossgen_mod", mount_root=mount_root))
 
     assert row["error_kind"] == "artifact_invalid"
     assert row["artifact_chunk"] is None
@@ -722,9 +1016,9 @@ def test_artifact_creating_an_object_twice_is_hard_failure(tmp_path):
             objects=tuple(declared),
         )
     ]
-    source, exa, _ = _stage_local(tmp_path, specs)
+    source, mount_root, _ = _stage_local(tmp_path, specs)
 
-    row = _error_row(run_resolver_body(source, "dup_mod", exa=exa))
+    row = _error_row(run_resolver_body(source, "dup_mod", mount_root=mount_root))
 
     assert row["error_kind"] == "artifact_invalid"
     assert row["artifact_chunk"] is None
@@ -759,11 +1053,11 @@ def test_declaration_missing_its_name_stays_a_structured_failure(tmp_path):
             objects=legal,
         )
     ]
-    source, exa, _ = _stage_local(
+    source, mount_root, _ = _stage_local(
         tmp_path, specs, objects_override={"noname_mod": [dict(legal[0]), {"type": "TABLE"}]}
     )
 
-    row = _error_row(run_resolver_body(source, "noname_mod", exa=exa))
+    row = _error_row(run_resolver_body(source, "noname_mod", mount_root=mount_root))
 
     assert row["error_kind"] == "artifact_invalid"
     assert "must declare both 'type' and 'name'" in row["error_message"]
@@ -843,9 +1137,9 @@ def test_inventory_wider_than_the_objects_column_is_hard_failure(tmp_path):
     Exasol's.
     """
     objects = _inventory_over_limit("wide_inventory_mod", 1)
-    source, exa, _ = _stage_local(tmp_path, _inventory_spec("wide_inventory_mod", objects))
+    source, mount_root, _ = _stage_local(tmp_path, _inventory_spec("wide_inventory_mod", objects))
 
-    row = _error_row(run_resolver_body(source, "wide_inventory_mod", exa=exa))
+    row = _error_row(run_resolver_body(source, "wide_inventory_mod", mount_root=mount_root))
 
     assert row["error_kind"] == "artifact_invalid"
     assert row["artifact_chunk"] is None
@@ -861,9 +1155,9 @@ def test_inventory_exactly_at_the_column_width_resolves(tmp_path):
     off-by-one would refuse a maximal but perfectly recordable inventory.
     """
     objects = _inventory_at_limit("edge_inventory_mod", 1)
-    source, exa, _ = _stage_local(tmp_path, _inventory_spec("edge_inventory_mod", objects))
+    source, mount_root, _ = _stage_local(tmp_path, _inventory_spec("edge_inventory_mod", objects))
 
-    rows = _ok_rows(run_resolver_body(source, "edge_inventory_mod", exa=exa))
+    rows = _ok_rows(run_resolver_body(source, "edge_inventory_mod", mount_root=mount_root))
 
     assert rows[0]["objects"] == encode_objects(objects)
     assert len(rows[0]["objects"]) == _OBJECTS_MAX_CHARS
@@ -881,9 +1175,9 @@ def test_list_all_over_wide_inventory_emits_only_the_error_row(tmp_path):
     """
     objects = _inventory_over_limit("wide_inventory_mod", 1)
     specs = [*standard_library_specs(), *_inventory_spec("wide_inventory_mod", objects)]
-    source, exa, _ = _stage_local(tmp_path, specs)
+    source, mount_root, _ = _stage_local(tmp_path, specs)
 
-    row = _error_row(run_resolver_body(source, "*", exa=exa))
+    row = _error_row(run_resolver_body(source, "*", mount_root=mount_root))
 
     assert row["error_kind"] == "artifact_invalid"
     assert str(_OBJECTS_MAX_CHARS) in row["error_message"]

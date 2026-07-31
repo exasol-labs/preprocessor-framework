@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -26,8 +27,10 @@ import pyexasol
 import pytest
 from _dbfixtures import (
     EMITS_CHUNK_CHARS,
+    BucketFsConfig,
     bucketfs_config,
     bucketfs_delete,
+    bucketfs_protected_config,
     bucketfs_put,
     build_library_tarball,
     composite_artifact_text,
@@ -124,7 +127,7 @@ def bucketfs_rich_source(resolver_deployed):
         f"CREATE OR REPLACE CONNECTION {_RICH_CONNECTION} TO '{config.bucketfs_address}'"
     )
     connection.execute(f"GRANT ACCESS ON CONNECTION {_RICH_CONNECTION} TO PREPROC_ADMIN")
-    source = f"bucketfs:{_RICH_CONNECTION}/{_RICH_BUCKET_PATH}"
+    source = config.bucketfs_source(_RICH_BUCKET_PATH)
 
     if not wait_until_ok(connection, source, "cast_shorthand"):
         _drop(connection, config)
@@ -202,7 +205,7 @@ def bucketfs_composite_source(resolver_deployed):
         f"CREATE OR REPLACE CONNECTION {_COMPOSITE_CONNECTION} TO '{config.bucketfs_address}'"
     )
     connection.execute(f"GRANT ACCESS ON CONNECTION {_COMPOSITE_CONNECTION} TO PREPROC_ADMIN")
-    source = f"bucketfs:{_COMPOSITE_CONNECTION}/{_COMPOSITE_BUCKET_PATH}"
+    source = config.bucketfs_source(_COMPOSITE_BUCKET_PATH)
 
     if not wait_until_ok(connection, source, "subsystem_mod"):
         _drop_composite(connection, config)
@@ -250,7 +253,7 @@ def bucketfs_schema_v1_source(resolver_deployed):
         f"CREATE OR REPLACE CONNECTION {_SCHEMA_V1_CONNECTION} TO '{config.bucketfs_address}'"
     )
     connection.execute(f"GRANT ACCESS ON CONNECTION {_SCHEMA_V1_CONNECTION} TO PREPROC_ADMIN")
-    source = f"bucketfs:{_SCHEMA_V1_CONNECTION}/{_SCHEMA_V1_BUCKET_PATH}"
+    source = config.bucketfs_source(_SCHEMA_V1_BUCKET_PATH)
 
     if not wait_until_ok(connection, source, "cast_shorthand"):
         _drop_schema_v1(connection, config)
@@ -432,16 +435,199 @@ def test_resolver_admin_only(resolver_deployed):
             if prev_pw is not None:
                 os.environ["EXASOL_PASSWORD"] = prev_pw
 
+        source = BucketFsConfig(
+            host="", port="", bucket="default", write_password="", service="bfsdefault"
+        ).bucketfs_source("preproc-lib-0.1.0.tar.gz")
         with pytest.raises(Exception):
-            other.execute(
-                "SELECT PREPROC.MODULE_RESOLVER_V1("
-                "'bucketfs:PREPROC_TEST_BFS/preproc-lib-0.1.0.tar.gz', 'cast_shorthand')"
-            )
+            other.execute(f"SELECT PREPROC.MODULE_RESOLVER_V1('{source}', 'cast_shorthand')")
     finally:
         if other is not None:
             other.close()
         try:
             admin.execute(f"DROP USER {non_admin} CASCADE")
+        except Exception:
+            pass
+
+
+def test_resolver_rejects_legacy_connection_form(resolver_deployed):
+    """A two-segment bucketfs source (the retired CONNECTION-named form) is bad_source.
+
+    'bucketfs:PREPROC_BFS/preproc-lib-0.1.0.tar.gz' below is the pre-delta,
+    two-segment form under deliberate rejection here -- see
+    change-bucketfs-source-to-location -- not a literal left behind by oversight.
+    No CONNECTION fallback exists, so this never touches the filesystem.
+    """
+    source = "bucketfs:PREPROC_BFS/preproc-lib-0.1.0.tar.gz"
+    row = _one(resolve_rows(resolver_deployed, source, "cast_shorthand"))
+
+    assert row["status"] == "ERROR"
+    assert row["error_kind"] == "bad_source"
+    assert "bucketfs:<service>/<bucket>/<path>" in row["error_message"]
+    assert source in row["error_message"]
+
+
+def test_resolver_unreadable_location_reports_credential_hint(resolver_deployed):
+    """An unreadable-but-well-formed location names both probed paths and the grant.
+
+    Targets a release that does not exist inside the always-public ``default``
+    bucket, so the failure is purely "no such release" -- proving the message
+    contract with no staged fixture needed. The extracted-directory path is a
+    PREFIX of the tarball path, so both are asserted WITH their labels; a bare
+    substring check for the shorter one would also pass against a message naming
+    only the tarball.
+    """
+    config = BucketFsConfig(
+        host="", port="", bucket="default", write_password="", service="bfsdefault"
+    )
+    source = config.bucketfs_source("no-such-release.tar.gz")
+
+    row = _one(resolve_rows(resolver_deployed, source, "cast_shorthand"))
+
+    assert row["status"] == "ERROR"
+    assert row["error_kind"] == "source_unreadable"
+    assert "/buckets/bfsdefault/default/no-such-release.tar.gz (tarball)" in row["error_message"]
+    assert "/buckets/bfsdefault/default/no-such-release (auto-extracted)" in row["error_message"]
+    assert (
+        "CONNECTION TO 'bucketfs:bfsdefault/default' IDENTIFIED BY '<read-password>'"
+        in row["error_message"]
+    )
+
+
+def test_read_protected_bucket_resolves_only_while_granted(resolver_deployed):
+    """A read-protected bucket resolves only while its CONNECTION grant is held.
+
+    Task 0.1's live evidence (decision-log.md Design Decision [1]) found this
+    scenario UNFALSIFIABLE as SYS: SYS reads a protected bucket with no grant to
+    anyone. This MUST therefore run as a dedicated non-superuser holding
+    PREPROC_ADMIN (to execute the resolver at all) plus, separately, ACCESS on the
+    protected bucket's CONNECTION. Grant and revoke are asserted in the SAME
+    session with no reconnect between them, matching the live-verified fact that
+    visibility is re-evaluated per statement in both directions (controls C/F in
+    the decision log).
+
+    The release resolved here is staged BY THIS TEST, with the write password
+    ``bucketfs_protected_config`` already requires, under a bucket path the test
+    owns end to end and deletes in ``finally``. A green run therefore proves the
+    grant rather than the presence of an artefact somebody else left in the
+    bucket: with nothing staged, the granted read fails ``source_unreadable``,
+    which is indistinguishable from this very premise being falsified.
+
+    Mount readiness is polled with the ADMIN session, whose read of the protected
+    bucket does not depend on the grant under test -- so a poll timeout reports a
+    BucketFS extraction/replication problem and skips, while a granted read that
+    fails AFTER the admin read succeeded is unambiguously a grant failure and
+    fails loudly. BucketFS auto-extracts the upload and presents only the
+    extracted DIRECTORY on the UDF mount (verified live), so this resolves
+    through the reader's auto-extracted branch; nothing here assumes the tarball
+    file itself is visible there.
+
+    Skips cleanly when the protected bucket is not configured -- it is consumed,
+    never created, by this suite (see ``bucketfs_protected_config``'s docstring
+    for the provisioning command).
+    """
+    protected = bucketfs_protected_config()
+    if protected is None:
+        pytest.skip(
+            "the read-protected bucket is not configured; set "
+            "EXASOL_BFS_PROTECTED_BUCKET, EXASOL_BFS_PROTECTED_READ_PASSWORD, and "
+            "EXASOL_BFS_PROTECTED_WRITE_PASSWORD to run this"
+        )
+
+    admin = resolver_deployed
+    non_admin = "PREPROC_TEST_PROTECTED_READER"
+    password = "pw_PREPROC_protected_1"
+    connection_name = "PREPROC_TEST_PROTECTED_CONN"
+    # A bucket path unique per run. BucketFS answers 423 Locked, then stalls past a
+    # two-minute client timeout, on a PUT to a path it deleted moments ago (measured
+    # live), so a fixed name would make every quick re-run skip on staging instead of
+    # asserting. Unique names also keep an artefact a crashed run left behind unable
+    # to stand in for the one this run must upload itself.
+    bucket_path = f"preproc-lib-protected-{uuid.uuid4().hex[:12]}.tar.gz"
+    source = protected.bucketfs_source(bucket_path)
+
+    work = Path(tempfile.mkdtemp(prefix="preproc-protected-"))
+    build_library_tarball(
+        work / bucket_path, [library_module("cast_shorthand", version=1, function="cast_shorthand")]
+    )
+
+    other = None
+    try:
+        try:
+            bucketfs_put(protected, bucket_path, (work / bucket_path).read_bytes())
+        except Exception as exc:  # noqa: BLE001 - staging is environment-dependent; skip on failure
+            pytest.skip(f"cannot stage the release into the read-protected bucket: {exc}")
+
+        try:
+            admin.execute(f"DROP USER {non_admin} CASCADE")
+        except Exception:
+            pass
+        try:
+            admin.execute(f'CREATE USER {non_admin} IDENTIFIED BY "{password}"')
+            admin.execute(f"GRANT CREATE SESSION TO {non_admin}")
+            admin.execute(f"GRANT PREPROC_ADMIN TO {non_admin}")
+        except Exception as exc:
+            pytest.skip(f"cannot create a non-admin user in this environment: {exc}")
+
+        admin.execute(
+            f"CREATE OR REPLACE CONNECTION {connection_name} TO '{protected.bucketfs_address}' "
+            f"IDENTIFIED BY '{protected.read_password}'"
+        )
+        # Granted to the test user ALONE, never to PREPROC_ADMIN: the user holds
+        # that role, so a role-level grant would survive the REVOKE below and the
+        # revoked assertion would silently stop testing anything.
+        admin.execute(f"GRANT ACCESS ON CONNECTION {connection_name} TO {non_admin}")
+
+        # Polled only once the CONNECTION exists, and that ordering is load-bearing:
+        # verified live on 2026-07-31, the protected bucket is absent from /buckets
+        # entirely -- for SYS too -- until some CONNECTION addressing it with the
+        # correct read password exists. What is under test is the GRANT to the test
+        # user, which the admin's own read does not depend on.
+        if not wait_until_ok(admin, source, "cast_shorthand"):
+            pytest.skip(
+                f"BucketFS did not extract/replicate {source} to the UDF mount in time: "
+                "the admin session cannot resolve it either, so the granted read below "
+                "could not tell that apart from a failed grant"
+            )
+
+        prev_user = os.environ.get("EXASOL_USER")
+        prev_pw = os.environ.get("EXASOL_PASSWORD")
+        os.environ["EXASOL_USER"] = non_admin
+        os.environ["EXASOL_PASSWORD"] = password
+        try:
+            other = connect_from_env()
+        finally:
+            if prev_user is not None:
+                os.environ["EXASOL_USER"] = prev_user
+            if prev_pw is not None:
+                os.environ["EXASOL_PASSWORD"] = prev_pw
+
+        granted_row = _one(resolve_rows(other, source, "cast_shorthand"))
+        assert granted_row["status"] == "OK", (
+            f"the granted read of {source} failed although the admin session resolved it, "
+            f"so this is the grant and not the staging: "
+            f"{granted_row['error_kind']}: {granted_row['error_message']}"
+        )
+
+        admin.execute(f"REVOKE ACCESS ON CONNECTION {connection_name} FROM {non_admin}")
+
+        revoked_row = _one(resolve_rows(other, source, "cast_shorthand"))
+        assert revoked_row["status"] == "ERROR"
+        assert revoked_row["error_kind"] == "source_unreadable"
+    finally:
+        if other is not None:
+            other.close()
+        try:
+            admin.execute(f"DROP CONNECTION IF EXISTS {connection_name}")
+        except Exception:
+            pass
+        try:
+            admin.execute(f"DROP USER {non_admin} CASCADE")
+        except Exception:
+            pass
+        # Deleted even when staging above raised: a PUT can time out client-side
+        # while the upload still lands (measured live).
+        try:
+            bucketfs_delete(protected, bucket_path)
         except Exception:
             pass
 

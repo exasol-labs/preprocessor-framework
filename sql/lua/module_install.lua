@@ -14,15 +14,20 @@
 --   An unversioned admin entry point in PREPROC, created INVOKER rights (Exasol
 --   has no definer-rights scripts). The caller MUST hold PREPROC_ADMIN, which
 --   confers ownership of PREPROC / PREPROC_RT, CREATE SCRIPT, and — once the
---   operator grants it — ACCESS on the BucketFS CONNECTION. This is exactly the
---   boundary REFRESH_CORE already uses to CREATE the PREPROC_RT.P_<hash> profile
---   scripts at refresh time. The resolver UDF is admin-only (never PUBLIC), so a
---   non-admin cannot reach BucketFS / the network through it, and a non-admin
---   caller fails at the first privileged access.
+--   operator grants it — ACCESS on the BucketFS CONNECTION: the credential
+--   grant that makes Exasol mount the read-protected bucket, not a name the
+--   source carries. Mount visibility follows the CALLING session, not the
+--   script owner, so this INVOKER-rights entry point only ever sees what the
+--   caller was granted. This is exactly the boundary REFRESH_CORE already
+--   uses to CREATE the PREPROC_RT.P_<hash> profile scripts at refresh time.
+--   The resolver UDF is admin-only (never PUBLIC), so a non-admin cannot
+--   reach BucketFS / the network through it, and a non-admin caller fails at
+--   the first privileged access.
 --
 -- Parameters (declared in the CREATE header added by install.py / bundle.py; bare
 -- names, no SQL types)
---   source       VARCHAR  a `bucketfs:` or `https:` source (see the resolver)
+--   source       VARCHAR  a `bucketfs:<service>/<bucket>/<path>` location or
+--                         an `https:` source (see the resolver)
 --   module_name  VARCHAR  the module to install
 --   scope        VARCHAR  REQUIRED `TYPE:value`, TYPE in {ROLE, USER}; targets
 --                         RULE ACTIVATION (who receives the transform), NOT
@@ -855,10 +860,14 @@ local rule_created = (rule_res[1] ~= nil and rule_res[1][2] == true)
 -- --- Step 5: idempotently upsert the provenance row ---------------------------
 -- `source` is the effective source the operator/default resolved from (its
 -- audit value: reveals whether a mutable `latest` tag, a pinned vX.Y.Z, or a
--- bucketfs: path was used); library_version is the concrete release the index
--- self-declared, so a `latest` install is auditable back to a fixed version. The
--- inventory is recorded LAST of the arguments because the database never retains
--- the artifact, so this column is the only thing reclaim can later drop from.
+-- bucketfs: location was used); library_version is the concrete release the
+-- index self-declared, so a `latest` install is auditable back to a fixed
+-- version. The column records the source exactly as given, with no re-parse
+-- and no migration of older rows: one written before the location grammar
+-- still reads bucketfs:<CONNECTION>/<path>, which is no longer resolvable and
+-- is kept only as the historical record. The inventory is recorded LAST of
+-- the arguments because the database never retains the artifact, so this
+-- column is the only thing reclaim can later drop from.
 local reg_ok, reg_res = pquery("EXECUTE SCRIPT PREPROC.MODULE_REGISTER("
     .. sql_str(name) .. ", " .. string.format("%d", version) .. ", "
     .. sql_nullable(source_repo) .. ", " .. sql_nullable(source_ref) .. ", "

@@ -21,6 +21,7 @@ from pathlib import Path
 
 import pytest
 from _dbfixtures import (
+    BucketFsConfig,
     bucketfs_config,
     bucketfs_delete,
     bucketfs_put,
@@ -171,7 +172,7 @@ def bucketfs_catalog_inventory_source(resolver_deployed):
         f"CREATE OR REPLACE CONNECTION {_CATALOG_INV_CONNECTION} TO '{config.bucketfs_address}'"
     )
     connection.execute(f"GRANT ACCESS ON CONNECTION {_CATALOG_INV_CONNECTION} TO PREPROC_ADMIN")
-    source = f"bucketfs:{_CATALOG_INV_CONNECTION}/{_CATALOG_INV_BUCKET_PATH}"
+    source = config.bucketfs_source(_CATALOG_INV_BUCKET_PATH)
 
     if not wait_until_ok(connection, source, _QUAD_MODULE_NAME):
         _drop_catalog_inventory(connection, config)
@@ -222,7 +223,7 @@ def bucketfs_catalog_schema_v1_source(resolver_deployed):
         f"CREATE OR REPLACE CONNECTION {_CATALOG_V1_CONNECTION} TO '{config.bucketfs_address}'"
     )
     connection.execute(f"GRANT ACCESS ON CONNECTION {_CATALOG_V1_CONNECTION} TO PREPROC_ADMIN")
-    source = f"bucketfs:{_CATALOG_V1_CONNECTION}/{_CATALOG_V1_BUCKET_PATH}"
+    source = config.bucketfs_source(_CATALOG_V1_BUCKET_PATH)
 
     if not wait_until_ok(connection, source, "cast_shorthand"):
         _drop_catalog_schema_v1(connection, config)
@@ -435,11 +436,11 @@ def test_catalog_non_admin_rejected(catalog_deployed):
             if prev_pw is not None:
                 os.environ["EXASOL_PASSWORD"] = prev_pw
 
+        source = BucketFsConfig(
+            host="", port="", bucket="default", write_password="", service="bfsdefault"
+        ).bucketfs_source("preproc-lib-0.1.0.tar.gz")
         with pytest.raises(Exception):
-            other.execute(
-                "EXECUTE SCRIPT PREPROC.MODULE_CATALOG("
-                "'bucketfs:PREPROC_TEST_BFS/preproc-lib-0.1.0.tar.gz')"
-            )
+            other.execute(f"EXECUTE SCRIPT PREPROC.MODULE_CATALOG('{source}')")
     finally:
         if other is not None:
             other.close()
@@ -447,6 +448,27 @@ def test_catalog_non_admin_rejected(catalog_deployed):
             admin.execute(f"DROP USER {non_admin} CASCADE")
         except Exception:
             pass
+
+
+def test_catalog_malformed_bucketfs_source_reports_without_write(catalog_deployed):
+    """A malformed (two-segment) bucketfs source is reported without any write.
+
+    MODULE_CATALOG is read-only regardless, but this pins the malformed-source
+    failure mode specifically, naming the expected three-segment shape.
+    'bucketfs:PREPROC_BFS/preproc-lib-0.1.0.tar.gz' is the pre-delta, two-segment
+    form under deliberate rejection here -- not a literal left behind by oversight.
+    """
+    conn = catalog_deployed
+    source = "bucketfs:PREPROC_BFS/preproc-lib-0.1.0.tar.gz"
+    before = _snapshot(conn)
+
+    with pytest.raises(Exception) as exc_info:
+        _catalog_rows(conn, source)
+    assert "bucketfs:<service>/<bucket>/<path>" in str(exc_info.value)
+
+    after = _snapshot(conn)
+    for table in _STATE_TABLES:
+        assert after[table] == before[table], f"PREPROC.{table} changed after a malformed source"
 
 
 def test_catalog_reports_object_inventory(bucketfs_catalog_inventory_source, catalog_deployed):

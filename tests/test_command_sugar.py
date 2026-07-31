@@ -807,11 +807,11 @@ def test_install_module_expands_to_module_install(sugar_env):
     result = _expand(
         sugar_env,
         'PREPROC INSTALL MODULE "cast_shorthand" FROM '
-        "'bucketfs:PREPROC_BFS/preproc-lib-0.1.0.tar.gz' FOR ROLE PREPROC_ADMIN",
+        "'bucketfs:bfsdefault/default/preproc-lib-0.1.0.tar.gz' FOR ROLE PREPROC_ADMIN",
     )
     assert result == (
         "EXECUTE SCRIPT PREPROC.MODULE_INSTALL("
-        "'bucketfs:PREPROC_BFS/preproc-lib-0.1.0.tar.gz', 'cast_shorthand', "
+        "'bucketfs:bfsdefault/default/preproc-lib-0.1.0.tar.gz', 'cast_shorthand', "
         "'ROLE:PREPROC_ADMIN')"
     )
 
@@ -845,17 +845,17 @@ def test_install_module_for_user_threads_user_scope(sugar_env):
     result = _expand(
         sugar_env,
         'PREPROC INSTALL MODULE "cast_shorthand" FROM '
-        "'bucketfs:PREPROC_BFS/preproc-lib-0.1.0.tar.gz' FOR USER BOB",
+        "'bucketfs:bfsdefault/default/preproc-lib-0.1.0.tar.gz' FOR USER BOB",
     )
     assert result == (
         "EXECUTE SCRIPT PREPROC.MODULE_INSTALL("
-        "'bucketfs:PREPROC_BFS/preproc-lib-0.1.0.tar.gz', 'cast_shorthand', "
+        "'bucketfs:bfsdefault/default/preproc-lib-0.1.0.tar.gz', 'cast_shorthand', "
         "'USER:BOB')"
     )
     result_lower = _expand(
         sugar_env,
         'preproc install module "cast_shorthand" from '
-        "'bucketfs:PREPROC_BFS/preproc-lib-0.1.0.tar.gz' for user BOB",
+        "'bucketfs:bfsdefault/default/preproc-lib-0.1.0.tar.gz' for user BOB",
     )
     assert result_lower == result
 
@@ -865,11 +865,35 @@ def test_catalog_modules_expands_to_module_catalog(sugar_env):
     """CATALOG MODULES FROM '<source>' expands to a single MODULE_CATALOG call."""
     result = _expand(
         sugar_env,
-        "PREPROC CATALOG MODULES FROM 'bucketfs:PREPROC_BFS/preproc-lib-0.1.0.tar.gz'",
+        "PREPROC CATALOG MODULES FROM 'bucketfs:bfsdefault/default/preproc-lib-0.1.0.tar.gz'",
     )
     assert result == (
-        "EXECUTE SCRIPT PREPROC.MODULE_CATALOG('bucketfs:PREPROC_BFS/preproc-lib-0.1.0.tar.gz')"
+        "EXECUTE SCRIPT PREPROC.MODULE_CATALOG("
+        "'bucketfs:bfsdefault/default/preproc-lib-0.1.0.tar.gz')"
     )
+
+
+def test_module_source_token_carried_verbatim_at_any_depth(sugar_env):
+    """The FROM source token is carried through opaque and unparsed, at any path depth.
+
+    R9: the sugar never parses or validates a ``bucketfs:`` source -- it is a
+    single quoted span threaded straight into the EXECUTE SCRIPT call, so the
+    location form's extra ``/`` separators (service/bucket/multi-segment path)
+    disturb nothing.
+    """
+    deep_source = "bucketfs:bfsdefault/default/nested/path/segments/preproc-lib-0.1.0.tar.gz"
+
+    install_result = _expand(
+        sugar_env,
+        f"PREPROC INSTALL MODULE \"cast_shorthand\" FROM '{deep_source}' FOR ROLE PREPROC_ADMIN",
+    )
+    assert install_result == (
+        f"EXECUTE SCRIPT PREPROC.MODULE_INSTALL('{deep_source}', 'cast_shorthand', "
+        "'ROLE:PREPROC_ADMIN')"
+    )
+
+    catalog_result = _expand(sugar_env, f"PREPROC CATALOG MODULES FROM '{deep_source}'")
+    assert catalog_result == f"EXECUTE SCRIPT PREPROC.MODULE_CATALOG('{deep_source}')"
 
 
 # The built-in default source used when INSTALL/CATALOG omit the FROM clause —
@@ -925,7 +949,7 @@ def test_malformed_install_module_declined(sugar_env):
         _expand(
             sugar_env,
             "PREPROC INSTALL MODULE cast_shorthand FROM "
-            "'bucketfs:PREPROC_BFS/preproc-lib-0.1.0.tar.gz'",
+            "'bucketfs:bfsdefault/default/preproc-lib-0.1.0.tar.gz'",
         )
         is None
     )

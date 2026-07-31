@@ -809,8 +809,12 @@ name (usually `bfsdefault`) and read access is governed entirely by this granted
 CONNECTION and its read password.
 
 The connection name (`PREPROC_BFS` above) is never hardcoded by the
-framework — it is whatever the operator named it, referenced by the
-`bucketfs:<CONNECTION_NAME>/<path>` source string described below.
+framework, and — unlike the retired source form — it is never referenced by a
+`bucketfs:` source string either. `bucketfs:` always names a location, a
+service and a bucket; the CONNECTION's only role is the credential grant
+above, which is what makes a read-protected bucket's mount visible to
+`PREPROC_ADMIN` in the first place. The resolver reads the mount by that
+location directly, described below.
 
 ### Staging a release tarball
 
@@ -825,7 +829,7 @@ Note on how BucketFS stores it: BucketFS auto-extracts an uploaded archive
 into a directory on the UDF mount as soon as it lands, rather than leaving the
 compressed file sitting there untouched. You still write the source string
 naming the archive exactly as uploaded —
-`bucketfs:PREPROC_BFS/preproc-lib-0.3.0.tar.gz` — and the resolver
+`bucketfs:bfsdefault/preprocessor/preproc-lib-0.3.0.tar.gz` — and the resolver
 transparently locates and reads the auto-extracted content behind that name;
 this BucketFS-side extraction detail requires no different source syntax and
 no extra operator step.
@@ -837,10 +841,10 @@ Two equivalent forms — a direct script call, or the `PREPROC` sugar
 
 ```sql
 -- Direct script call:
-EXECUTE SCRIPT PREPROC.MODULE_INSTALL('bucketfs:PREPROC_BFS/preproc-lib-0.3.0.tar.gz', 'cast_shorthand', 'ROLE:ANALYSTS');
+EXECUTE SCRIPT PREPROC.MODULE_INSTALL('bucketfs:bfsdefault/preprocessor/preproc-lib-0.3.0.tar.gz', 'cast_shorthand', 'ROLE:ANALYSTS');
 
 -- Sugar:
-PREPROC INSTALL MODULE cast_shorthand FROM 'bucketfs:PREPROC_BFS/preproc-lib-0.3.0.tar.gz' FOR ROLE ANALYSTS;
+PREPROC INSTALL MODULE cast_shorthand FROM 'bucketfs:bfsdefault/preprocessor/preproc-lib-0.3.0.tar.gz' FOR ROLE ANALYSTS;
 ```
 
 The third argument is a `TYPE:value` scope (`TYPE` ∈ `ROLE` | `USER`), the
@@ -884,10 +888,10 @@ are already installed:
 
 ```sql
 -- Direct script call:
-EXECUTE SCRIPT PREPROC.MODULE_CATALOG('bucketfs:PREPROC_BFS/preproc-lib-0.3.0.tar.gz');
+EXECUTE SCRIPT PREPROC.MODULE_CATALOG('bucketfs:bfsdefault/preprocessor/preproc-lib-0.3.0.tar.gz');
 
 -- Sugar:
-PREPROC CATALOG MODULES FROM 'bucketfs:PREPROC_BFS/preproc-lib-0.3.0.tar.gz';
+PREPROC CATALOG MODULES FROM 'bucketfs:bfsdefault/preprocessor/preproc-lib-0.3.0.tar.gz';
 ```
 
 Returns one row per module the source's registry index advertises. The columns,

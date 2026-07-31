@@ -231,7 +231,7 @@ PREPROC INSTALL MODULE my_guard
   FROM 'https://git.internal/preproc-modules/raw/v2/registry/index.json' FOR ROLE DBA;
 
 -- or staged in BucketFS, for a cluster with no egress
-PREPROC INSTALL MODULE my_guard FROM 'bucketfs:MY_BFS/own-lib-2.0.0.tar.gz' FOR ROLE DBA;
+PREPROC INSTALL MODULE my_guard FROM 'bucketfs:bfsdefault/my-bucket/own-lib-2.0.0.tar.gz' FOR ROLE DBA;
 ```
 
 Your index declares its own `library_version`, and each install records it

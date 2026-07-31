@@ -56,7 +56,7 @@ CREATE OR REPLACE CONNECTION CONFD_CONNECTION
 -- `confd_control` creates fifteen - and names every one of them, before you
 -- install anything.
 
-PREPROC CATALOG MODULES FROM 'bucketfs:PREPROC_BFS/preproc-lib-0.3.0.tar.gz';
+PREPROC CATALOG MODULES FROM 'bucketfs:bfsdefault/default/preproc-lib-0.3.0.tar.gz';
 
 -- Read the OBJECTS column for confd_control and note where things land - this is
 -- file 06's lesson applied by a real module, not by a demo:
@@ -88,7 +88,7 @@ PREPROC CATALOG MODULES FROM 'bucketfs:PREPROC_BFS/preproc-lib-0.3.0.tar.gz';
 -- it is one lifecycle object, not fifteen loose scripts.
 
 PREPROC INSTALL MODULE confd_control
-    FROM 'bucketfs:PREPROC_BFS/preproc-lib-0.3.0.tar.gz'
+    FROM 'bucketfs:bfsdefault/default/preproc-lib-0.3.0.tar.gz'
     FOR ROLE DBA;
 
 -- Installing from the bucket is deliberate: it shows the big module reaching an
