@@ -129,16 +129,24 @@ jobs:
 
       # Start the Exasol database container.
       # --privileged is required by docker-db (uses cgroups internally).
-      # --shm-size=2g gives the DB shared memory headroom during boot.
       # Port 8563 is the default Exasol client port. The image tag tracks the
       # floating latest tag so the integration suite always runs against the
       # newest docker-db release rather than a stale pinned version.
+      #
+      # --shm-size=4g (raised from 2g): a Python3 UDF runs in its own VM that
+      # talks to the engine over shared memory, so /dev/shm is the resource the
+      # resolver's error paths were starving on. At 2g the runner produced
+      # "VM error: Internal error: VM crashed" -- the VM being killed rather
+      # than raising -- for the bucketfs error-path tests, while the same suite
+      # in the same order passes against docker-db locally where the container
+      # is uncapped. Deliberately NOT `-m/--memory`: the container is otherwise
+      # uncapped here, so a limit would reduce headroom rather than add it.
       - name: Start Exasol docker-db
         run: |
           docker run -d \
             --name exasol \
             --privileged \
-            --shm-size=2g \
+            --shm-size=4g \
             -p 8563:8563 \
             exasol/docker-db:latest
 
