@@ -171,10 +171,8 @@ after `release.sql`:
 | `examples/demo_ping.sql` | EXPAND | `PING` → `SELECT 'PONG'` |
 | `examples/demo_translate.sql` | TRANSLATE | dialect transpilation (`sqlglot` UDF + module) |
 | `examples/demo_audit.sql` | REWRITE | inert `/* PREPROC_AUDIT user=… */` annotation |
-| `examples/confd_admin.sql` | EXPAND | `CONTROL DATABASE …` / `CONTROL BUCKETFS …` via the Exasol ConfD gateway (needs a `CONFD_CONNECTION`; see the file header) |
 
-Each example's registration rule is scoped to `ROLE PREPROC_ADMIN` (the confd
-example to `ROLE DBA`); edit the scope in the file's trailing `RULE_ADD` to suit,
+Each example's registration rule is scoped to `ROLE PREPROC_ADMIN`; edit the scope in the file's trailing `RULE_ADD` to suit,
 and note a user must HOLD that role for the rule to resolve to them.
 
 **TRANSLATE module cost note**: the `DEMO_TRANSLATE_V1` module calls a Python3
@@ -868,7 +866,7 @@ the exact registry key and scope you mean.)
 
 | `module` | `version` | `phase` | `status` | `library_version` |
 |---|---|---|---|---|
-| `confd_control` | `1` | `EXPAND` | `installed` | `0.3.0` |
+| `cast_shorthand` | `1` | `TRANSLATE` | `installed` | `0.3.0` |
 
 `library_version` is the concrete release the resolved index self-declared — the
 audit anchor when the source was a mutable `latest` tag.
@@ -904,7 +902,7 @@ in order (verified on 2026.1):
 | `PHASE` | `TRANSLATE` / `EXPAND` / `REWRITE` |
 | `DEPLOY_MODE` | `library-deployed` or `self-deployed` |
 | `INSTALLED` | BOOLEAN — see the caveat below |
-| `OBJECT_COUNT` | how many objects an install would create (`15` for `confd_control`) |
+| `OBJECT_COUNT` | how many objects an install would create |
 | `OBJECTS` | the full declared inventory, newline-separated `TYPE\|NAME` in file order |
 
 > **`INSTALLED` reflects provenance, not existence.** It is `TRUE` only when
@@ -924,8 +922,8 @@ in order (verified on 2026.1):
 A module's artifact may carry **more than one statement**, and may create
 objects in **any schema the installing admin can write** — not only
 `PREPROC_RT`/`PREPROC`. Installing a `library-deployed` module is therefore
-arbitrary DDL executed under the `PREPROC_ADMIN` boundary, and the library's
-`confd_control` module is a real example: one install creates 15 objects.
+arbitrary DDL executed under the `PREPROC_ADMIN` boundary — one install can
+create many objects.
 
 What makes that reviewable rather than opaque is that the inventory is
 **declared before install and checked against the artifact**:

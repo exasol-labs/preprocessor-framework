@@ -207,7 +207,7 @@ is `PREPROC_RT.<NAME>_V<N>`, where `<NAME>` is the upper-case form of `<name>`
 | `deploy_mode` | Yes | string | `library-deployed` or `self-deployed` |
 | `sha256` | Conditional | string | hex digest of the artifact `.sql` file's bytes. **Required** when `deploy_mode = "library-deployed"`. Ignored (not required) for `self-deployed` |
 | `source` | Conditional | table | `{ repo = "...", ref = "..." }` — the module's own repo and pinned ref. **Required** when `deploy_mode = "self-deployed"` |
-| `objects` | Conditional | array of tables | `[[objects]]`, one entry per object the artifact creates: `{ type = "...", name = "..." }`, e.g. `{ type = "LUA SCRIPT", name = "PREPROC_RT.CONTROL_DATABASE_V1" }`. Every declared `name` MUST carry the module's `_V<N>` suffix. **MAY be omitted** when the artifact carries exactly one statement — the inventory is then derived as the single entry named by `script_name`. **REQUIRED** once the artifact carries more than one statement |
+| `objects` | Conditional | array of tables | `[[objects]]`, one entry per object the artifact creates: `{ type = "...", name = "..." }`, e.g. `{ type = "LUA SCRIPT", name = "PREPROC_RT.GEOCODE_V1" }`. Every declared `name` MUST carry the module's `_V<N>` suffix. **MAY be omitted** when the artifact carries exactly one statement — the inventory is then derived as the single entry named by `script_name`. **REQUIRED** once the artifact carries more than one statement |
 
 `phase`, the `_V<N>`/`version` agreement, the `deploy_mode` field rules, and
 the `[[objects]]` inventory are all validated by
@@ -264,11 +264,11 @@ and its Python companions in one artifact and stay `library-deployed`. The
 manifest declares the full inventory:
 
 ```toml
-name = "control_database"
-description = "Front door to the confd subsystem: expands control-database directives."
+name = "geocode"
+description = "Front door to a geocoding subsystem: expands GEOCODE directives."
 phase = "EXPAND"
-script_name = "PREPROC_RT.CONTROL_DATABASE_V1"
-function = "control_database"
+script_name = "PREPROC_RT.GEOCODE_V1"
+function = "geocode"
 version = 1
 min_framework = "1.0.0"
 sha256 = "…64 hex chars, over the whole composite artifact…"
@@ -280,27 +280,27 @@ value = "PREPROC_ADMIN"
 
 [[objects]]
 type = "LUA SCRIPT"
-name = "PREPROC_RT.CONTROL_DATABASE_V1"
+name = "PREPROC_RT.GEOCODE_V1"
 
 [[objects]]
 type = "PYTHON3 SCALAR SCRIPT"
-name = "PREPROC_RT.CONFD_JOB_V1"
+name = "PREPROC_RT.GEOCODE_RESOLVE_V1"
 ```
 
-and the matching artifact — `control_database_v1.sql` — carries both
+and the matching artifact — `geocode_v1.sql` — carries both
 statements, each wrapped in `--/` … `/` because each body contains a
 semicolon:
 
 ```sql
 --/
-CREATE OR REPLACE LUA SCRIPT PREPROC_RT.CONTROL_DATABASE_V1 AS
-function control_database(sqltext)
+CREATE OR REPLACE LUA SCRIPT PREPROC_RT.GEOCODE_V1 AS
+function geocode(sqltext)
     return sqltext;
 end
 /
 
 --/
-CREATE OR REPLACE PYTHON3 SCALAR SCRIPT PREPROC_RT.CONFD_JOB_V1(p VARCHAR(100))
+CREATE OR REPLACE PYTHON3 SCALAR SCRIPT PREPROC_RT.GEOCODE_RESOLVE_V1(p VARCHAR(100))
 RETURNS VARCHAR(100) AS
 def run(ctx):
     return ctx.p;
@@ -309,7 +309,7 @@ def run(ctx):
 
 The entry script is the object named by `script_name`; the Python UDF is a
 companion the entry script calls at runtime by its versioned name,
-`PREPROC_RT.CONFD_JOB_V1`. Both objects carry `_V1`, and a v2 of this module
+`PREPROC_RT.GEOCODE_RESOLVE_V1`. Both objects carry `_V1`, and a v2 of this module
 would ship both under `_V2`, even if the UDF's body did not change.
 
 ## Deploy modes

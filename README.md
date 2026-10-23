@@ -269,8 +269,7 @@ PREPROC INSTALL MODULE cast_shorthand
 ```
 
 An install is DDL run under `PREPROC_ADMIN`, and a module may ship more than one
-object — the library's `confd_control` installs 15, turning cluster
-administration into `CONTROL DATABASE …` / `CONTROL BUCKETFS …` SQL. So
+object — a Lua entry script plus Python UDFs or tables. So
 `PREPROC CATALOG MODULES` shows each module's full declared object inventory
 before you install, and an install is refused if the artifact disagrees with what
 its manifest declared. Afterwards, `PREPROC_RT.INSTALLED_MODULES` records the
@@ -280,8 +279,7 @@ sha256, and the deployed inventory.
 > **`min_framework` is advisory — nothing enforces it.** Verified on 2026.1: a
 > module declaring `min_framework = "99.0.0"` installs cleanly on framework
 > 0.7.1 and reports `installed`. It fails later, at use, not at install. Check a
-> module's `min_framework` against your own framework version yourself —
-> `confd_control` needs **0.7.0+**.
+> module's `min_framework` against your own framework version yourself.
 
 Prefer a toolchain? The `preproc module` CLI does the same from your machine
 (`uv run preproc module add cast_shorthand`) and adds `list` / `search` /
