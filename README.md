@@ -12,7 +12,7 @@
 
 https://github.com/user-attachments/assets/088eea8b-20c6-4e8a-928d-9560c3305060
 
-> Don't see the video? [Watch the demo](demo/Preprocessor_demo.mp4).
+> Don't see the video? [Watch the demo](https://github.com/user-attachments/assets/088eea8b-20c6-4e8a-928d-9560c3305060).
 
 ## What it solves
 
