@@ -252,13 +252,12 @@ PREPROC CATALOG MODULES FROM 'bucketfs:bfsdefault/<bucket>/preproc-lib-0.3.0.tar
 ```
 NAME            VERSION  PHASE      DEPLOY_MODE       INSTALLED  OBJECT_COUNT  OBJECTS
 cast_shorthand  1        TRANSLATE  library-deployed  FALSE      1             LUA SCRIPT|PREPROC_RT.CAST_SHORTHAND_V1
-confd_control   1        EXPAND     library-deployed  FALSE      15            PYTHON3 SCALAR SCRIPT|PREPROC_RT.CONFD_JOB_V1 …
 trailing_comma  2        TRANSLATE  library-deployed  FALSE      1             LUA SCRIPT|PREPROC_RT.ERGONOMICS_TRAILING_COMMA_V2
 ```
 
 `OBJECT_COUNT` and `OBJECTS` are your pre-install review: an install is DDL run
-under `PREPROC_ADMIN`, and a composite module such as `confd_control` creates
-**15 objects** across two schemas. Read that inventory before you approve it.
+under `PREPROC_ADMIN`, and a composite module can create many objects across
+several schemas. Read that inventory before you approve it.
 
 Then install. One statement per module — the examples in step 7 assume you
 installed both of these:
@@ -289,7 +288,8 @@ install. Installing is always the `PREPROC_ADMIN` boundary. Remember a user must
 
 > `min_framework` in the index is **advisory — nothing enforces it.** A module
 > requiring a newer framework than you run will install and report `installed`,
-> then fail at use. Check it yourself: `confd_control` needs framework 0.7.0+.
+> then fail at use. Check each module's `min_framework` against your framework
+> version yourself.
 
 ## 7. Verify — the evidence for your change record
 

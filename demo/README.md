@@ -1,42 +1,12 @@
 # Demos
 
-Two recording scripts and a long-form walkthrough. Every statement in every file
+A long-form, runnable walkthrough of the framework. Every statement in every file
 here has been executed end to end against Exasol **2026.1**.
 
-## The two videos
+## Walkthrough
 
-| | Script | Narration | Length |
-|---|---|---|---|
-| **1 — The framework** | [`framework_demo.sql`](framework_demo.sql) | [`framework_demo.md`](framework_demo.md) | ~9 min, 4 tabs + one non-DbVisualizer client |
-| **2 — The library** | [`library_demo.sql`](library_demo.sql) | [`library_demo.md`](library_demo.md) | ~8 min, 1 tab |
-
-**Demo 1** is how the framework works and how you use it: install, activate, the
-config → resolution → dispatch model, writing your own preprocessor, and the core
-beat — **three users in three tabs, each able to run a command the others cannot**.
-Then **client-scoped rules**: a `HELP` command that exists in DbVisualizer and
-nowhere else. Then the refresh contract and fail-open. It closes by installing one
-module from the library and handing off to demo 2.
-
-**Demo 2** is the library, in two halves. Consuming: browse the catalog, install
-over HTTPS, install from BucketFS on an air-gapped cluster, retarget, and the
-retire/reclaim lifecycle. Contributing: package the `SHOW TOP OBJECTS`
-preprocessor written in demo 1 into a real module and get it validated — the
-worked example is in [`library_demo/top_objects/`](library_demo/top_objects/) and
-passes every gate the library's CI applies.
-
-Watch them in order; demo 2 assumes demo 1 was watched, not run.
-
-> **ConfD is deliberately out of both videos.** It is a large enough topic to need
-> its own. The material is still here as reference:
-> [`08_guarded_module_schema.sql`](08_guarded_module_schema.sql) (re-homing all 15
-> `confd_control` objects into a guarded schema, delegating the surface to a
-> non-DBA role), and [`examples/confd_admin.md`](../examples/confd_admin.md) for
-> the `CONTROL DATABASE` / `CONTROL BUCKETFS` command reference and its setup.
-
-## Long-form walkthrough
-
-For someone evaluating the framework hands-on rather than watching. Same material,
-more depth, more explanation per statement.
+For someone evaluating the framework hands-on. Run the files in order; each one
+explains what it shows statement by statement.
 
 | File | Shows | Needs |
 |---|---|---|
@@ -46,8 +16,15 @@ more depth, more explanation per statement.
 | [`04_users_roles_refresh.sql`](04_users_roles_refresh.sql) | Targeting transformations at roles and users, and the refresh contract. | 2 sessions |
 | [`05_own_preprocessor.sql`](05_own_preprocessor.sql) | Write your own preprocessor in ~20 lines. No manifest, no registry, no toolchain. | — |
 | [`06_secure_schemas.sql`](06_secure_schemas.sql) | Preprocessors outside `PREPROC_RT`, and three independent privilege layers. | 3 sessions |
-| [`08_guarded_module_schema.sql`](08_guarded_module_schema.sql) | All 15 `confd_control` objects in a guarded schema, delegated to a non-DBA role. | `CONFD_CONNECTION` + a `sed` step |
 | [`99_teardown.sql`](99_teardown.sql) | Removes everything, back to a clean framework install. | — |
+
+## Worked module example
+
+[`top_objects/`](top_objects/) packages a hand-written `SHOW TOP [n] OBJECTS`
+preprocessor, like the one in file 05, as a complete library module: `module.toml`
+manifest, versioned artifact, and tests. It passes every gate the
+[`preprocessor-library`](https://github.com/exasol-labs/preprocessor-library) CI
+applies.
 
 ## Assumed starting point
 
@@ -59,9 +36,8 @@ more depth, more explanation per statement.
 - The preprocessor **not** activated. Every file activates it for the session only;
   nothing here touches the system-wide setting.
 
-**Rule ids are hardcoded** in a few places (`PREPROC DROP RULE 7` in demo 1,
-`DROP RULE 4` in demo 2) and are only correct on a clean install. Recreate the
-container between takes.
+**Rule ids are hardcoded** in a few places (`PREPROC DROP RULE 3` in file 01) and
+are only correct on a clean install. Recreate the container between runs.
 
 Only [`06_secure_schemas.sql`](06_secure_schemas.sql) creates a schema and a table,
 because privileges are its subject and you cannot `GRANT SELECT` on a subselect.
@@ -70,7 +46,7 @@ up, nothing to clean up.
 
 ### SQL client
 
-Both demos create Lua scripts, so your client must understand the EXAplus block
+The walkthrough creates Lua scripts, so your client must understand the EXAplus block
 delimiter: a lone `--/` opens a script body, a lone `/` closes it.
 
 > **GUI clients: turn OFF parameterized SQL.** DbVisualiser, DBeaver and other JDBC
@@ -79,7 +55,7 @@ delimiter: a lone `--/` opens a script body, a lone `/` closes it.
 > → Parameterized SQL → off*. DBeaver: *Preferences → Editors → SQL Editor →
 > uncheck "Use named parameters"*. EXAplus needs no change.
 
-## Setup for the BucketFS beats
+## Setup for file 03 (BucketFS)
 
 1. Get a library release tarball — from the
    [`preprocessor-library`](https://github.com/exasol-labs/preprocessor-library)
@@ -103,22 +79,6 @@ delimiter: a lone `--/` opens a script body, a lone `/` closes it.
    the native form is read off the cluster-local mount with no egress, which is the
    whole point.
 
-### ConfD setup (file 08 only)
-
-`confd_control` needs a ConfD user; the database's own `SYS` password will not work.
-From a container/node shell:
-
-```text
-confd_client user_create username: confd_gateway userid: 600 password: <password> \
-    login_enabled: True group: exausers encode_passwd: True
-confd_client user_modify username: confd_gateway \
-    additional_groups: '[exaadm, exadbadm, exastoradm, exabfsadm]'
-```
-
-Then fill in `CREATE CONNECTION CONFD_CONNECTION`. **Port** is 20003 on the first
-active node normally; a Docker single-node image exposes it on **443** — check
-`XMLRPCPort` in `/exa/etc/EXAConf`.
-
 ## Throwaway Docker instance
 
 Everything here was verified this way.
@@ -137,10 +97,6 @@ docker exec preproc-demo sh -c "grep -A4 'Bucket : default' /exa/etc/EXAConf"
 # then: echo -n '<ReadPasswd>' | base64 -d
 ```
 
-ConfD's XML-RPC port on this image is **443**, and the UDF must reach the node by its
-`PrivateNet` IP (e.g. `172.17.0.3`), not `127.0.0.1` — it connects from inside the
-cluster.
-
 ## Known rough edges
 
 - **Never put a trailing `--` comment on the same line as a `PREPROC …` command.**
@@ -148,9 +104,6 @@ cluster.
   *leading* comment lines it does not strip trailing ones — you get a puzzling
   `syntax error`. All comments in these files are on the line above.
   ([framework#8](https://github.com/exasol-labs/preprocessor-framework/issues/8))
-- **`confd_control` strips no comments at all**, so a `CONTROL …` statement with a
-  comment block glued in front of it is declined. Run the `CONTROL …` line on its
-  own. ([confd-via-sql#2](https://github.com/exasol-labs/confd-via-sql/issues/2))
 - **Never drop a script while an enabled rule still points at it.** A *throwing*
   module fails open cleanly; a *missing* one breaks the framework's admin surface
   (`PREPROC REFRESH` and friends fail with `attempt to call a nil value (field
@@ -158,8 +111,6 @@ cluster.
   is unaffected. Recovery: `ALTER SESSION SET sql_preprocessor_script = '';`, drop
   the dangling rule, re-activate. Drop rules before scripts and you never see it.
   ([framework#7](https://github.com/exasol-labs/preprocessor-framework/issues/7))
-- **Only one `CONTROL …` read per statement.** Two in one statement fails with
-  `syntax error, unexpected CONTROL_`.
 - `cast_shorthand` v1 does not rewrite a **string-literal** operand
   (`'42'::DECIMAL` returns unchanged, failing closed). Demo with a column or a
   numeric operand.

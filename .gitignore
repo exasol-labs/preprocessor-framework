@@ -28,3 +28,6 @@ htmlcov/
 # Generated deploy bundles (built by CI via `preproc bundle [--release]`)
 release.sql
 deploy_all.sql
+
+# Archived spec plans (kept locally, not tracked)
+specs/_recorded/

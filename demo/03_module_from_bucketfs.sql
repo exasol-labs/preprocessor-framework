@@ -69,14 +69,11 @@ GRANT ACCESS ON CONNECTION PREPROC_BFS TO PREPROC_ADMIN;
 
 PREPROC CATALOG MODULES FROM 'bucketfs:bfsdefault/default/preproc-lib-0.3.0.tar.gz';
 
--- Two things to point at in this result:
+-- One thing to point at in this result:
 --
 --  * `cast_shorthand` shows INSTALLED = TRUE. The catalog is source-agnostic but
 --    installation-aware: it knows you already have that module from file 02, even
 --    though you installed it from a completely different source.
---
---  * `confd_control` shows OBJECT_COUNT = 15. That is the composite module we
---    finish on in file 07 - fifteen objects, one install, one rule.
 --
 -- Compare against the HTTPS catalog from file 02. The tarball names an exact
 -- release; the default HTTPS source follows the mutable `latest` tag. They may be

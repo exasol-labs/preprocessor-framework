@@ -26,7 +26,6 @@ statement delimiter (required because Lua/Python bodies contain semicolons).
 | `demo_ping.sql` | EXPAND | `PING` → `SELECT 'PONG'`. The canonical authoring reference — read its in-body comments for the full EXPAND module contract. |
 | `demo_translate.sql` | TRANSLATE | Transpiles a `--!dialect:<name>`-marked statement to Exasol SQL via the companion `sqlglot` Python3 UDF. Deploys two objects (UDF + module). |
 | `demo_audit.sql` | REWRITE | Appends an inert `/* PREPROC_AUDIT user=<CURRENT_USER> */` comment. Demonstration only — writes to no table. |
-| `confd_admin.sql` | EXPAND | A real-world add-on: the `CONTROL DATABASE …` and `CONTROL BUCKETFS …` SQL command surfaces, routed through a generic Exasol ConfD gateway UDF. Deploys four objects and self-registers two `ROLE DBA` rules. Requires a `CONFD_CONNECTION` object (see the file header). Vendored from the companion confd-via-sql project. **Full command reference: [`confd_admin.md`](confd_admin.md).** |
 
 ## Ergonomics modules have moved
 
@@ -57,27 +56,11 @@ See [`docs/module-authoring.md`](../docs/module-authoring.md) for the module
 contract and [`docs/operations.md` § Module management](../docs/operations.md#module-management)
 for the CLI reference.
 
-## `confd_admin.sql` is superseded by a library module
-
-`confd_admin.sql` below is the original four-object, hand-deployed version of the
-ConfD command surface, kept here as a worked example of a self-registering
-multi-object module. The maintained version is the library's **`confd_control`**
-module — 15 objects, installable in one statement, versioned and reclaimable as a
-unit:
-
-```sql
-PREPROC INSTALL MODULE confd_control FOR ROLE DBA;
-```
-
-Prefer that for anything other than reading the example. See
-[`confd_admin.md`](confd_admin.md) for the command reference and the ConfD user
-setup both versions need.
-
 ## Registration scope
 
-Each example registers its rule against a role (`PREPROC_ADMIN` for the demos,
-`DBA` for confd). A user must **hold** that role for the rule to resolve to them
-(`PREPROC.REFRESH` walks the role-grant graph). Edit the trailing `RULE_ADD`
+Each example registers its rule against a role (`PREPROC_ADMIN`). A user must
+**hold** that role for the rule to resolve to them (`PREPROC.REFRESH` walks the
+role-grant graph). Edit the trailing `RULE_ADD`
 call to change the scope — e.g. `'USER', 'ALICE'` to bind the module to a single
 user instead of a role. The 6th argument, `client_pattern`, narrows the rule
 further to callers whose reported client name contains that substring; leave
