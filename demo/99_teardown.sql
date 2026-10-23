@@ -1,7 +1,7 @@
 -- =============================================================================
 -- DEMO 99 - TEARDOWN
 -- =============================================================================
--- Removes everything files 01-07 created and leaves the framework installed and
+-- Removes everything files 01-06 created and leaves the framework installed and
 -- clean - the state a fresh `release.sql` deploy produces, plus nothing.
 --
 -- Run as SYS or a DBA. Step through it; several sections need you to substitute
@@ -48,11 +48,9 @@ PREPROC LIST RULES;
 -- rule or live profile still references the module. Section 1 above is what makes
 -- these calls succeed.
 
-EXECUTE SCRIPT PREPROC.MODULE_RETIRE('confd_control', 1);
 EXECUTE SCRIPT PREPROC.MODULE_RETIRE('trailing_comma', 2);
 EXECUTE SCRIPT PREPROC.MODULE_RETIRE('cast_shorthand', 1);
 
-EXECUTE SCRIPT PREPROC.MODULE_RECLAIM('confd_control', 1);    -- drops all 15 objects
 EXECUTE SCRIPT PREPROC.MODULE_RECLAIM('trailing_comma', 2);
 EXECUTE SCRIPT PREPROC.MODULE_RECLAIM('cast_shorthand', 1);
 
@@ -79,9 +77,6 @@ DROP SCRIPT IF EXISTS FIN_GUARD.SHOW_PAYROLL_V1;
 DROP SCHEMA IF EXISTS FIN_GUARD CASCADE;
 DROP SCHEMA IF EXISTS FIN       CASCADE;
 
--- File 08, if you ran it:
-DROP SCHEMA IF EXISTS CONFD_GUARD CASCADE;
-
 
 -- -----------------------------------------------------------------------------
 -- 5. DROP THE DEMO USERS AND ROLES
@@ -101,7 +96,6 @@ DROP ROLE IF EXISTS DEMO_FIN     CASCADE;
 -- -----------------------------------------------------------------------------
 
 DROP CONNECTION IF EXISTS PREPROC_BFS;
-DROP CONNECTION IF EXISTS CONFD_CONNECTION;
 
 
 -- -----------------------------------------------------------------------------
@@ -143,7 +137,4 @@ SELECT PROFILE_HASH, CREATED_AT, ORPHANED_AT FROM PREPROC.PROFILES ORDER BY CREA
 --
 --   curl -k -X DELETE --user w:<write-pw> \
 --        https://<host>:2581/default/preproc-lib-0.3.0.tar.gz
---
--- ...or, now that confd_control is gone, note that it could have done this
--- itself:  CONTROL BUCKETFS DELETE FILE '...' FROM BUCKET 'default' IN SERVICE 'bfsdefault'
 -- =============================================================================

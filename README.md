@@ -134,17 +134,10 @@ If you would rather see the whole thing working than read about it,
 to end against Exasol 2026.1. It runs entirely at **session scope**, so it never
 touches the system-wide setting.
 
-- **~5 min** — [`demo/video_5min.sql`](demo/video_5min.sql): a 29-statement,
-  six-beat cut. One session, no tab switching.
-- **~20 min** — the technical sell: [`01`](demo/01_administration.sql) (activate
-  + a live fail-open proof), [`02`](demo/02_module_from_github.sql) (install a
-  published module), [`05`](demo/05_own_preprocessor.sql) (write your own in ~20
-  lines).
-- **~45 min** — the full evaluation, all seven files, for a DBA or security
-  reviewer who will ask hard questions.
-
-See [`demo/README.md`](demo/README.md) for the file-by-file map, the throwaway
-Docker recipe, and the prerequisites for the BucketFS and ConfD files.
+Run the files in order, [`01`](demo/01_administration.sql) through
+[`06`](demo/06_secure_schemas.sql), then [`99`](demo/99_teardown.sql) to clean
+up. See [`demo/README.md`](demo/README.md) for the file-by-file map, the throwaway
+Docker recipe, and the BucketFS prerequisites.
 
 ## Bring your own preprocessor
 
@@ -371,7 +364,7 @@ reference are in
 
 ## Documentation
 
-- [demo/](demo/) — **start here to see it work**: a guided, runnable demo suite verified against Exasol 2026.1, with 5-minute / 20-minute / 45-minute tracks
+- [demo/](demo/) — **start here to see it work**: a guided, runnable walkthrough verified against Exasol 2026.1
 - [docs/how-it-works.md](docs/how-it-works.md) — pipeline architecture, phase semantics, dispatch rules, and module authoring
 - [docs/operations.md](docs/operations.md) — install, activate, add rules, refresh, status, modes, module management, and troubleshooting
 - [docs/air-gap-runbook.md](docs/air-gap-runbook.md) — **no outbound internet?** the whole deploy-and-install procedure in one ordered page, verified on 2026.1

@@ -38,7 +38,7 @@ PREPROC CATALOG MODULES;
 --   INSTALLED               - TRUE only for a currently deployed version
 --   OBJECT_COUNT / OBJECTS  - EVERY object the install would create, declared up
 --                             front. You see the full blast radius before you
---                             run anything. (Watch this number in file 07.)
+--                             run anything.
 --
 -- Pinning: to install from a specific release, a fork, or your own private
 -- library, name the index explicitly. The default is a convenience, not a

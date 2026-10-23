@@ -161,7 +161,8 @@ PREPROC LIST RULES;
 --
 -- The Lua does not change. The function contract is identical whether the
 -- preprocessor is a twenty-line convenience or the front door to a whole
--- subsystem - which is exactly what file 07 installs.
+-- subsystem. `demo/top_objects/` is a command like this one packaged
+-- as a complete module: manifest, artifact, and tests.
 --
 -- One discipline to adopt now rather than later: the `_V1` suffix. Never
 -- `CREATE OR REPLACE` a module that is live in someone's session. Ship

@@ -213,10 +213,8 @@ ORDER BY 2, 4, 5;
 --
 -- The capability that could matter - fetching a module artifact from a bucket or
 -- over HTTPS - is in the locked schema, reachable only through the admin surface.
--- The same split is why file 07's ConfD module puts its read gateways in
--- `PREPROC_RT` but every privileged, state-changing admin script in `PREPROC`.
--- Composite modules can declare objects in either, and the catalog shows you
--- exactly which before you install:
+-- Composite modules can declare objects in either schema, and the catalog shows
+-- you exactly which before you install:
 
 SELECT NAME, OBJECTS FROM PREPROC_RT.INSTALLED_MODULES ORDER BY NAME;
 
@@ -245,5 +243,5 @@ SELECT NAME, OBJECTS FROM PREPROC_RT.INSTALLED_MODULES ORDER BY NAME;
 --   rights (the query) are three separate controls. All three are ordinary Exasol
 --   privileges, auditable with the dictionary views you already use.
 --
--- NEXT: 08_guarded_module_schema.sql - everything so far, applied to something real.
+-- NEXT: 99_teardown.sql - remove everything this walkthrough created.
 -- =============================================================================
